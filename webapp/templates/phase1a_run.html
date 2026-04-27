@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}{{ run.run_name }} · Phase 1A{% endblock %}
+{% block content %}
+  <section class="section two-col">
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">Run Summary</p>
+          <h2>{{ run.run_name }}</h2>
+        </div>
+      </div>
+      <ul class="compact-list">
+        <li>Generated at: {{ run.summary.generated_at }}</li>
+        <li>Documents: {{ run.summary.document_count }}</li>
+        <li>Matched documents: {{ run.summary.matched_document_count }}</li>
+        <li>Unmatched documents: {{ run.summary.unmatched_document_count }}</li>
+        <li>Matched pickings: {{ run.summary.matched_picking_count }}</li>
+        <li>Sources: {{ run.summary.source_count }}</li>
+      </ul>
+      <div class="divider"></div>
+      <p class="label">Artifacts</p>
+      <div class="artifact-row">
+        {% for key, absolute_path in run.artifacts.items() %}
+          <a class="artifact-pill" href="{{ request.url_for('phase1a_artifact', run_name=run.run_name, artifact_key=key) }}">{{ key }}</a>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">History</p>
+          <h2>Nearby runs</h2>
+        </div>
+      </div>
+      <div class="list-stack">
+        {% for item in recent_runs %}
+          <a class="list-item" href="{{ request.url_for('phase1a_run_detail', run_name=item.run_name) }}">
+            <div>
+              <strong>{{ item.run_name }}</strong>
+              <p>{{ item.generated_at }}</p>
+            </div>
+            <div class="list-metrics">
+              <span>{{ item.document_count }} docs</span>
+              <span>{{ item.matched_document_count }} matched</span>
+            </div>
+          </a>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+
+  {% if run.artifacts.get('dashboard_html') %}
+    <section class="section">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Inspection</p>
+          <h2>Dashboard view</h2>
+        </div>
+      </div>
+      <div class="card iframe-card">
+        <iframe
+          title="Phase 1A dashboard"
+          src="{{ request.url_for('phase1a_artifact', run_name=run.run_name, artifact_key='dashboard_html') }}"
+        ></iframe>
+      </div>
+    </section>
+  {% endif %}
+{% endblock %}

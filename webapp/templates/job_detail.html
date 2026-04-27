@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}{{ job.label }} · POD Sync Console{% endblock %}
+{% block content %}
+  <section class="section two-col">
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">Job</p>
+          <h2>{{ job.label }}</h2>
+        </div>
+        <span class="badge badge-{{ job.status }}">{{ job.status }}</span>
+      </div>
+      <ul class="compact-list">
+        <li>Job id: {{ job.job_id }}</li>
+        <li>Created: {{ job.created_at }}</li>
+        <li>Started: {{ job.started_at or "n/a" }}</li>
+        <li>Finished: {{ job.finished_at or "n/a" }}</li>
+        <li>Exit code: {{ job.exit_code if job.exit_code is not none else "n/a" }}</li>
+      </ul>
+      <div class="divider"></div>
+      <p class="label">Command</p>
+      <pre class="terminal">{{ job.command_display }}</pre>
+      <a class="text-link" href="{{ request.url_for('job_log', job_id=job.job_id) }}">Open raw log</a>
+    </div>
+
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">Metadata</p>
+          <h2>Execution context</h2>
+        </div>
+      </div>
+      <ul class="compact-list">
+        {% for key, value in job.metadata.items() %}
+          <li>{{ key }}: {{ value }}</li>
+        {% endfor %}
+      </ul>
+      {% if phase1a_run %}
+        <div class="divider"></div>
+        <p class="label">Phase 1A Output</p>
+        <a class="text-link" href="{{ request.url_for('phase1a_run_detail', run_name=phase1a_run.run_name) }}">Open run {{ phase1a_run.run_name }}</a>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">Log</p>
+        <h2>Captured stdout / stderr</h2>
+      </div>
+    </div>
+    <div class="card">
+      <pre class="terminal tall-terminal">{{ log_text or "No log output yet." }}</pre>
+    </div>
+  </section>
+{% endblock %}

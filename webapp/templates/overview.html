@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Overview · POD Sync Console{% endblock %}
+{% block content %}
+  <section class="grid grid-cards">
+    <article class="card stat-card">
+      <p class="label">Config File</p>
+      <h2>{{ config_snapshot.path }}</h2>
+      <p class="muted">{{ "Detected" if config_snapshot.exists else "Missing" }}</p>
+    </article>
+    <article class="card stat-card">
+      <p class="label">Storage Root</p>
+      <h2>{{ config_snapshot.storage_dir }}</h2>
+      <p class="muted">Local sync destination</p>
+    </article>
+    <article class="card stat-card">
+      <p class="label">Latest Phase 1A</p>
+      <h2>{% if latest_run %}{{ latest_run.summary.generated_at }}{% else %}No runs yet{% endif %}</h2>
+      <p class="muted">{% if latest_run %}{{ latest_run.summary.document_count }} docs · {{ latest_run.summary.matched_document_count }} matched{% else %}Run Phase 1A from the console{% endif %}</p>
+    </article>
+    <article class="card stat-card">
+      <p class="label">Recent Jobs</p>
+      <h2>{{ recent_jobs|length }}</h2>
+      <p class="muted">Latest queued / running / finished tasks</p>
+    </article>
+  </section>
+
+  <section class="section">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">Runtime Config</p>
+        <h2>Configured sources</h2>
+      </div>
+    </div>
+    <div class="grid grid-cards">
+      {% for source in config_snapshot.sources %}
+        <article class="card source-card">
+          <div class="card-top">
+            <h3>{{ source.label }}</h3>
+            <span class="badge {% if source.enabled %}badge-ok{% else %}badge-muted{% endif %}">{{ "Enabled" if source.enabled else "Disabled" }}</span>
+          </div>
+          <p class="muted">Warehouse: {{ source.warehouse or "n/a" }}</p>
+          <ul class="compact-list">
+            <li>Access token: {{ "present" if source.has_access_token else "missing" }}</li>
+            <li>Secret / refresh: {{ "present" if source.has_secret else "missing" }}</li>
+            {% if source.key == "cmc_onedrive" %}
+              <li>Root item id: {{ "present" if source.has_root_item_id else "missing" }}</li>
+            {% endif %}
+            {% if source.key == "emtc_gdrive" %}
+              <li>Folder id: {{ "present" if source.has_folder_id else "missing" }}</li>
+            {% endif %}
+          </ul>
+        </article>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="section two-col">
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">Phase 1A</p>
+          <h2>Recent runs</h2>
+        </div>
+        <a class="text-link" href="{{ request.url_for('phase1a_page') }}">Open Phase 1A</a>
+      </div>
+      {% if recent_runs %}
+        <div class="list-stack">
+          {% for run in recent_runs %}
+            <a class="list-item" href="{{ request.url_for('phase1a_run_detail', run_name=run.run_name) }}">
+              <div>
+                <strong>{{ run.run_name }}</strong>
+                <p>{{ run.generated_at }}</p>
+              </div>
+              <div class="list-metrics">
+                <span>{{ run.document_count }} docs</span>
+                <span>{{ run.matched_document_count }} matched</span>
+              </div>
+            </a>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="empty">No Phase 1A runs detected under `phase1a/out` yet.</p>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">Jobs</p>
+          <h2>Recent activity</h2>
+        </div>
+        <a class="text-link" href="{{ request.url_for('jobs_page') }}">Open Jobs</a>
+      </div>
+      {% if recent_jobs %}
+        <div class="list-stack">
+          {% for job in recent_jobs %}
+            <a class="list-item" href="{{ request.url_for('job_detail', job_id=job.job_id) }}">
+              <div>
+                <strong>{{ job.label }}</strong>
+                <p>{{ job.created_at }}</p>
+              </div>
+              <span class="badge badge-{{ job.status }}">{{ job.status }}</span>
+            </a>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="empty">No jobs have been submitted from the web console yet.</p>
+      {% endif %}
+    </div>
+  </section>
+{% endblock %}

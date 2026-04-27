@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block title %}Sync · POD Sync Console{% endblock %}
+{% block content %}
+  <section class="section">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">Operations</p>
+        <h2>Sync and verification controls</h2>
+      </div>
+    </div>
+    <div class="grid forms-grid">
+      <article class="card">
+        <h3>CMC OneDrive</h3>
+        <form method="post" action="{{ request.url_for('action_cmc_onedrive') }}" class="form-grid">
+          <label>Config path<input name="config_path" value="{{ ui_defaults.sync_config_path }}"></label>
+          <label>Mode
+            <select name="mode">
+              {% for value, label in sync_mode_options %}
+                <option value="{{ value }}">{{ label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Limit<input type="number" name="limit" value="{{ ui_defaults.cmc_limit }}"></label>
+          <label>Workers<input type="number" name="workers" value="{{ ui_defaults.cmc_workers }}"></label>
+          <label>Download file id<input name="download_file_id" placeholder="Only for specific-file mode"></label>
+          <label>Output dir<input name="output_dir" placeholder="./storage/pod/CMC"></label>
+          <label class="toggle"><input type="checkbox" name="recursive" checked>Recursive</label>
+          <label class="toggle"><input type="checkbox" name="incremental">Incremental</label>
+          <button type="submit">Run CMC OneDrive</button>
+        </form>
+      </article>
+
+      <article class="card">
+        <h3>EMTC Google Drive</h3>
+        <form method="post" action="{{ request.url_for('action_emtc_gdrive') }}" class="form-grid">
+          <label>Config path<input name="config_path" value="{{ ui_defaults.sync_config_path }}"></label>
+          <label>Mode
+            <select name="mode">
+              {% for value, label in sync_mode_options %}
+                <option value="{{ value }}">{{ label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Limit<input type="number" name="limit" value="{{ ui_defaults.emtc_limit }}"></label>
+          <label>Export mime type<input name="export_mime_type" placeholder="application/pdf"></label>
+          <label>Download file id<input name="download_file_id" placeholder="Only for specific-file mode"></label>
+          <label>Output dir<input name="output_dir" placeholder="./storage/pod/EMTC"></label>
+          <label class="toggle"><input type="checkbox" name="recursive" checked>Recursive</label>
+          <label class="toggle"><input type="checkbox" name="incremental">Incremental</label>
+          <button type="submit">Run EMTC Google Drive</button>
+        </form>
+      </article>
+
+      <article class="card">
+        <h3>Westerman API</h3>
+        <form method="post" action="{{ request.url_for('action_westerman_api') }}" class="form-grid">
+          <label>Config path<input name="config_path" value="{{ ui_defaults.sync_config_path }}"></label>
+          <label>Mode
+            <select name="mode">
+              {% for value, label in westerman_mode_options %}
+                <option value="{{ value }}">{{ label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Tracking number<input name="tracking_number" placeholder="Required"></label>
+          <label>Output dir<input name="output_dir" placeholder="./storage/pod/Westerman"></label>
+          <button type="submit">Run Westerman API</button>
+        </form>
+      </article>
+
+      <article class="card">
+        <h3>Verify Integrity</h3>
+        <form method="post" action="{{ request.url_for('action_verify_integrity') }}" class="form-grid">
+          <label>Config path<input name="config_path" value="{{ ui_defaults.sync_config_path }}"></label>
+          <label>Source
+            <select name="source">
+              {% for value, label in verify_source_options %}
+                <option value="{{ value }}" {% if value == ui_defaults.verify_source %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="toggle"><input type="checkbox" name="skip_sha256">Skip SHA256</label>
+          <button type="submit">Verify Integrity</button>
+        </form>
+      </article>
+
+      <article class="card">
+        <h3>Check Status</h3>
+        <form method="post" action="{{ request.url_for('action_check_status') }}" class="form-grid">
+          <label>Config path<input name="config_path" value="{{ ui_defaults.sync_config_path }}"></label>
+          <label>Source
+            <select name="source">
+              {% for value, label in status_source_options %}
+                <option value="{{ value }}" {% if value == ui_defaults.status_source %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="toggle"><input type="checkbox" name="quick" checked>Quick mode</label>
+          <button type="submit">Check Status</button>
+        </form>
+      </article>
+
+      <article class="card">
+        <h3>Runtime Snapshot</h3>
+        {% if config_snapshot.exists %}
+          <p class="muted">Config loaded from:</p>
+          <code class="inline-code">{{ config_snapshot.path }}</code>
+          <ul class="compact-list">
+            {% for source in config_snapshot.sources %}
+              <li>{{ source.label }} · {{ "enabled" if source.enabled else "disabled" }} · {{ source.warehouse or "n/a" }}</li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="empty">`config.local.json` was not found yet.</p>
+        {% endif %}
+      </article>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">Queue</p>
+        <h2>Recent sync jobs</h2>
+      </div>
+    </div>
+    <div class="list-stack">
+      {% for job in recent_jobs %}
+        <a class="list-item" href="{{ request.url_for('job_detail', job_id=job.job_id) }}">
+          <div>
+            <strong>{{ job.label }}</strong>
+            <p>{{ job.created_at }}</p>
+          </div>
+          <span class="badge badge-{{ job.status }}">{{ job.status }}</span>
+        </a>
+      {% endfor %}
+    </div>
+  </section>
+{% endblock %}

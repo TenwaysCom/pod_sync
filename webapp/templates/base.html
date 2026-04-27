@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}POD Sync Console{% endblock %}</title>
+  <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}">
+</head>
+<body>
+  <div class="shell">
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">Tenways POD Operations</p>
+        <h1>POD Sync Console</h1>
+        <p class="lede">Use the existing sync and Phase 1A entrypoints from a single control surface, without exposing an unrestricted shell.</p>
+      </div>
+      <div class="masthead-meta">
+        <span class="meta-pill">Storage: `./storage/pod`</span>
+        <span class="meta-pill">Jobs: `./runtime/jobs`</span>
+      </div>
+    </header>
+
+    <nav class="nav">
+      <a class="{% if page_id == 'overview' %}active{% endif %}" href="{{ request.url_for('overview') }}">Overview</a>
+      <a class="{% if page_id == 'sync' %}active{% endif %}" href="{{ request.url_for('sync_page') }}">Sync</a>
+      <a class="{% if page_id == 'phase1a' %}active{% endif %}" href="{{ request.url_for('phase1a_page') }}">Phase 1A</a>
+      <a class="{% if page_id == 'jobs' %}active{% endif %}" href="{{ request.url_for('jobs_page') }}">Jobs</a>
+    </nav>
+
+    {% if flash.notice %}
+      <div class="flash flash-ok">{{ flash.notice }}</div>
+    {% endif %}
+    {% if flash.error %}
+      <div class="flash flash-error">{{ flash.error }}</div>
+    {% endif %}
+
+    {% block content %}{% endblock %}
+  </div>
+</body>
+</html>

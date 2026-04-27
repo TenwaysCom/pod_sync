@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Jobs · POD Sync Console{% endblock %}
+{% block content %}
+  <section class="section">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">Execution Queue</p>
+        <h2>Recent jobs</h2>
+      </div>
+    </div>
+    {% if jobs %}
+      <div class="list-stack">
+        {% for job in jobs %}
+          <a class="list-item" href="{{ request.url_for('job_detail', job_id=job.job_id) }}">
+            <div>
+              <strong>{{ job.label }}</strong>
+              <p>{{ job.created_at }} · {{ job.command_display }}</p>
+            </div>
+            <div class="list-metrics">
+              <span class="badge badge-{{ job.status }}">{{ job.status }}</span>
+              {% if job.exit_code is not none %}
+                <span>exit {{ job.exit_code }}</span>
+              {% endif %}
+            </div>
+          </a>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="empty">No jobs recorded yet.</p>
+    {% endif %}
+  </section>
+{% endblock %}

@@ -1,4 +1,5 @@
 .venv/
+venv/
 __pycache__/
 *.pyc
 
@@ -9,6 +10,7 @@ storage/pod/*
 !storage/pod/.gitkeep
 
 phase1a/out/
+runtime/
 downloads/
 
 .DS_Store

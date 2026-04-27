@@ -27,6 +27,8 @@
   - 共享下载、manifest、完整性逻辑
 - `ops/`
   - 完整性校验和状态检查命令
+- `webapp/`
+  - FastAPI 管理界面，负责页面触发同步、巡检和 Phase 1A
 - `phase1a/`
   - Phase 1A 匹配、报表、dashboard
 - `tests/`
@@ -68,8 +70,8 @@ cp config.example.json config.local.json
 ## 快速开始
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 cp config.example.json config.local.json
 ```
@@ -96,6 +98,23 @@ Phase 1A 文档入口：
 - [DEPLOYMENT.md](/home/rick/pod_sync/phase1a/docs/DEPLOYMENT.md)
 - [RUNBOOK.md](/home/rick/pod_sync/phase1a/docs/RUNBOOK.md)
 - [clients/README.md](/home/rick/pod_sync/clients/README.md)
+- [webapp/README.md](/home/rick/pod_sync/webapp/README.md)
+
+## Web Console
+
+安装依赖后可以直接启动 FastAPI 管理界面：
+
+```bash
+python3 -m uvicorn webapp.app:app --host 0.0.0.0 --port 8080
+```
+
+页面里当前支持：
+
+- 触发 `CMC / EMTC / Westerman` 同步入口
+- 触发 `verify_sync_integrity` 和 `check_sync_status`
+- 触发 `Phase 1A`
+- 查看任务日志
+- 直接在网页内打开最新 `Phase 1A dashboard`
 
 Phase 1A 的主要产物：
 
