@@ -1,0 +1,28 @@
+{
+  "items": [
+    {
+      "odoo_picking_id": 101,
+      "picking_name": "EU22910",
+      "tracking_numbers": ["WCB2BOUT20102"],
+      "eligible": true,
+      "in_scope": true,
+      "company_id": 1
+    },
+    {
+      "odoo_picking_id": 102,
+      "picking_name": "WH/OUT/15504",
+      "tracking_numbers": ["WHOUT15504"],
+      "eligible": true,
+      "in_scope": true,
+      "company_id": 1
+    },
+    {
+      "odoo_picking_id": 103,
+      "picking_name": "3SHOHR465528827",
+      "tracking_numbers": ["3SHOHR465528827"],
+      "eligible": true,
+      "in_scope": true,
+      "company_id": 1
+    }
+  ]
+}

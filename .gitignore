@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+
+config.local.json
+config.json
+
+storage/pod/*
+!storage/pod/.gitkeep
+
+phase1a/out/
+downloads/
+
+.DS_Store

@@ -1,0 +1,45 @@
+{
+  "download": {
+    "base_dir": "./storage/pod"
+  },
+  "cmc_onedrive": {
+    "enabled": true,
+    "access_token": "PASTE_ONEDRIVE_TOKEN_IF_NEEDED",
+    "tenant_id": "common",
+    "client_id": "",
+    "client_secret": "",
+    "refresh_token": "",
+    "scope": "https://graph.microsoft.com/.default offline_access",
+    "drive_id": "OPTIONAL_DRIVE_ID",
+    "shared_url": "PASTE_ONEDRIVE_SHARE_URL_IF_USING_LINK_OR_FINAL_LIVE_URL_WITH_AUTHKEY",
+    "root_item_id": "",
+    "root_path": "/CMC/POD",
+    "warehouse": "CMC",
+    "timeout_seconds": 30
+  },
+  "emtc_gdrive": {
+    "enabled": true,
+    "access_token": "PASTE_GOOGLE_DRIVE_TOKEN",
+    "client_id": "",
+    "client_secret": "",
+    "refresh_token": "",
+    "folder_id": "PASTE_FOLDER_ID",
+    "warehouse": "EMTC",
+    "shared_drive_id": "",
+    "timeout_seconds": 30
+  },
+  "westerman_api": {
+    "enabled": true,
+    "base_url": "https://example.com/api",
+    "api_key": "PASTE_API_KEY",
+    "api_key_header": "Authorization",
+    "lookup_path": "/pod",
+    "http_method": "GET",
+    "tracking_param_name": "tracking_number",
+    "download_url_field": "data.download_url",
+    "file_name_field": "data.file_name",
+    "base64_content_field": "",
+    "warehouse": "Westerman",
+    "timeout_seconds": 30
+  }
+}

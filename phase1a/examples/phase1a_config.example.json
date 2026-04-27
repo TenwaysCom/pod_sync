@@ -1,0 +1,17 @@
+{
+  "job_id": "phase1a-backfill-demo-20260424",
+  "output_dir": "../out/demo_run",
+  "odoo_scope_path": "./odoo_scope.example.json",
+  "sources": [
+    {
+      "manifest_path": "./sample_manifest_cmc.jsonl",
+      "source_name": "CMC",
+      "source_type": "onedrive"
+    },
+    {
+      "manifest_path": "./sample_manifest_emtc.jsonl",
+      "source_name": "EMTC",
+      "source_type": "gdrive"
+    }
+  ]
+}
