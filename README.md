@@ -45,6 +45,7 @@ cp config.example.json config.local.json
 ```
 
 然后把真实参数写到 `config.local.json`。
+正式运行统一使用 `config.local.json`，这个文件默认不纳入 git。
 
 当前建议使用这些配置段名：
 
