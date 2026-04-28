@@ -1,0 +1,434 @@
+{% extends "base.html" %}
+{% block title %}报告 · POD 同步控制台{% endblock %}
+{% block content %}
+  <section class="grid grid-cards">
+    <a class="card stat-card stat-card-link" href="{{ request.url_for('odoo_missing_page') }}?tracking_status=&state=&pod_link_status=">
+      <p class="label">Odoo 全量出库</p>
+      <h2>{% if odoo_snapshot %}{{ odoo_snapshot.totals.total_done_outgoing }}{% else %}0{% endif %}</h2>
+      <p class="muted">
+        {% if odoo_snapshot %}all carriers · done {{ odoo_snapshot.totals.done_count }} / cancel {{ odoo_snapshot.totals.cancel_count }}{% else %}当前所有 outgoing 总明细{% endif %}
+      </p>
+    </a>
+    <article class="card stat-card">
+      <p class="label">POD 相关单池</p>
+      <h2>{% if pod_scope_analysis and pod_scope_analysis.overview %}{{ pod_scope_analysis.overview.total_count }}{% else %}0{% endif %}</h2>
+      <p class="muted">默认只看 carrier_id 24 / 25，也就是 EMTC / CMC</p>
+    </article>
+    <a class="card stat-card stat-card-link" href="{{ request.url_for('compare_page') }}?status=matched_any">
+      <p class="label">POD 匹配率</p>
+      <h2>{% if compare_snapshot %}{{ compare_snapshot.totals.match_rate_percent }}%{% else %}0%{% endif %}</h2>
+      <p class="muted">同承运商、已取消、其他承运商均计入命中</p>
+    </a>
+    <a class="card stat-card stat-card-link" href="{{ request.url_for('compare_page') }}?status=matched_cancelled">
+      <p class="label">命中已取消单</p>
+      <h2>{% if compare_snapshot %}{{ compare_snapshot.totals.matched_cancelled_count }}{% else %}0{% endif %}</h2>
+      <p class="muted">POD 能找到 Odoo，但单据状态是 cancel</p>
+    </a>
+    <a class="card stat-card stat-card-link" href="{{ request.url_for('compare_page') }}?status=matched_other_carrier">
+      <p class="label">命中其他承运商</p>
+      <h2>{% if compare_snapshot %}{{ compare_snapshot.totals.matched_other_carrier_count }}{% else %}0{% endif %}</h2>
+      <p class="muted">Odoo 里有单，但当前 carrier 已不是 CMC / EMTC</p>
+    </a>
+    <a class="card stat-card stat-card-link" href="{{ request.url_for('compare_page') }}?status=odoo_not_found">
+      <p class="label">按匹配键未命中 Odoo</p>
+      <h2>{% if compare_snapshot %}{{ compare_snapshot.totals.not_found_count }}{% else %}0{% endif %}</h2>
+      <p class="muted">POD 已识别匹配键，但在 Odoo 总明细中未命中</p>
+    </a>
+    {% if compare_snapshot %}
+      <a class="card stat-card stat-card-link" href="{{ request.url_for('phase1a_run_detail', run_name=compare_snapshot.phase1a.run_name) }}?status=needs_review">
+        <p class="label">识别待处理</p>
+        <h2>{{ compare_snapshot.totals.review_document_count }}</h2>
+        <p class="muted">尚未进入自动对比的文档</p>
+      </a>
+    {% else %}
+      <article class="card stat-card">
+        <p class="label">识别待处理</p>
+        <h2>0</h2>
+        <p class="muted">尚未进入自动对比的文档</p>
+      </article>
+    {% endif %}
+  </section>
+
+  <section class="section two-col">
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">刷新</p>
+          <h2>统一报告</h2>
+        </div>
+      </div>
+      <p class="muted">一次刷新会先拉最新 Odoo 总明细，再重建最新 POD vs Odoo 对比。</p>
+      <form method="post" action="{{ request.url_for('action_refresh_report') }}" class="stack-form compact-form" data-submit-state data-pending-notice="统一报告正在刷新，请稍候…">
+        <input type="hidden" name="detail_url" value="{{ odoo_missing_detail_url }}">
+        <button type="submit" class="action-button" data-loading-text="正在刷新统一报告…">刷新统一报告</button>
+      </form>
+      <ul class="compact-list">
+        <li>Odoo 快照：{% if odoo_snapshot %}{{ odoo_snapshot.generated_at }}{% else %}无{% endif %}</li>
+        <li>POD 对比：{% if compare_snapshot %}{{ compare_snapshot.generated_at }}{% else %}无{% endif %}</li>
+        <li>最新识别批次：{% if compare_snapshot %}<span class="mono">{{ compare_snapshot.phase1a.run_name }}</span>{% else %}无{% endif %}</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">下载</p>
+          <h2>统一产物入口</h2>
+        </div>
+      </div>
+      <div class="artifact-list">
+        <div>
+          <p class="label">Odoo 缺失</p>
+          <div class="artifact-actions">
+            {% for artifact_key, artifact_label in odoo_missing_artifact_labels.items() %}
+              <a class="artifact-link" href="{{ request.url_for('odoo_missing_artifact', artifact_key=artifact_key) }}">{{ artifact_label }}</a>
+            {% endfor %}
+          </div>
+        </div>
+        <div>
+          <p class="label">POD vs Odoo</p>
+          <div class="artifact-actions">
+            {% for artifact_key, artifact_label in pod_compare_artifact_labels.items() %}
+              <a class="artifact-link" href="{{ request.url_for('compare_artifact', artifact_key=artifact_key) }}">{{ artifact_label }}</a>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">POD 相关 Odoo 单池</p>
+          <h2>先看与 POD 真正相关的 EMTC / CMC 范围</h2>
+        </div>
+      </div>
+      {% if pod_scope_analysis and pod_scope_analysis.overview %}
+        <div class="grid grid-cards">
+          <article class="card stat-card stat-card-inline">
+            <p class="label">单池总数</p>
+            <h2>{{ pod_scope_analysis.overview.total_count }}</h2>
+            <p class="muted">EMTC / CMC 当前总明细范围</p>
+          </article>
+          <article class="card stat-card stat-card-inline">
+            <p class="label">缺失 tracking number</p>
+            <h2>{{ pod_scope_analysis.overview.without_tracking_count }}</h2>
+            <p class="muted">直接影响 EMTC 侧按 tracking number 匹配</p>
+          </article>
+          <article class="card stat-card stat-card-inline">
+            <p class="label">待写入 POD 链接</p>
+            <h2>{{ pod_scope_analysis.overview.without_pod_link_count }}</h2>
+            <p class="muted">当前还没有写回 `x_studio_pod_link`</p>
+          </article>
+          <article class="card stat-card stat-card-inline">
+            <p class="label">可直接推送</p>
+            <h2>{{ pod_scope_analysis.overview.ready_for_push_count }}</h2>
+            <p class="muted">`done` 且 `x_studio_pod_link` 为空</p>
+          </article>
+        </div>
+
+        <div class="files-table-wrap">
+          <table class="files-table analysis-state-table">
+            <thead>
+              <tr>
+                <th>来源</th>
+                <th>单据数</th>
+                <th>done / cancel</th>
+                <th>已有tracking number数量</th>
+                <th>tracking number覆盖率</th>
+                <th>已有 POD 链接</th>
+                <th>POD 链接覆盖率</th>
+                <th>可推送</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in pod_scope_analysis.carrier_rows %}
+                <tr class="file-row">
+                  <td>
+                    <div class="file-primary">
+                      <strong>{{ row.carrier_name }}</strong>
+                      <div class="file-meta">carrier_id = {{ row.carrier_id }}</div>
+                    </div>
+                  </td>
+                  <td>{{ row.total_count }}</td>
+                  <td>{{ row.done_count }} / {{ row.cancel_count }}</td>
+                  <td>{{ row.with_tracking_count }}</td>
+                  <td>{{ row.tracking_coverage_percent }}%</td>
+                  <td>{{ row.with_pod_link_count }}</td>
+                  <td>{{ row.pod_link_coverage_percent }}%</td>
+                  <td>{{ row.ready_for_push_count }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="empty">还没有可用的 POD 相关 Odoo 单池快照。</p>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">Odoo 数据分析</p>
+          <h2>字段来源、全量状态与实际作用</h2>
+        </div>
+        <a class="text-link" href="{{ request.url_for('odoo_missing_page') }}">打开明细页</a>
+      </div>
+      {% if odoo_snapshot and odoo_analysis %}
+        <div class="grid grid-cards">
+          <article class="card stat-card stat-card-inline">
+            <p class="label">数据来源</p>
+            <h2 class="mono wrap-anywhere">{{ odoo_analysis.overview.data_source or "-" }}</h2>
+            <p class="muted">当前控制台读取的 Odoo 全量出库接口</p>
+          </article>
+          <article class="card stat-card stat-card-inline">
+            <p class="label">承运商总数</p>
+            <h2>{{ odoo_snapshot.totals.carrier_count }}</h2>
+            <p class="muted">这决定了“命中其他承运商”和“按匹配键未命中 Odoo”是否能被正确区分</p>
+          </article>
+          <article class="card stat-card stat-card-inline">
+            <p class="label">全量已有 POD 链接</p>
+            <h2>{{ odoo_analysis.overview.with_pod_link_count }}</h2>
+            <p class="muted">所有 carrier 里已写回 `x_studio_pod_link` 的单据</p>
+          </article>
+          <article class="card stat-card stat-card-inline">
+            <p class="label">全量待写入</p>
+            <h2>{{ odoo_analysis.overview.without_pod_link_count }}</h2>
+            <p class="muted">所有 carrier 里还没写回 POD 链接的单据</p>
+          </article>
+        </div>
+
+        <div class="files-table-wrap">
+          <table class="files-table analysis-field-table">
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>来源</th>
+                <th>作用</th>
+                <th>明细</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in odoo_analysis.field_rows %}
+                <tr class="file-row">
+                  <td><span class="mono">{{ row.field_name }}</span></td>
+                  <td class="file-path-cell">{{ row.source }}</td>
+                  <td class="file-path-cell">{{ row.purpose }}</td>
+                  <td class="file-path-cell">{{ row.detail }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+
+      {% else %}
+        <p class="empty">还没有可用的 Odoo 数据分析快照。</p>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">全量 Odoo 汇总</p>
+          <h2>全部年份按承运商看 Odoo 总明细</h2>
+        </div>
+      </div>
+      {% if all_time_analysis and all_time_analysis.overview %}
+        <div class="grid grid-cards">
+          <article class="card stat-card stat-card-inline">
+            <p class="label">全量总单数</p>
+            <h2>{{ all_time_analysis.overview.total_count }}</h2>
+            <p class="muted">全部年份的 outgoing 明细</p>
+          </article>
+          <article class="card stat-card stat-card-inline">
+            <p class="label">缺失运单</p>
+            <h2>{{ all_time_analysis.overview.without_tracking_count }}</h2>
+            <p class="muted">直接影响 POD 对比与回填覆盖率</p>
+          </article>
+          <article class="card stat-card stat-card-inline">
+            <p class="label">已有 POD 链接</p>
+            <h2>{{ all_time_analysis.overview.with_pod_link_count }}</h2>
+            <p class="muted">全部年份中已经写回 Odoo 的数量</p>
+          </article>
+          <article class="card stat-card stat-card-inline">
+            <p class="label">全量可推送</p>
+            <h2>{{ all_time_analysis.overview.ready_for_push_count }}</h2>
+            <p class="muted">全部年份里 `done` 且 `x_studio_pod_link` 为空</p>
+          </article>
+        </div>
+
+        <div class="files-table-wrap">
+          <table class="files-table odoo-summary-table">
+            <thead>
+              <tr>
+                <th>承运商</th>
+                <th>总单数</th>
+                <th>done</th>
+                <th>cancel</th>
+                <th>有 tracking number</th>
+                <th>缺失 tracking number</th>
+                <th>缺失率</th>
+                <th>已有 POD 链接</th>
+                <th>POD 链接覆盖率</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in all_time_analysis.carrier_rows %}
+                <tr class="file-row">
+                  <td>
+                    <div class="file-primary">
+                      <strong>{{ row.carrier_name }}</strong>
+                      <div class="file-meta">carrier_id = {{ row.carrier_id }}</div>
+                    </div>
+                  </td>
+                  <td>{{ row.total_done_outgoing }}</td>
+                  <td>{{ row.done_count }}</td>
+                  <td>{{ row.cancel_count }}</td>
+                  <td>{{ row.with_tracking_number }}</td>
+                  <td>{{ row.without_tracking_number }}</td>
+                  <td>{{ row.missing_rate_percent }}%</td>
+                  <td>{{ row.with_pod_link_count }}</td>
+                  <td>{{ row.pod_link_coverage_percent }}%</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="empty">还没有可用的全量 Odoo 汇总数据。</p>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">对比判断</p>
+          <h2>把最新 POD 识别结果拆成可行动的几类</h2>
+        </div>
+      </div>
+      {% if compare_analysis and compare_analysis.status_rows %}
+        <div class="files-table-wrap">
+          <table class="files-table analysis-state-table">
+            <thead>
+              <tr>
+                <th>分类</th>
+                <th>数量</th>
+                <th>含义</th>
+                <th>建议动作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in compare_analysis.status_rows %}
+                <tr class="file-row">
+                  <td><strong>{{ row.label }}</strong></td>
+                  <td>{{ row.count }}</td>
+                  <td class="file-path-cell">{{ row.description }}</td>
+                  <td class="file-path-cell">{{ row.action }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="empty">还没有可用的 POD 对比分析。</p>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">POD vs Odoo</p>
+          <h2>最新识别对比汇总</h2>
+        </div>
+        <a class="text-link" href="{{ request.url_for('compare_page') }}">打开对比明细页</a>
+      </div>
+      <p class="muted">当前看的是最新一批 POD 识别结果对 Odoo 总明细的对比。在你现在的默认配置下，这一批识别会读取全部 manifest，所以这里是全量 POD 对比，不是只看 2026 年。</p>
+      {% if compare_snapshot and compare_snapshot.summary_rows %}
+        <div class="files-table-wrap">
+          <table class="files-table compare-summary-table">
+            <thead>
+              <tr>
+                <th>来源</th>
+                <th>POD唯一匹配键数</th>
+                <th>匹配成功</th>
+                <th>命中已取消单</th>
+                <th>命中其他承运商</th>
+                <th>按匹配键未命中 Odoo</th>
+                <th>Odoo 命中多条</th>
+                <th>匹配率</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in compare_snapshot.summary_rows %}
+                <tr class="file-row">
+                  <td>
+                    <div class="file-primary">
+                      <strong>{{ row.source_name }}</strong>
+                      <div class="file-meta">carrier_id = {{ row.carrier_id }}</div>
+                    </div>
+                  </td>
+                  <td>{{ row.unique_identifier_count }}</td>
+                  <td>{{ row.matched_count }}</td>
+                  <td>{{ row.matched_cancelled_count }}</td>
+                  <td>{{ row.matched_other_carrier_count }}</td>
+                  <td>{{ row.not_found_count }}</td>
+                  <td>{{ row.ambiguous_count }}</td>
+                  <td>{{ row.match_rate_percent }}%</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="empty">还没有 POD 对比快照。</p>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">其他承运商分布</p>
+          <h2>命中其他承运商时，实际落在哪些 Odoo carrier</h2>
+        </div>
+        <a class="text-link" href="{{ request.url_for('compare_page') }}?status=matched_other_carrier">打开明细页</a>
+      </div>
+      {% if compare_analysis and compare_analysis.other_carrier_rows %}
+        <div class="files-table-wrap">
+          <table class="files-table analysis-state-table">
+            <thead>
+              <tr>
+                <th>Odoo 承运商</th>
+                <th>命中数</th>
+                <th>样本出库单</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in compare_analysis.other_carrier_rows %}
+                <tr class="file-row">
+                  <td><strong>{{ row.carrier_name }}</strong></td>
+                  <td>{{ row.count }}</td>
+                  <td class="file-path-cell mono wrap-anywhere">{{ row.sample_picking_names }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="empty">当前还没有命中其他承运商的记录。</p>
+      {% endif %}
+    </div>
+  </section>
+{% endblock %}

@@ -1,69 +1,348 @@
 {% extends "base.html" %}
-{% block title %}{{ run.run_name }} · Phase 1A{% endblock %}
+{% block title %}{{ run.run_name }} · POD 识别运行{% endblock %}
 {% block content %}
-  <section class="section two-col">
-    <div class="card">
-      <div class="section-head section-head-tight">
-        <div>
-          <p class="eyebrow">Run Summary</p>
-          <h2>{{ run.run_name }}</h2>
-        </div>
-      </div>
-      <ul class="compact-list">
-        <li>Generated at: {{ run.summary.generated_at }}</li>
-        <li>Documents: {{ run.summary.document_count }}</li>
-        <li>Matched documents: {{ run.summary.matched_document_count }}</li>
-        <li>Unmatched documents: {{ run.summary.unmatched_document_count }}</li>
-        <li>Matched pickings: {{ run.summary.matched_picking_count }}</li>
-        <li>Sources: {{ run.summary.source_count }}</li>
-      </ul>
-      <div class="divider"></div>
-      <p class="label">Artifacts</p>
-      <div class="artifact-row">
-        {% for key, absolute_path in run.artifacts.items() %}
-          <a class="artifact-pill" href="{{ request.url_for('phase1a_artifact', run_name=run.run_name, artifact_key=key) }}">{{ key }}</a>
-        {% endfor %}
-      </div>
-    </div>
+  <section class="grid grid-cards">
+    <article class="card stat-card">
+      <p class="label">运行名称</p>
+      <h2>{{ run.run_name }}</h2>
+      <p class="muted">生成时间：{{ run.summary.generated_at }}</p>
+    </article>
+    <article class="card stat-card">
+      <p class="label">有效文档</p>
+      <h2>{{ run.summary.document_count }}</h2>
+      <p class="muted">当前运行识别前已完成去重</p>
+    </article>
+    <article class="card stat-card">
+      <p class="label">可推送 / 待处理</p>
+      <h2>{{ run.summary.ready_document_count or run.summary.matched_document_count }} / {{ run.summary.review_document_count or run.summary.unmatched_document_count }}</h2>
+      <p class="muted">当前这批结果的主判断指标</p>
+    </article>
+    <article class="card stat-card">
+      <p class="label">Payload 条数</p>
+      <h2>{{ run.summary.payload_item_count or run.summary.matched_picking_count }}</h2>
+      <p class="muted">准备交给 Odoo 的数据条数</p>
+    </article>
+  </section>
 
-    <div class="card">
-      <div class="section-head section-head-tight">
-        <div>
-          <p class="eyebrow">History</p>
-          <h2>Nearby runs</h2>
+  <section class="phase-workspace">
+    <aside class="phase-sidebar">
+      <div class="card">
+        <div class="section-head section-head-tight">
+          <div>
+            <p class="eyebrow">运行摘要</p>
+            <h2>{{ run.run_name }}</h2>
+          </div>
+        </div>
+        <ul class="compact-list kv-list">
+          <li>
+            <span class="kv-label">处理模式</span>
+            <span class="kv-value">{{ "仅解析直推" if run.summary.processing_mode == "parse_only" else "Scope 匹配" }}</span>
+          </li>
+          <li>
+            <span class="kv-label">生成时间</span>
+            <span class="kv-value">{{ run.summary.generated_at }}</span>
+          </li>
+          <li>
+            <span class="kv-label">同步配置</span>
+            <span class="kv-value mono">{{ run.summary.sync_config_path or "无" }}</span>
+          </li>
+          <li>
+            <span class="kv-label">输出目录</span>
+            <span class="kv-value mono">{{ run.summary.output_dir }}</span>
+          </li>
+          <li>
+            <span class="kv-label">Odoo Scope</span>
+            <span class="kv-value mono">{{ run.summary.odoo_scope_path or "当前模式不需要" }}</span>
+          </li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="section-head section-head-tight">
+          <div>
+            <p class="eyebrow">常用产物</p>
+            <h2>直接下载</h2>
+          </div>
+        </div>
+        <div class="artifact-actions">
+          {% for key in primary_artifact_keys %}
+            {% if run.artifacts.get(key) %}
+              <a class="artifact-link" href="{{ request.url_for('phase1a_artifact', run_name=run.run_name, artifact_key=key) }}">
+                {{ artifact_labels[key] if artifact_labels is defined and key in artifact_labels else key }}
+              </a>
+            {% endif %}
+          {% endfor %}
         </div>
       </div>
-      <div class="list-stack">
-        {% for item in recent_runs %}
-          <a class="list-item" href="{{ request.url_for('phase1a_run_detail', run_name=item.run_name) }}">
-            <div>
-              <strong>{{ item.run_name }}</strong>
-              <p>{{ item.generated_at }}</p>
-            </div>
-            <div class="list-metrics">
-              <span>{{ item.document_count }} docs</span>
-              <span>{{ item.matched_document_count }} matched</span>
-            </div>
-          </a>
-        {% endfor %}
+
+      <details class="card details-card details-card-block">
+        <summary>技术产物</summary>
+        <div class="artifact-actions artifact-actions-secondary">
+          {% for key in secondary_artifact_keys %}
+            {% if run.artifacts.get(key) %}
+              <a class="artifact-link" href="{{ request.url_for('phase1a_artifact', run_name=run.run_name, artifact_key=key) }}">
+                {{ artifact_labels[key] if artifact_labels is defined and key in artifact_labels else key }}
+              </a>
+            {% endif %}
+          {% endfor %}
+        </div>
+      </details>
+    </aside>
+
+    <div class="phase-main">
+      <div class="card">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">主视图</p>
+          </div>
+          <div class="header-actions">
+            <form method="post" action="{{ request.url_for('delete_phase1a_run_action', run_name=run.run_name) }}" class="inline-action-form" onsubmit="return confirm('确认删除运行 {{ run.run_name }} 吗？')">
+              <input type="hidden" name="redirect_to" value="{{ request.url_for('phase1a_page') }}">
+              <button type="submit" class="danger-button">删除运行</button>
+            </form>
+          </div>
+        </div>
+
+        <div class="toolbar filter-toolbar phase-doc-toolbar">
+          <label class="search-field">
+            搜索
+            <input id="phaseDocSearch" type="search" placeholder="文件名、目录、tracking number、出库单号">
+          </label>
+          <label>
+            状态
+            <select id="phaseDocStatus">
+              <option value="">全部状态</option>
+            </select>
+          </label>
+          <label>
+            来源
+            <select id="phaseDocSource">
+              <option value="">全部来源</option>
+            </select>
+          </label>
+          <label>
+            原因
+            <select id="phaseDocReason">
+              <option value="">全部原因</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="filter-meta">
+          <div id="phaseDocMeta">等待加载文档列表。</div>
+          <div class="pagination-controls">
+            <label class="page-size-label">
+              每页条数
+              <select id="phaseDocPageSize">
+                <option value="25" selected>25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+              </select>
+            </label>
+            <button id="phaseDocPrev" type="button" class="pager-button">上一页</button>
+            <span id="phaseDocPageIndicator" class="pagination-current">第 1 / 1 页</span>
+            <button id="phaseDocNext" type="button" class="pager-button">下一页</button>
+          </div>
+        </div>
+
+        <div class="files-table-wrap phase-doc-table-wrap">
+          <table class="files-table phase-doc-table">
+            <thead>
+              <tr>
+                <th>文档</th>
+                <th>状态</th>
+                <th>来源</th>
+                <th>匹配键 / 原因</th>
+                <th>路径与链接</th>
+              </tr>
+            </thead>
+            <tbody id="phaseDocBody">
+              <tr class="file-row">
+                <td colspan="5" class="empty-cell">正在加载文档列表…</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   </section>
 
-  {% if run.artifacts.get('dashboard_html') %}
-    <section class="section">
-      <div class="section-head">
-        <div>
-          <p class="eyebrow">Inspection</p>
-          <h2>Dashboard view</h2>
-        </div>
-      </div>
-      <div class="card iframe-card">
-        <iframe
-          title="Phase 1A dashboard"
-          src="{{ request.url_for('phase1a_artifact', run_name=run.run_name, artifact_key='dashboard_html') }}"
-        ></iframe>
-      </div>
-    </section>
-  {% endif %}
+  <script>
+    (() => {
+      const endpoint = "{{ request.url_for('api_phase1a_run_documents', run_name=run.run_name) }}";
+      const statusLabels = { ready: "可推送", needs_review: "待处理" };
+      const keyTypeLabels = {
+        picking_name: "出库单号",
+        tracking_number: "tracking number",
+      };
+
+      const queryParams = new URLSearchParams(window.location.search);
+      const state = {
+        page: Math.max(1, Number(queryParams.get("page") || 1)),
+        pageSize: Math.max(1, Number(queryParams.get("page_size") || 25)),
+        query: (queryParams.get("q") || "").trim(),
+        status: queryParams.get("status") || "",
+        source: queryParams.get("source") || "",
+        reason: queryParams.get("reason") || "",
+      };
+
+      const elements = {
+        search: document.getElementById("phaseDocSearch"),
+        status: document.getElementById("phaseDocStatus"),
+        source: document.getElementById("phaseDocSource"),
+        reason: document.getElementById("phaseDocReason"),
+        pageSize: document.getElementById("phaseDocPageSize"),
+        prev: document.getElementById("phaseDocPrev"),
+        next: document.getElementById("phaseDocNext"),
+        indicator: document.getElementById("phaseDocPageIndicator"),
+        meta: document.getElementById("phaseDocMeta"),
+        body: document.getElementById("phaseDocBody"),
+      };
+
+      let debounceTimer = null;
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function updateSelectOptions(select, options, currentValue) {
+        const html = options.map((item) => {
+          const selected = item.value === currentValue ? " selected" : "";
+          return `<option value="${escapeHtml(item.value)}"${selected}>${escapeHtml(item.label)}</option>`;
+        }).join("");
+        select.innerHTML = html;
+      }
+
+      function renderRows(items) {
+        if (!items.length) {
+          elements.body.innerHTML = '<tr class="file-row"><td colspan="5" class="empty-cell">当前筛选下没有文档。</td></tr>';
+          return;
+        }
+        elements.body.innerHTML = items.map((item) => {
+          const keyLabel = item.preferred_key_type ? (keyTypeLabels[item.preferred_key_type] || item.preferred_key_type) : "未定匹配键";
+          const keyValue = item.preferred_key || item.primary_picking_name || item.primary_tracking_number || "-";
+          const reason = item.reason_label || item.reason_code || "-";
+          const sourceLink = item.file_url
+            ? `<a class="text-link" href="${escapeHtml(item.file_url)}" target="_blank" rel="noreferrer">源文件</a>`
+            : '<span class="muted">无源链接</span>';
+          const localLink = item.local_file_href
+            ? `<a class="text-link" href="${escapeHtml(item.local_file_href)}" target="_blank" rel="noreferrer">本地文件</a>`
+            : '<span class="muted">无本地链接</span>';
+          return `
+            <tr class="file-row">
+              <td class="file-name-cell">
+                <div class="file-primary">
+                  <strong>${escapeHtml(item.file_name)}</strong>
+                  <div class="file-meta">${escapeHtml(item.source_modified_at || "-")}</div>
+                </div>
+              </td>
+              <td>
+                <span class="badge badge-${item.status === "ready" ? "success" : "failed"}">${escapeHtml(statusLabels[item.status] || item.status || "-")}</span>
+              </td>
+              <td>
+                <div class="file-primary">
+                  <strong>${escapeHtml(item.source_name || "-")}</strong>
+                  <div class="file-meta">${escapeHtml(item.source_type || "-")}</div>
+                </div>
+              </td>
+              <td>
+                <div class="file-primary">
+                  <strong>${escapeHtml(keyLabel)} · ${escapeHtml(keyValue)}</strong>
+                  <div class="file-meta">${escapeHtml(reason)}</div>
+                </div>
+              </td>
+              <td class="file-path-cell">
+                <div class="file-primary">
+                  <strong>${escapeHtml(item.source_path || "-")}</strong>
+                  <div class="file-meta">${localLink} · ${sourceLink}</div>
+                </div>
+              </td>
+            </tr>
+          `;
+        }).join("");
+      }
+
+      async function loadRows() {
+        const params = new URLSearchParams({
+          q: state.query,
+          status: state.status,
+          source: state.source,
+          reason: state.reason,
+          page: String(state.page),
+          page_size: String(state.pageSize),
+        });
+        elements.meta.textContent = "正在加载…";
+        const response = await fetch(`${endpoint}?${params.toString()}`, { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        updateSelectOptions(elements.status, payload.status_options, state.status);
+        updateSelectOptions(elements.source, payload.source_options, state.source);
+        updateSelectOptions(elements.reason, payload.reason_options, state.reason);
+        renderRows(payload.items);
+        elements.meta.textContent = payload.total
+          ? `当前筛选命中 ${payload.total} 条，正在显示第 ${payload.page_start} - ${payload.page_end} 条`
+          : "当前筛选没有命中文档。";
+        elements.indicator.textContent = `第 ${payload.page} / ${payload.total_pages} 页`;
+        elements.prev.disabled = payload.page <= 1;
+        elements.next.disabled = payload.page >= payload.total_pages;
+      }
+
+      function scheduleReload(resetPage = false) {
+        if (resetPage) state.page = 1;
+        if (debounceTimer) window.clearTimeout(debounceTimer);
+        debounceTimer = window.setTimeout(() => {
+          loadRows().catch((error) => {
+            elements.meta.textContent = `加载失败：${error.message}`;
+            elements.body.innerHTML = '<tr class="file-row"><td colspan="5" class="empty-cell">加载失败，请稍后重试。</td></tr>';
+          });
+        }, 220);
+      }
+
+      elements.search.addEventListener("input", (event) => {
+        state.query = event.target.value.trim();
+        scheduleReload(true);
+      });
+      elements.status.addEventListener("change", (event) => {
+        state.status = event.target.value;
+        scheduleReload(true);
+      });
+      elements.source.addEventListener("change", (event) => {
+        state.source = event.target.value;
+        scheduleReload(true);
+      });
+      elements.reason.addEventListener("change", (event) => {
+        state.reason = event.target.value;
+        scheduleReload(true);
+      });
+      elements.pageSize.addEventListener("change", (event) => {
+        state.pageSize = Number(event.target.value || 25);
+        scheduleReload(true);
+      });
+      elements.prev.addEventListener("click", () => {
+        if (state.page > 1) {
+          state.page -= 1;
+          scheduleReload(false);
+        }
+      });
+      elements.next.addEventListener("click", () => {
+        state.page += 1;
+        scheduleReload(false);
+      });
+
+      elements.search.value = state.query;
+      elements.pageSize.value = String(state.pageSize);
+
+      loadRows().catch((error) => {
+        elements.meta.textContent = `加载失败：${error.message}`;
+        elements.body.innerHTML = '<tr class="file-row"><td colspan="5" class="empty-cell">加载失败，请稍后重试。</td></tr>';
+      });
+    })();
+  </script>
 {% endblock %}

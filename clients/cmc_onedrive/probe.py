@@ -815,9 +815,11 @@ def sync_all_files(session, cfg, download_cfg, headers, timeout, items, explicit
                     continue
                 total_seen += 1
                 file_id = item.get("id")
-                if incremental and file_id in skip_index and skip_index[file_id] == item.get("modified_time"):
-                    summary["skipped_files"] += 1
-                    continue
+                if incremental and file_id in skip_index:
+                    mtime, local_path = skip_index[file_id]
+                    if mtime == item.get("modified_time") and local_path and Path(local_path).exists():
+                        summary["skipped_files"] += 1
+                        continue
                 future = executor.submit(_download_one, item)
                 futures_map[future] = item
 

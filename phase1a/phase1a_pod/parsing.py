@@ -3,19 +3,56 @@ import re
 from pathlib import Path
 
 
+"""POD filename parsing rules.
+
+Core rules used by the current Phase 1A / POD recognition pipeline:
+
+- EMTC Google Drive
+  - Files like `2026-03-19_3SYZXG8293874.png` use the trailing token as
+    the tracking number.
+  - Postal tracking formats such as `LA857793468NL` and `CF438625735NL`
+    are also treated as tracking numbers.
+
+- CMC OneDrive
+  - `EU22114.pdf` and `HK23898.pdf` are restored to `WCB2B/OUT/22114`
+    and `WCB2B/OUT/23898`.
+  - Pure numeric file names like `23735.pdf` are also restored to
+    `WCB2B/OUT/23735`.
+  - Numeric page suffixes such as `23735-1.pdf` or `EU22114-2.pdf` are
+    treated as extra pages of the same POD, not separate orders.
+  - Explicit picking keys like `WCB2BOUT20655`, `WCB2C-OUT-23898`,
+    and `WHOUT15504` are used directly.
+"""
+
+
+# Tracking extraction is intentionally broad because EMTC mostly exposes
+# tracking numbers rather than outbound picking names in its file names.
 TRACKING_PATTERNS = [
     re.compile(r"(?<![A-Z0-9])WHOUT\d{4,}(?![A-Z0-9])"),
     re.compile(r"(?<![A-Z0-9])WCB2BOUT\d{4,}(?![A-Z0-9])"),
     re.compile(r"(?<![A-Z0-9])3SHOHR\d{6,}(?![A-Z0-9])"),
+    re.compile(r"(?<![A-Z0-9])[A-Z]{2}\d{8,14}[A-Z]{2}(?![A-Z0-9])"),
+    re.compile(r"(?<![A-Z0-9])[0-9][A-Z]{2,10}\d{6,24}(?![A-Z0-9])"),
     re.compile(r"(?<![A-Z0-9])[A-Z]{2,10}\d{6,24}(?![A-Z0-9])"),
     re.compile(r"(?<![A-Z0-9])[0-9]{8,24}(?![A-Z0-9])"),
 ]
 
+# Direct picking keys already embedded in file names.
 PICKING_PATTERNS = [
     re.compile(r"(?<![A-Z0-9])WHOUT\d{4,}(?![A-Z0-9])"),
+    re.compile(r"(?<![A-Z])WCB2B[-_ /]?OUT[-_ /]?\d{4,}(?![A-Z0-9])"),
+    re.compile(r"(?<![A-Z])WCB2C[-_ /]?OUT[-_ /]?\d{4,}(?![A-Z0-9])"),
 ]
 
-EU_GROUP_PATTERN = re.compile(r"(?i)\bEU[-_ ]?(\d+[A-Z]?(?:-\d+[A-Z]?){0,12})\b")
+# CMC shorthand file names. These are restored to WCB2B/OUT/<number>.
+PREFIX_GROUP_PATTERNS = {
+    "EU": re.compile(r"(?i)\bEU[-_ ]?(\d+[A-Z]?(?:-\d+[A-Z]?){0,12})\b"),
+    "HK": re.compile(r"(?i)\bHK[-_ ]?(\d+[A-Z]?(?:-\d+[A-Z]?){0,12})\b"),
+}
+
+# Some CMC files are stored as bare order numbers like `23735.pdf` or
+# paginated variants such as `23735-1.pdf`.
+CMC_NUMERIC_STEM_PATTERN = re.compile(r"^(?P<base>\d{4,})(?P<pages>(?:-\d{1,2}){0,12})$")
 
 
 def canonicalize_key(value):
@@ -53,7 +90,7 @@ def parse_bool(value, default=False):
     return default
 
 
-def _expand_eu_groups(group_text):
+def _expand_prefixed_groups(prefix, group_text):
     parts = [part for part in group_text.upper().split("-") if part]
     if not parts:
         return []
@@ -61,6 +98,12 @@ def _expand_eu_groups(group_text):
     base = parts[0]
     if not re.fullmatch(r"\d+[A-Z]?", base):
         return []
+
+    trailing_parts = parts[1:]
+    # Single-digit trailing chunks are treated as page markers, e.g.
+    # `EU22114-1.pdf` or `HK23898-2.pdf`.
+    if trailing_parts and all(re.fullmatch(r"\d{1,2}", part) and int(part) <= 9 for part in trailing_parts):
+        return [f"{prefix}{base}"]
 
     resolved = [base]
     previous_digits = re.match(r"^(\d+)", base).group(1)
@@ -89,7 +132,7 @@ def _expand_eu_groups(group_text):
         previous_digits = full_digits
         previous_number = int(full_digits)
 
-    return [f"EU{part}" for part in resolved]
+    return [f"{prefix}{part}" for part in resolved]
 
 
 def extract_picking_candidates(*texts):
@@ -98,14 +141,60 @@ def extract_picking_candidates(*texts):
         upper_text = (text or "").upper()
         for pattern in PICKING_PATTERNS:
             candidates.extend(pattern.findall(upper_text))
-        for match in EU_GROUP_PATTERN.finditer(upper_text):
-            candidates.extend(_expand_eu_groups(match.group(1)))
+        for prefix, pattern in PREFIX_GROUP_PATTERNS.items():
+            for match in pattern.finditer(upper_text):
+                candidates.extend(_expand_prefixed_groups(prefix, match.group(1)))
     normalized = []
     for candidate in candidates:
         key = normalize_picking_name(candidate)
         if key and key not in normalized:
             normalized.append(key)
     return normalized
+
+
+def _extract_cmc_numeric_filename_candidates(file_name):
+    stem = Path(file_name or "").stem.upper()
+    match = CMC_NUMERIC_STEM_PATTERN.fullmatch(stem)
+    if not match:
+        return []
+
+    trailing_parts = [part for part in match.group("pages").split("-") if part]
+    if trailing_parts and not all(int(part) <= 9 for part in trailing_parts):
+        return []
+
+    restored = normalize_picking_name(f"WCB2B/OUT/{match.group('base')}")
+    return [restored] if restored else []
+
+
+def _restore_cmc_picking_candidates(*texts):
+    restored = []
+    for candidate in extract_picking_candidates(*texts):
+        if not (candidate.startswith("EU") or candidate.startswith("HK")):
+            continue
+        suffix = candidate[2:]
+        restored_candidate = normalize_picking_name(f"WCB2B/OUT/{suffix}")
+        if restored_candidate and restored_candidate not in restored:
+            restored.append(restored_candidate)
+    return restored
+
+
+def _picking_candidate_suffix(candidate):
+    if candidate.startswith("WCB2BOUT"):
+        return candidate[len("WCB2BOUT") :]
+    if candidate.startswith("EU"):
+        return candidate[len("EU") :]
+    if candidate.startswith("HK"):
+        return candidate[len("HK") :]
+    return None
+
+
+def _has_effective_multiple_picking_candidates(candidates):
+    if len(candidates) <= 1:
+        return False
+    suffixes = [_picking_candidate_suffix(candidate) for candidate in candidates]
+    if all(suffix is not None for suffix in suffixes) and len(set(suffixes)) == 1:
+        return False
+    return True
 
 
 def _looks_like_date_token(token):
@@ -128,6 +217,19 @@ def extract_tracking_candidates(*texts):
     return normalized
 
 
+def _merge_unique(*groups):
+    merged = []
+    for group in groups:
+        for item in group:
+            if item and item not in merged:
+                merged.append(item)
+    return merged
+
+
+def _is_cmc_source(source_name):
+    return canonicalize_key(source_name).startswith("CMC")
+
+
 def infer_document_fields(record, source_name=None, source_type=None):
     source_name = source_name or record.get("warehouse") or record.get("source") or "UNKNOWN"
     source_type = source_type or record.get("source") or "unknown"
@@ -135,16 +237,24 @@ def infer_document_fields(record, source_name=None, source_type=None):
     file_name = record.get("file_name") or Path(source_path).name
     file_url = record.get("source_url")
     inferred_picking_names = extract_picking_candidates(file_name, source_path, record.get("local_path"))
+    if _is_cmc_source(source_name):
+        # CMC may encode the same outbound order in several file-name styles:
+        # EU/HK shorthand, direct WCB2B/WCB2C keys, or bare numeric names.
+        inferred_picking_names = _merge_unique(
+            _extract_cmc_numeric_filename_candidates(file_name),
+            _restore_cmc_picking_candidates(file_name, source_path, record.get("local_path")),
+            inferred_picking_names,
+        )
     inferred_tracking_numbers = [
         item for item in extract_tracking_candidates(file_name, source_path, record.get("local_path")) if item not in inferred_picking_names
     ]
 
     parse_notes = []
-    if not inferred_picking_names:
+    if not inferred_picking_names and not inferred_tracking_numbers:
         parse_notes.append("picking_name_not_found")
     if file_url in (None, ""):
         parse_notes.append("source_url_missing")
-    if len(inferred_picking_names) > 1:
+    if _has_effective_multiple_picking_candidates(inferred_picking_names):
         parse_notes.append("multiple_picking_candidates")
 
     return {

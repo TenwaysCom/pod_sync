@@ -1,119 +1,207 @@
 {% extends "base.html" %}
-{% block title %}Phase 1A · POD Sync Console{% endblock %}
+{% block title %}POD 识别 · POD 同步控制台{% endblock %}
 {% block content %}
-  <section class="section two-col">
-    <div class="card">
-      <div class="section-head section-head-tight">
-        <div>
-          <p class="eyebrow">Action</p>
-          <h2>Run Phase 1A</h2>
-        </div>
-      </div>
-      <form method="post" action="{{ request.url_for('action_phase1a') }}" class="form-grid">
-        <label>Config path<input name="config_path" value="{{ ui_defaults.phase1a_config_path }}"></label>
-        <button type="submit">Run Phase 1A</button>
-      </form>
-      <div class="divider"></div>
-      <h3>Recent Phase 1A jobs</h3>
-      {% if recent_jobs %}
-        <div class="list-stack">
-          {% for job in recent_jobs %}
-            <a class="list-item" href="{{ request.url_for('job_detail', job_id=job.job_id) }}">
-              <div>
-                <strong>{{ job.label }}</strong>
-                <p>{{ job.created_at }}</p>
-              </div>
-              <span class="badge badge-{{ job.status }}">{{ job.status }}</span>
-            </a>
-          {% endfor %}
-        </div>
-      {% else %}
-        <p class="empty">No Phase 1A jobs started from the web console yet.</p>
-      {% endif %}
-    </div>
-
-    <div class="card">
-      <div class="section-head section-head-tight">
-        <div>
-          <p class="eyebrow">Latest Run</p>
-          <h2>{% if latest_run %}{{ latest_run.run_name }}{% else %}No runs yet{% endif %}</h2>
-        </div>
-        {% if latest_run %}
-          <a class="text-link" href="{{ request.url_for('phase1a_run_detail', run_name=latest_run.run_name) }}">Open run</a>
-        {% endif %}
-      </div>
-      {% if latest_run %}
-        <div class="grid grid-cards compact-cards">
-          <article class="mini-stat">
-            <p class="label">Documents</p>
-            <h3>{{ latest_run.summary.document_count }}</h3>
-          </article>
-          <article class="mini-stat">
-            <p class="label">Matched</p>
-            <h3>{{ latest_run.summary.matched_document_count }}</h3>
-          </article>
-          <article class="mini-stat">
-            <p class="label">Unmatched</p>
-            <h3>{{ latest_run.summary.unmatched_document_count }}</h3>
-          </article>
-          <article class="mini-stat">
-            <p class="label">Pickings</p>
-            <h3>{{ latest_run.summary.matched_picking_count }}</h3>
-          </article>
-        </div>
-        <div class="artifact-row">
-          {% for key, absolute_path in latest_run.artifacts.items() %}
-            <a class="artifact-pill" href="{{ request.url_for('phase1a_artifact', run_name=latest_run.run_name, artifact_key=key) }}">{{ key }}</a>
-          {% endfor %}
-        </div>
-      {% else %}
-        <p class="empty">No Phase 1A summary found under `phase1a/out`.</p>
-      {% endif %}
-    </div>
+  <section class="grid grid-cards">
+    <article class="card stat-card">
+      <p class="label">最新识别</p>
+      <h2>{% if latest_run %}{{ latest_run.run_name }}{% else %}还没有运行记录{% endif %}</h2>
+      <p class="muted">{% if latest_run %}{{ latest_run.summary.generated_at }}{% else %}等待第一次执行{% endif %}</p>
+    </article>
+    <article class="card stat-card">
+      <p class="label">有效文档</p>
+      <h2>{% if latest_run %}{{ latest_run.summary.document_count }}{% else %}0{% endif %}</h2>
+      <p class="muted">识别前已按 manifest 自动去重</p>
+    </article>
+    <article class="card stat-card">
+      <p class="label">可推送 / 待处理</p>
+      <h2>{% if latest_run %}{{ latest_run.summary.ready_document_count or latest_run.summary.matched_document_count }} / {{ latest_run.summary.review_document_count or latest_run.summary.unmatched_document_count }}{% else %}0 / 0{% endif %}</h2>
+      <p class="muted">先看这组数字判断当前解析质量</p>
+    </article>
+    <article class="card stat-card">
+      <p class="label">Payload 条数</p>
+      <h2>{% if latest_run %}{{ latest_run.summary.payload_item_count or latest_run.summary.matched_picking_count }}{% else %}0{% endif %}</h2>
+      <p class="muted">准备直接交给 Odoo 的数据条数</p>
+    </article>
   </section>
 
-  {% if latest_run and latest_run.artifacts.get('dashboard_html') %}
-    <section class="section">
-      <div class="section-head">
-        <div>
-          <p class="eyebrow">Inspection</p>
-          <h2>Embedded dashboard</h2>
+  <section class="phase-workspace">
+    <aside class="phase-sidebar">
+      <div class="card">
+        <div class="section-head section-head-tight">
+          <div>
+            <p class="eyebrow">执行操作</p>
+            <h2>运行 POD 识别</h2>
+          </div>
         </div>
+        <form method="post" action="{{ request.url_for('action_phase1a') }}" class="form-grid">
+          <label>识别配置文件<input name="config_path" value="{{ ui_defaults.phase1a_config_path }}"></label>
+          <button type="submit">运行 POD 识别</button>
+        </form>
+        <ul class="compact-list">
+          <li>当前默认模式：`仅解析直推`。</li>
+          <li>不要求先准备 `Odoo Scope`。</li>
+          <li>每次运行都会生成新批次和新 payload。</li>
+        </ul>
       </div>
-      <div class="card iframe-card">
-        <iframe
-          title="Phase 1A dashboard"
-          src="{{ request.url_for('phase1a_artifact', run_name=latest_run.run_name, artifact_key='dashboard_html') }}"
-        ></iframe>
-      </div>
-    </section>
-  {% endif %}
 
-  <section class="section">
-    <div class="section-head">
-      <div>
-        <p class="eyebrow">History</p>
-        <h2>Recent Phase 1A runs</h2>
+      <div class="card">
+        <div class="section-head section-head-tight">
+          <div>
+            <p class="eyebrow">识别规则</p>
+            <h2>当前规则</h2>
+          </div>
+        </div>
+        <ul class="compact-list">
+          <li>`EMTC Google Drive`：提取 tracking number，例如 `3SYZXG8293874`。</li>
+          <li>`CMC OneDrive`：把 `EU22114` 还原成 `WCB2B/OUT/22114`。</li>
+          <li>只有无法确定匹配键的文件才会进入 `待处理`。</li>
+        </ul>
       </div>
+
+      <div class="card">
+        <div class="section-head section-head-tight">
+          <div>
+            <p class="eyebrow">最近任务</p>
+            <h2>网页触发记录</h2>
+          </div>
+        </div>
+        {% if recent_jobs %}
+          <div class="list-stack">
+            {% for job in recent_jobs %}
+              <div class="list-item list-item-shell">
+                <a class="list-item-main" href="{{ request.url_for('job_detail', job_id=job.job_id) }}">
+                  <div>
+                    <strong>{{ job.label }}</strong>
+                    <p>{{ job.created_at }}</p>
+                  </div>
+                  <span class="badge badge-{{ job.status }}">{{ job_status_labels.get(job.status, job.status) }}</span>
+                </a>
+                <form method="post" action="{{ request.url_for('delete_job', job_id=job.job_id) }}" class="inline-action-form" onsubmit="return confirm('确认删除任务 {{ job.job_id }} 吗？')">
+                  <input type="hidden" name="redirect_to" value="{{ request.url.path }}">
+                  <button type="submit" class="danger-button" {% if job.status in ['queued', 'running'] %}disabled{% endif %}>删除</button>
+                </form>
+              </div>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="empty">还没有从网页控制台启动过识别任务。</p>
+        {% endif %}
+      </div>
+    </aside>
+
+    <div class="phase-main">
+      <div class="card">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">最新结果</p>
+            <h2>{% if latest_run %}{{ latest_run.run_name }}{% else %}等待第一次运行{% endif %}</h2>
+            <p>{% if latest_run %}这里保留最常用的摘要和下载入口，不再内嵌巡检页。{% else %}运行后会在这里显示核心摘要和下载入口。{% endif %}</p>
+          </div>
+          {% if latest_run %}
+            <div class="header-actions">
+              <a class="text-link" href="{{ request.url_for('phase1a_run_detail', run_name=latest_run.run_name) }}">打开运行详情</a>
+              <form method="post" action="{{ request.url_for('delete_phase1a_run_action', run_name=latest_run.run_name) }}" class="inline-action-form" onsubmit="return confirm('确认删除运行 {{ latest_run.run_name }} 吗？')">
+                <input type="hidden" name="redirect_to" value="{{ request.url.path }}">
+                <button type="submit" class="danger-button">删除运行</button>
+              </form>
+            </div>
+          {% endif %}
+        </div>
+        {% if latest_run %}
+          <div class="summary-inline-grid">
+            <div class="summary-inline-item">
+              <span class="summary-inline-label">生成时间</span>
+              <span class="summary-inline-value">{{ latest_run.summary.generated_at }}</span>
+            </div>
+            <div class="summary-inline-item">
+              <span class="summary-inline-label">处理模式</span>
+              <span class="summary-inline-value">{{ "仅解析直推" if latest_run.summary.processing_mode == "parse_only" else "Scope 匹配" }}</span>
+            </div>
+            <div class="summary-inline-item summary-inline-wide">
+              <span class="summary-inline-label">同步配置</span>
+              <span class="summary-inline-value mono">{{ latest_run.summary.sync_config_path or "无" }}</span>
+            </div>
+          </div>
+          <div class="phase-summary-grid">
+            <article class="mini-stat">
+              <p class="label">文档数</p>
+              <h3>{{ latest_run.summary.document_count }}</h3>
+            </article>
+            <article class="mini-stat">
+              <p class="label">可推送</p>
+              <h3>{{ latest_run.summary.ready_document_count or latest_run.summary.matched_document_count }}</h3>
+            </article>
+            <article class="mini-stat">
+              <p class="label">待处理</p>
+              <h3>{{ latest_run.summary.review_document_count or latest_run.summary.unmatched_document_count }}</h3>
+            </article>
+            <article class="mini-stat">
+              <p class="label">Payload</p>
+              <h3>{{ latest_run.summary.payload_item_count or latest_run.summary.matched_picking_count }}</h3>
+            </article>
+          </div>
+
+          <div class="artifact-section">
+            <p class="label">常用产物</p>
+            <div class="artifact-actions">
+              {% for key in primary_artifact_keys %}
+                {% if latest_run.artifacts.get(key) %}
+                  <a class="artifact-link" href="{{ request.url_for('phase1a_artifact', run_name=latest_run.run_name, artifact_key=key) }}">
+                    {{ "打开巡检页" if key == "dashboard_html" else (artifact_labels[key] if artifact_labels is defined and key in artifact_labels else key) }}
+                  </a>
+                {% endif %}
+              {% endfor %}
+            </div>
+          </div>
+
+          <details class="details-card">
+            <summary>技术产物</summary>
+            <div class="artifact-actions artifact-actions-secondary">
+              {% for key in secondary_artifact_keys %}
+                {% if latest_run.artifacts.get(key) %}
+                  <a class="artifact-link" href="{{ request.url_for('phase1a_artifact', run_name=latest_run.run_name, artifact_key=key) }}">
+                    {{ artifact_labels[key] if artifact_labels is defined and key in artifact_labels else key }}
+                  </a>
+                {% endif %}
+              {% endfor %}
+            </div>
+          </details>
+        {% else %}
+          <p class="empty">`phase1a/out` 下还没有识别结果汇总文件。</p>
+        {% endif %}
+      </div>
+
+      <section class="section">
+        <div>
+          <p class="eyebrow">历史记录</p>
+          <h2>最近识别运行</h2>
+        </div>
+        {% if recent_runs %}
+          <div class="list-stack">
+            {% for run in recent_runs %}
+              <div class="list-item list-item-shell">
+                <a class="list-item-main" href="{{ request.url_for('phase1a_run_detail', run_name=run.run_name) }}">
+                  <div>
+                    <strong>{{ run.run_name }}</strong>
+                    <p>{{ run.generated_at }}</p>
+                  </div>
+                  <div class="list-metrics">
+                    <span>{{ run.document_count }} 个文档</span>
+                    <span>{{ run.ready_document_count or run.matched_document_count }} 个可推送</span>
+                    <span>{{ run.review_document_count or run.unmatched_document_count }} 个待处理</span>
+                  </div>
+                </a>
+                <form method="post" action="{{ request.url_for('delete_phase1a_run_action', run_name=run.run_name) }}" class="inline-action-form" onsubmit="return confirm('确认删除运行 {{ run.run_name }} 吗？')">
+                  <input type="hidden" name="redirect_to" value="{{ request.url.path }}">
+                  <button type="submit" class="danger-button">删除</button>
+                </form>
+              </div>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="empty">还没有运行历史。</p>
+        {% endif %}
+      </section>
     </div>
-    {% if recent_runs %}
-      <div class="list-stack">
-        {% for run in recent_runs %}
-          <a class="list-item" href="{{ request.url_for('phase1a_run_detail', run_name=run.run_name) }}">
-            <div>
-              <strong>{{ run.run_name }}</strong>
-              <p>{{ run.generated_at }}</p>
-            </div>
-            <div class="list-metrics">
-              <span>{{ run.document_count }} docs</span>
-              <span>{{ run.matched_document_count }} matched</span>
-              <span>{{ run.unmatched_document_count }} unmatched</span>
-            </div>
-          </a>
-        {% endfor %}
-      </div>
-    {% else %}
-      <p class="empty">No run history yet.</p>
-    {% endif %}
   </section>
 {% endblock %}

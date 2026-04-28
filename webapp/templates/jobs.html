@@ -1,32 +1,38 @@
 {% extends "base.html" %}
-{% block title %}Jobs · POD Sync Console{% endblock %}
+{% block title %}任务 · POD 同步控制台{% endblock %}
 {% block content %}
   <section class="section">
     <div class="section-head">
       <div>
-        <p class="eyebrow">Execution Queue</p>
-        <h2>Recent jobs</h2>
+        <p class="eyebrow">执行队列</p>
+        <h2>最近任务</h2>
       </div>
     </div>
     {% if jobs %}
       <div class="list-stack">
         {% for job in jobs %}
-          <a class="list-item" href="{{ request.url_for('job_detail', job_id=job.job_id) }}">
-            <div>
-              <strong>{{ job.label }}</strong>
-              <p>{{ job.created_at }} · {{ job.command_display }}</p>
-            </div>
-            <div class="list-metrics">
-              <span class="badge badge-{{ job.status }}">{{ job.status }}</span>
-              {% if job.exit_code is not none %}
-                <span>exit {{ job.exit_code }}</span>
-              {% endif %}
-            </div>
-          </a>
+          <div class="list-item list-item-shell">
+            <a class="list-item-main" href="{{ request.url_for('job_detail', job_id=job.job_id) }}">
+              <div>
+                <strong>{{ job.label }}</strong>
+                <p>{{ job.created_at }} · {{ job.command_display }}</p>
+              </div>
+              <div class="list-metrics">
+                <span class="badge badge-{{ job.status }}">{{ job_status_labels.get(job.status, job.status) }}</span>
+                {% if job.exit_code is not none %}
+                  <span>退出码 {{ job.exit_code }}</span>
+                {% endif %}
+              </div>
+            </a>
+            <form method="post" action="{{ request.url_for('delete_job', job_id=job.job_id) }}" class="inline-action-form" onsubmit="return confirm('确认删除任务 {{ job.job_id }} 吗？')">
+              <input type="hidden" name="redirect_to" value="{{ request.url.path }}">
+              <button type="submit" class="danger-button" {% if job.status in ['queued', 'running'] %}disabled{% endif %}>删除</button>
+            </form>
+          </div>
         {% endfor %}
       </div>
     {% else %}
-      <p class="empty">No jobs recorded yet.</p>
+      <p class="empty">还没有任务记录。</p>
     {% endif %}
   </section>
 {% endblock %}

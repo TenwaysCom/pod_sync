@@ -1,0 +1,283 @@
+{% extends "base.html" %}
+{% block title %}文件 · POD 同步控制台{% endblock %}
+{% block content %}
+  <section class="grid grid-cards">
+    <article class="card stat-card">
+      <p class="label">存储目录</p>
+      <h2 id="filesStorageDir">{{ config_snapshot.storage_dir }}</h2>
+      <p class="muted">当前下载文件根目录</p>
+    </article>
+    <article class="card stat-card">
+      <p class="label">文件总数</p>
+      <h2 id="filesTotalCount">-</h2>
+      <p class="muted">当前筛选结果中的文件数量</p>
+      <div class="source-summary-list source-summary-compact" id="sourceSummaryList">
+        <p class="empty">等待加载文件目录。</p>
+      </div>
+    </article>
+    <article class="card stat-card">
+      <p class="label">总大小</p>
+      <h2 id="filesTotalSize">-</h2>
+      <p class="muted">当前筛选结果的累计大小</p>
+    </article>
+    <article class="card stat-card">
+      <p class="label">列表状态</p>
+      <h2 id="filesLatestModified">-</h2>
+      <p class="muted">最近修改时间与实时刷新状态</p>
+      <div class="files-status-tools">
+        <label class="toggle">
+          <input id="includeInternal" type="checkbox">
+          显示内部日志文件
+        </label>
+        <p class="muted status-inline" id="filesRefreshStatus">等待首次加载…</p>
+      </div>
+    </article>
+  </section>
+
+  <section class="section">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">文件列表</p>
+        <h2>下载文件</h2>
+        <p>按来源和关键字筛选，列表会自动刷新，方便你实时确认同步结果。</p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="toolbar filter-toolbar">
+        <label class="search-field">
+          搜索
+          <div class="search-input-wrap">
+            <input id="fileSearchInput" type="search" placeholder="文件名、目录、tracking number、出库单号">
+            <button class="ghost-button" id="clearSearchButton" type="button">清空</button>
+          </div>
+        </label>
+        <label>
+          来源
+          <select id="fileSourceFilter">
+            <option value="">全部来源</option>
+          </select>
+        </label>
+        <label>
+          每页条数
+          <select id="filePageSize">
+            <option value="25">25</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+          </select>
+        </label>
+        <div class="toolbar-actions">
+          <button class="action-button" id="refreshFilesButton" type="button">立即刷新</button>
+        </div>
+      </div>
+      <div class="filter-meta">
+        <span id="fileFilterSummary">等待加载文件列表。</span>
+        <span id="fileAutoRefreshHint">自动刷新：10 秒</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="card table-wrap files-table-wrap">
+      <table class="files-table">
+        <thead>
+          <tr>
+            <th>文件</th>
+            <th>来源</th>
+            <th>相对路径</th>
+            <th>大小</th>
+            <th>修改时间</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="fileTableBody">
+          <tr>
+            <td colspan="6">
+              <div class="empty">等待加载文件列表。</div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="pagination-bar">
+      <div class="pagination-summary" id="paginationSummary">第 0 - 0 条，共 0 条</div>
+      <div class="pagination-controls">
+        <button class="pager-button" id="prevPageButton" type="button">上一页</button>
+        <span class="pagination-current" id="paginationCurrent">第 1 / 1 页</span>
+        <button class="pager-button" id="nextPageButton" type="button">下一页</button>
+      </div>
+    </div>
+  </section>
+
+  <script>
+    const filesApiUrl = "{{ request.url_for('api_files') }}";
+    const storageFileUrlTemplate = "{{ request.url_for('storage_file', relative_path='__PATH__') }}";
+    const autoRefreshMs = 10000;
+    let refreshTimer = null;
+    let searchDebounceTimer = null;
+    let currentPage = 1;
+
+    function encodeStoragePath(relativePath) {
+      return relativePath.split('/').map((part) => encodeURIComponent(part)).join('/');
+    }
+
+    function storageFileUrl(relativePath) {
+      return storageFileUrlTemplate.replace('__PATH__', encodeStoragePath(relativePath));
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function paramsFromControls() {
+      const params = new URLSearchParams();
+      const source = document.getElementById('fileSourceFilter').value;
+      const query = document.getElementById('fileSearchInput').value.trim();
+      const includeInternal = document.getElementById('includeInternal').checked;
+      const pageSize = document.getElementById('filePageSize').value;
+      if (source) params.set('source', source);
+      if (query) params.set('q', query);
+      if (includeInternal) params.set('include_internal', 'true');
+      params.set('page', String(currentPage));
+      params.set('page_size', pageSize);
+      return params;
+    }
+
+    function renderSourceSummary(payload) {
+      const root = document.getElementById('sourceSummaryList');
+      if (!payload.source_options.length) {
+        root.innerHTML = '<p class="empty">当前没有可显示的文件来源。</p>';
+        return;
+      }
+      root.innerHTML = payload.source_options.map((item) => `
+        <div class="source-summary-item">
+          <strong>${escapeHtml(item.label)}</strong>
+          <span>${escapeHtml(String(item.count))} 个文件</span>
+        </div>
+      `).join('');
+    }
+
+    function renderSourceFilter(payload) {
+      const select = document.getElementById('fileSourceFilter');
+      const current = select.value;
+      const options = ['<option value="">全部来源</option>'].concat(
+        payload.source_options.map((item) => `<option value="${escapeHtml(item.key)}">${escapeHtml(item.label)} (${escapeHtml(String(item.count))})</option>`)
+      );
+      select.innerHTML = options.join('');
+      if ([...select.options].some((option) => option.value === current)) {
+        select.value = current;
+      }
+    }
+
+    function renderStats(payload) {
+      document.getElementById('filesTotalCount').textContent = String(payload.total_files);
+      document.getElementById('filesTotalSize').textContent = payload.total_size_label;
+      document.getElementById('filesLatestModified').textContent = payload.latest_modified_at || '无';
+      document.getElementById('fileFilterSummary').textContent = `当前筛选命中 ${payload.total_files} 个文件，正在显示第 ${payload.page_from} - ${payload.page_to} 条`;
+      document.getElementById('paginationSummary').textContent = `第 ${payload.page_from} - ${payload.page_to} 条，共 ${payload.total_files} 条`;
+      document.getElementById('paginationCurrent').textContent = `第 ${payload.page} / ${payload.total_pages} 页`;
+      document.getElementById('prevPageButton').disabled = !payload.has_prev;
+      document.getElementById('nextPageButton').disabled = !payload.has_next;
+    }
+
+    function renderTable(payload) {
+      const body = document.getElementById('fileTableBody');
+      if (!payload.exists) {
+        body.innerHTML = '<tr><td colspan="6"><div class="empty">存储目录还不存在。</div></td></tr>';
+        return;
+      }
+      if (!payload.items.length) {
+        body.innerHTML = '<tr><td colspan="6"><div class="empty">当前筛选下没有文件。</div></td></tr>';
+        return;
+      }
+      body.innerHTML = payload.items.map((item) => `
+        <tr class="file-row">
+          <td class="file-name-cell">
+            <div class="file-primary"><strong>${escapeHtml(item.file_name)}</strong></div>
+            <div class="file-meta">${escapeHtml(item.extension || '无扩展名')} · ${escapeHtml(item.size_label)}</div>
+          </td>
+          <td><span class="source-pill">${escapeHtml(item.source_label)}</span></td>
+          <td class="mono file-path-cell" title="${escapeHtml(item.relative_path)}">${escapeHtml(item.relative_path)}</td>
+          <td>${escapeHtml(item.size_label)}</td>
+          <td>${escapeHtml(item.modified_at)}</td>
+          <td><a class="table-link" href="${storageFileUrl(item.relative_path)}" target="_blank" rel="noreferrer">打开文件</a></td>
+        </tr>
+      `).join('');
+    }
+
+    async function refreshFiles() {
+      const status = document.getElementById('filesRefreshStatus');
+      status.textContent = '正在刷新…';
+      try {
+        const response = await fetch(`${filesApiUrl}?${paramsFromControls().toString()}`, { cache: 'no-store' });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        currentPage = payload.page;
+        renderSourceSummary(payload);
+        renderSourceFilter(payload);
+        renderStats(payload);
+        renderTable(payload);
+        status.textContent = `上次刷新：${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
+      } catch (error) {
+        status.textContent = `刷新失败：${error.message}`;
+      }
+    }
+
+    function resetToFirstPageAndRefresh() {
+      currentPage = 1;
+      refreshFiles();
+    }
+
+    function scheduleSearchRefresh() {
+      if (searchDebounceTimer) {
+        clearTimeout(searchDebounceTimer);
+      }
+      searchDebounceTimer = setTimeout(resetToFirstPageAndRefresh, 320);
+    }
+
+    function scheduleRefresh() {
+      if (refreshTimer) {
+        clearInterval(refreshTimer);
+      }
+      refreshTimer = setInterval(refreshFiles, autoRefreshMs);
+    }
+
+    document.getElementById('refreshFilesButton').addEventListener('click', refreshFiles);
+    document.getElementById('fileSourceFilter').addEventListener('change', resetToFirstPageAndRefresh);
+    document.getElementById('includeInternal').addEventListener('change', resetToFirstPageAndRefresh);
+    document.getElementById('filePageSize').addEventListener('change', resetToFirstPageAndRefresh);
+    document.getElementById('fileSearchInput').addEventListener('input', scheduleSearchRefresh);
+    document.getElementById('fileSearchInput').addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        if (searchDebounceTimer) {
+          clearTimeout(searchDebounceTimer);
+        }
+        resetToFirstPageAndRefresh();
+      }
+    });
+    document.getElementById('clearSearchButton').addEventListener('click', () => {
+      document.getElementById('fileSearchInput').value = '';
+      resetToFirstPageAndRefresh();
+    });
+    document.getElementById('prevPageButton').addEventListener('click', () => {
+      if (currentPage > 1) {
+        currentPage -= 1;
+        refreshFiles();
+      }
+    });
+    document.getElementById('nextPageButton').addEventListener('click', () => {
+      currentPage += 1;
+      refreshFiles();
+    });
+
+    refreshFiles();
+    scheduleRefresh();
+  </script>
+{% endblock %}

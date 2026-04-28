@@ -524,6 +524,72 @@ class DriveDownloadTests(unittest.TestCase):
             self.assertEqual(refreshed_cfg["access_token"], "fresh-token")
             self.assertEqual(refreshed_cfg["refresh_token"], "rotated-refresh-token")
 
+    def test_gdrive_retries_download_after_401_with_refreshed_token(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            config_path = tmp_path / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "gdrive": {
+                            "access_token": "stale-token",
+                            "client_id": "client-id",
+                            "client_secret": "client-secret",
+                            "refresh_token": "refresh-token",
+                            "folder_id": "folder-abc",
+                            "timeout_seconds": 15,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            fake_session = FakeSession(
+                [
+                    FakeResponse(json_data={"access_token": "startup-token", "refresh_token": "startup-refresh"}),
+                    FakeResponse(
+                        json_data={
+                            "files": [
+                                {
+                                    "id": "file-1",
+                                    "name": "proof.pdf",
+                                    "mimeType": "application/pdf",
+                                }
+                            ]
+                        }
+                    ),
+                    FakeResponse(status_code=401),
+                    FakeResponse(json_data={"access_token": "retry-token", "refresh_token": "retry-refresh"}),
+                    FakeResponse(content=b"retried-gdrive-content"),
+                ]
+            )
+
+            argv = [
+                "probe_gdrive.py",
+                "--config",
+                str(config_path),
+                "--limit",
+                "1",
+                "--download-first-file",
+                "--output-dir",
+                str(tmp_path / "downloads"),
+            ]
+
+            with mock.patch.object(probe_gdrive.requests, "Session", return_value=fake_session):
+                with mock.patch.object(sys, "argv", argv):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        probe_gdrive.main()
+
+            refreshed_cfg = json.loads(config_path.read_text(encoding="utf-8"))["gdrive"]
+            downloaded_file = tmp_path / "downloads" / "proof.pdf"
+            self.assertTrue(downloaded_file.exists())
+            self.assertEqual(downloaded_file.read_bytes(), b"retried-gdrive-content")
+            self.assertEqual(fake_session.calls[1]["headers"], {"Authorization": "Bearer startup-token"})
+            self.assertEqual(fake_session.calls[2]["headers"], {"Authorization": "Bearer startup-token"})
+            self.assertEqual(fake_session.calls[4]["headers"], {"Authorization": "Bearer retry-token"})
+            self.assertEqual(refreshed_cfg["access_token"], "retry-token")
+            self.assertEqual(refreshed_cfg["refresh_token"], "retry-refresh")
+
     def test_gdrive_falls_back_to_existing_access_token_when_refresh_fails(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -704,6 +770,36 @@ class DriveDownloadTests(unittest.TestCase):
 
             self.assertTrue((tmp_path / "pod" / "EMTC" / "top.pdf").exists())
             self.assertTrue((tmp_path / "pod" / "EMTC" / "2026" / "nested.png").exists())
+
+    def test_gdrive_sync_all_files_supports_workers(self):
+        items = [
+            {"id": "file-1", "path": "proof-one.pdf", "name": "proof-one.pdf", "is_folder": False, "modified_time": "2026-04-20T00:00:00Z"},
+            {"id": "file-2", "path": "proof-two.pdf", "name": "proof-two.pdf", "is_folder": False, "modified_time": "2026-04-21T00:00:00Z"},
+        ]
+        call_manifest_locks = []
+
+        def fake_download_and_record_file(**kwargs):
+            call_manifest_locks.append(kwargs.get("manifest_lock") is not None)
+            return {"local_size": 11}
+
+        with mock.patch.object(probe_gdrive, "download_and_record_file", side_effect=fake_download_and_record_file):
+            with contextlib.redirect_stdout(io.StringIO()):
+                summary = probe_gdrive.sync_all_files(
+                    session=object(),
+                    cfg={"warehouse": "EMTC"},
+                    download_cfg={"base_dir": "/tmp/pod"},
+                    headers={},
+                    timeout=15,
+                    items=items,
+                    explicit_output_dir=None,
+                    workers=2,
+                    incremental=False,
+                )
+
+        self.assertEqual(summary["downloaded_files"], 2)
+        self.assertEqual(summary["failed_files"], 0)
+        self.assertEqual(summary["total_files_seen"], 2)
+        self.assertEqual(call_manifest_locks, [True, True])
 
     def test_onedrive_downloads_first_file_using_content_fallback(self):
         with tempfile.TemporaryDirectory() as tmpdir:

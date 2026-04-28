@@ -1,40 +1,120 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}POD Sync Console{% endblock %}</title>
+  <title>{% block title %}POD 同步控制台{% endblock %}</title>
   <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}">
 </head>
 <body>
-  <div class="shell">
-    <header class="masthead">
-      <div>
-        <p class="eyebrow">Tenways POD Operations</p>
-        <h1>POD Sync Console</h1>
-        <p class="lede">Use the existing sync and Phase 1A entrypoints from a single control surface, without exposing an unrestricted shell.</p>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <div class="brand-block">
+        <div class="brand-copy">
+          <p class="eyebrow eyebrow-inverse">TENWAYS POD 运维台</p>
+          <h1>POD 同步控制台</h1>
+        </div>
       </div>
-      <div class="masthead-meta">
-        <span class="meta-pill">Storage: `./storage/pod`</span>
-        <span class="meta-pill">Jobs: `./runtime/jobs`</span>
-      </div>
-    </header>
+    </div>
+  </header>
 
+  <div class="shell">
     <nav class="nav">
-      <a class="{% if page_id == 'overview' %}active{% endif %}" href="{{ request.url_for('overview') }}">Overview</a>
-      <a class="{% if page_id == 'sync' %}active{% endif %}" href="{{ request.url_for('sync_page') }}">Sync</a>
-      <a class="{% if page_id == 'phase1a' %}active{% endif %}" href="{{ request.url_for('phase1a_page') }}">Phase 1A</a>
-      <a class="{% if page_id == 'jobs' %}active{% endif %}" href="{{ request.url_for('jobs_page') }}">Jobs</a>
+      <a class="{% if page_id == 'overview' %}active{% endif %}" href="{{ request.url_for('overview') }}">概览</a>
+      <a class="{% if page_id == 'sync' %}active{% endif %}" href="{{ request.url_for('sync_page') }}">同步</a>
+      <a class="{% if page_id == 'files' %}active{% endif %}" href="{{ request.url_for('files_page') }}">文件</a>
+      <a class="{% if page_id == 'phase1a' %}active{% endif %}" href="{{ request.url_for('phase1a_page') }}">识别</a>
+      <a class="{% if page_id == 'reconcile' %}active{% endif %}" href="{{ request.url_for('reconcile_page') }}">总结对账</a>
+      <a class="{% if page_id == 'jobs' %}active{% endif %}" href="{{ request.url_for('jobs_page') }}">任务</a>
+      <a class="{% if page_id == 'report' %}active{% endif %}" href="{{ request.url_for('report_page') }}">详细报告</a>
     </nav>
 
-    {% if flash.notice %}
-      <div class="flash flash-ok">{{ flash.notice }}</div>
-    {% endif %}
-    {% if flash.error %}
-      <div class="flash flash-error">{{ flash.error }}</div>
-    {% endif %}
+    <div id="flashStack" class="flash-stack">
+      {% if flash.notice %}
+        <div class="flash flash-ok" data-flash kind="notice">
+          <span>{{ flash.notice }}</span>
+          <button type="button" class="flash-close" data-flash-close aria-label="关闭提示">关闭</button>
+        </div>
+      {% endif %}
+      {% if flash.error %}
+        <div class="flash flash-error" data-flash kind="error">
+          <span>{{ flash.error }}</span>
+          <button type="button" class="flash-close" data-flash-close aria-label="关闭提示">关闭</button>
+        </div>
+      {% endif %}
+    </div>
 
     {% block content %}{% endblock %}
   </div>
+
+  <script>
+    (() => {
+      const flashStack = document.getElementById("flashStack");
+
+      function dismissFlash(node) {
+        if (!node) return;
+        node.classList.add("is-hiding");
+        window.setTimeout(() => {
+          node.remove();
+          if (flashStack && !flashStack.children.length) {
+            flashStack.classList.remove("has-flash");
+          }
+        }, 220);
+      }
+
+      function createFlash(message, kind = "notice") {
+        if (!flashStack) return null;
+        const flash = document.createElement("div");
+        flash.className = `flash ${kind === "error" ? "flash-error" : "flash-ok"}`;
+        flash.setAttribute("data-flash", "");
+        flash.innerHTML = `<span></span><button type="button" class="flash-close" data-flash-close aria-label="关闭提示">关闭</button>`;
+        flash.querySelector("span").textContent = message;
+        flash.querySelector("[data-flash-close]")?.addEventListener("click", () => dismissFlash(flash));
+        flashStack.appendChild(flash);
+        flashStack.classList.add("has-flash");
+        window.setTimeout(() => dismissFlash(flash), 3200);
+        return flash;
+      }
+
+      const url = new URL(window.location.href);
+      if (url.searchParams.has("notice") || url.searchParams.has("error")) {
+        url.searchParams.delete("notice");
+        url.searchParams.delete("error");
+        window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+      }
+
+      const flashes = Array.from(document.querySelectorAll("[data-flash]"));
+      if (flashes.length && flashStack) {
+        flashStack.classList.add("has-flash");
+      }
+      flashes.forEach((flash) => {
+        flash.querySelector("[data-flash-close]")?.addEventListener("click", () => dismissFlash(flash));
+        window.setTimeout(() => dismissFlash(flash), 3200);
+      });
+
+      document.querySelectorAll("form[data-submit-state]").forEach((form) => {
+        form.addEventListener("submit", () => {
+          const submitButton = form.querySelector("button[type='submit'], input[type='submit']");
+          if (!submitButton || submitButton.disabled) return;
+          const loadingText = submitButton.getAttribute("data-loading-text");
+          const pendingNotice = form.getAttribute("data-pending-notice");
+          const originalText = submitButton.tagName === "INPUT" ? submitButton.value : submitButton.textContent;
+          submitButton.dataset.originalText = originalText || "";
+          submitButton.disabled = true;
+          submitButton.classList.add("is-loading");
+          if (loadingText) {
+            if (submitButton.tagName === "INPUT") {
+              submitButton.value = loadingText;
+            } else {
+              submitButton.textContent = loadingText;
+            }
+          }
+          if (pendingNotice) {
+            createFlash(pendingNotice, "notice");
+          }
+        });
+      });
+    })();
+  </script>
 </body>
 </html>

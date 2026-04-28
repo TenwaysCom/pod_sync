@@ -1,10 +1,10 @@
 # Phase 1A
 
-这个目录负责 Phase 1A 的 POD 侧处理：
+这个目录负责 POD 识别的 POD 侧处理：
 
 - 读取 manifest JSONL
 - 解析 `picking_name / tracking_number`
-- 生成 `matched / unmatched report`
+- 生成 `可推送 / 待处理 report`
 - 生成给 Odoo webhook 的 payload
 - 生成巡检 dashboard
 
@@ -23,7 +23,7 @@
 
 ## 配置模式
 
-当前支持两种方式：
+当前支持两种输入方式：
 
 1. 手工指定 manifest
 2. 直接复用同步层配置自动推导 manifest
@@ -34,6 +34,12 @@
 cd phase1a
 python3 run_phase1a.py --config examples/phase1a_config.example.json
 ```
+
+默认示例配置走 `parse_only` 模式：
+
+- 不要求提供 `Odoo Scope`
+- 只负责提取 `CMC` 出库单号 / `EMTC` tracking number
+- 生成清洗后的 payload 直接交给 Odoo
 
 ### 2. 复用同步层配置
 
@@ -64,3 +70,9 @@ python3 run_phase1a.py --config examples/phase1a_from_sync.example.json
 巡检入口：
 
 - `out/<run_name>/phase1a_dashboard.html`
+
+说明：
+
+- 当前默认把 `pod_backfill_matched_report.*` 视为“可推送报告”
+- 当前默认把 `pod_backfill_unmatched_report.*` 视为“待处理报告”
+- 如果后续恢复 `Odoo Scope`，也仍然可以切回 `scope_match` 模式

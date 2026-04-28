@@ -1,0 +1,396 @@
+{% extends "base.html" %}
+{% block title %}Odoo 缺失报告 · POD 同步控制台{% endblock %}
+{% block content %}
+  <section class="grid grid-cards">
+    <article class="card stat-card">
+      <p class="label">最新刷新</p>
+      <h2>{% if snapshot %}{{ snapshot.generated_at }}{% else %}还没有快照{% endif %}</h2>
+    </article>
+    <article class="card stat-card">
+      <p class="label">缺失总数</p>
+      <h2>{% if snapshot %}{{ snapshot.totals.without_tracking_number }}{% else %}0{% endif %}</h2>
+      <p class="muted">当前 Odoo 中缺 tracking number 的出库单</p>
+    </article>
+    <article class="card stat-card">
+      <p class="label">总出库数</p>
+      <h2>{% if snapshot %}{{ snapshot.totals.total_done_outgoing }}{% else %}0{% endif %}</h2>
+      <p class="muted">
+        {% if snapshot %}done {{ snapshot.totals.done_count }} / cancel {{ snapshot.totals.cancel_count }}{% else %}含 done / cancel{% endif %}
+      </p>
+    </article>
+    <article class="card stat-card">
+      <p class="label">缺失率</p>
+      <h2>{% if snapshot %}{{ snapshot.totals.missing_rate_percent }}%{% else %}0%{% endif %}</h2>
+      <p class="muted">{% if snapshot and snapshot.totals.detail_matches_summary %}明细与汇总一致{% else %}等待首次刷新{% endif %}</p>
+    </article>
+  </section>
+
+  <section class="section two-col">
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">刷新</p>
+          <h2>在线报告</h2>
+        </div>
+      </div>
+      <p class="muted">直接从 Odoo 缺失明细和汇总接口生成页面与下载产物。</p>
+      <form method="post" action="{{ request.url_for('action_refresh_odoo_missing') }}" class="stack-form compact-form" data-submit-state data-pending-notice="Odoo 缺失报告正在刷新，请稍候…">
+        <input type="hidden" name="detail_url" value="{{ odoo_missing_detail_url }}">
+        <button type="submit" class="action-button" data-loading-text="正在刷新 Odoo 缺失报告…">刷新 Odoo 缺失报告</button>
+      </form>
+      <ul class="compact-list">
+        <li>总明细接口：<span class="mono wrap-anywhere">{{ odoo_missing_detail_url }}</span></li>
+        <li>缺失统计、缺失率、done/cancel 拆分都由页面自动计算。</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">下载</p>
+          <h2>报告产物</h2>
+        </div>
+      </div>
+      {% if snapshot %}
+        <div class="artifact-actions">
+          {% for artifact_key, artifact_label in odoo_missing_artifact_labels.items() %}
+            <a class="artifact-link" href="{{ request.url_for('odoo_missing_artifact', artifact_key=artifact_key) }}">{{ artifact_label }}</a>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="empty">刷新一次后才会生成下载文件。</p>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">承运商汇总</p>
+          <h2>缺失 tracking number 统计</h2>
+        </div>
+      </div>
+      {% if snapshot and snapshot.summary_rows %}
+        <div class="files-table-wrap">
+          <table class="files-table odoo-summary-table">
+            <thead>
+              <tr>
+                <th>承运商</th>
+                <th>起算时间</th>
+                <th>总出库</th>
+                <th>done</th>
+                <th>cancel</th>
+                <th>有 tracking number</th>
+                <th>缺失 tracking number</th>
+                <th>缺失率</th>
+                <th>明细校验</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in snapshot.summary_rows %}
+                <tr class="file-row">
+                  <td>
+                    <div class="file-primary">
+                      <strong>{{ row.carrier_name }}</strong>
+                      <div class="file-meta">carrier_id = {{ row.carrier_id }}</div>
+                    </div>
+                  </td>
+                  <td>{{ row.counting_start_datetime }}</td>
+                  <td>{{ row.total_done_outgoing }}</td>
+                  <td>{{ row.done_count }}</td>
+                  <td>{{ row.cancel_count }}</td>
+                  <td>{{ row.with_tracking_number }}</td>
+                  <td>{{ row.without_tracking_number }}</td>
+                  <td>{{ row.missing_rate_percent }}%</td>
+                  <td>
+                    <span class="badge {% if row.detail_matches_summary %}badge-ok{% else %}badge-failed{% endif %}">
+                      {{ "一致" if row.detail_matches_summary else "不一致" }}
+                    </span>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="empty">还没有 Odoo 缺失报告快照。</p>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">缺失明细</p>
+          <h2>Odoo 出库明细与缺失筛选</h2>
+        </div>
+      </div>
+      {% if snapshot %}
+        <div class="toolbar filter-toolbar">
+          <label class="search-field">
+            <span>搜索</span>
+            <div class="search-input-wrap">
+              <input id="odooMissingSearch" type="search" placeholder="出库单号、Odoo ID、承运商">
+              <button id="odooMissingClear" type="button" class="secondary-button">清空</button>
+            </div>
+          </label>
+          <label>
+            <span>承运商</span>
+            <select id="odooMissingCarrier">
+              <option value="">全部承运商</option>
+            </select>
+          </label>
+          <label>
+            <span>状态</span>
+            <select id="odooMissingStatus">
+              <option value="missing_tracking" selected>缺失 tracking number</option>
+            </select>
+          </label>
+          <label>
+            <span>单据状态</span>
+            <select id="odooMissingState">
+              <option value="">全部单据状态</option>
+            </select>
+          </label>
+          <label>
+            <span>POD 链接</span>
+            <select id="odooMissingPodLinkStatus">
+              <option value="">全部 POD 链接状态</option>
+            </select>
+          </label>
+          <div class="toolbar-actions">
+            <button id="odooMissingRefresh" type="button" class="secondary-button">刷新列表</button>
+          </div>
+        </div>
+        <div class="filter-meta">
+          <div id="odooMissingMeta">等待加载…</div>
+          <label class="page-size-label">
+            每页条数
+            <select id="odooMissingPageSize">
+              <option value="25" selected>25</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+            </select>
+          </label>
+        </div>
+        <div class="files-table-wrap">
+          <table class="files-table odoo-detail-table">
+            <thead>
+              <tr>
+                <th>承运商</th>
+                <th>出库单号</th>
+                <th>Odoo ID</th>
+                <th>单据状态 / tracking number</th>
+                <th>业务时间</th>
+              </tr>
+            </thead>
+            <tbody id="odooMissingBody">
+              <tr class="file-row"><td colspan="5" class="empty-cell">等待加载…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pagination-bar">
+          <div id="odooMissingIndicator">第 1 / 1 页</div>
+          <div class="pagination-actions">
+            <button id="odooMissingPrev" type="button" class="secondary-button">上一页</button>
+            <button id="odooMissingNext" type="button" class="secondary-button">下一页</button>
+          </div>
+        </div>
+      {% else %}
+        <p class="empty">先刷新一次 Odoo 缺失报告，再查看明细。</p>
+      {% endif %}
+    </div>
+  </section>
+
+  {% if snapshot %}
+    <script>
+      const endpoint = "{{ request.url_for('api_odoo_missing_details') }}";
+      const queryParams = new URLSearchParams(window.location.search);
+      const state = {
+        page: Math.max(1, Number(queryParams.get("page") || 1)),
+        pageSize: Math.max(1, Number(queryParams.get("page_size") || 25)),
+        query: (queryParams.get("q") || "").trim(),
+        carrier: queryParams.get("carrier") || "",
+        trackingStatus: queryParams.has("tracking_status") ? (queryParams.get("tracking_status") || "") : "missing_tracking",
+        pickingState: queryParams.get("state") || "",
+        podLinkStatus: queryParams.get("pod_link_status") || "",
+      };
+
+      const elements = {
+        search: document.getElementById("odooMissingSearch"),
+        clear: document.getElementById("odooMissingClear"),
+        carrier: document.getElementById("odooMissingCarrier"),
+        status: document.getElementById("odooMissingStatus"),
+        pickingState: document.getElementById("odooMissingState"),
+        podLinkStatus: document.getElementById("odooMissingPodLinkStatus"),
+        refresh: document.getElementById("odooMissingRefresh"),
+        pageSize: document.getElementById("odooMissingPageSize"),
+        prev: document.getElementById("odooMissingPrev"),
+        next: document.getElementById("odooMissingNext"),
+        indicator: document.getElementById("odooMissingIndicator"),
+        meta: document.getElementById("odooMissingMeta"),
+        body: document.getElementById("odooMissingBody"),
+      };
+
+      let debounceTimer = null;
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function updateCarrierOptions(options, currentValue) {
+        elements.carrier.innerHTML = options.map((item) => {
+          const selected = item.value === currentValue ? " selected" : "";
+          return `<option value="${escapeHtml(item.value)}"${selected}>${escapeHtml(item.label)}</option>`;
+        }).join("");
+      }
+
+      function updateStatusOptions(options, currentValue) {
+        elements.status.innerHTML = options.map((item) => {
+          const selected = item.value === currentValue ? " selected" : "";
+          return `<option value="${escapeHtml(item.value)}"${selected}>${escapeHtml(item.label)}</option>`;
+        }).join("");
+      }
+
+      function updateStateOptions(options, currentValue) {
+        elements.pickingState.innerHTML = options.map((item) => {
+          const selected = item.value === currentValue ? " selected" : "";
+          return `<option value="${escapeHtml(item.value)}"${selected}>${escapeHtml(item.label)}</option>`;
+        }).join("");
+      }
+
+      function updatePodLinkOptions(options, currentValue) {
+        elements.podLinkStatus.innerHTML = options.map((item) => {
+          const selected = item.value === currentValue ? " selected" : "";
+          return `<option value="${escapeHtml(item.value)}"${selected}>${escapeHtml(item.label)}</option>`;
+        }).join("");
+      }
+
+      function renderRows(items) {
+        if (!items.length) {
+          elements.body.innerHTML = '<tr class="file-row"><td colspan="5" class="empty-cell">当前筛选下没有明细。</td></tr>';
+          return;
+        }
+        elements.body.innerHTML = items.map((item) => `
+          <tr class="file-row">
+            <td>
+              <div class="file-primary">
+                <strong>${escapeHtml(item.carrier_name || "-")}</strong>
+                <div class="file-meta">carrier_id = ${escapeHtml(item.carrier_id || "-")}</div>
+              </div>
+            </td>
+            <td class="file-path-cell"><strong class="mono wrap-anywhere">${escapeHtml(item.picking_name || "-")}</strong></td>
+            <td><span class="mono">${escapeHtml(item.odoo_picking_id || "-")}</span></td>
+            <td>
+              <div class="file-primary">
+                <span class="badge ${item.tracking_status === "with_tracking" ? "badge-ok" : "badge-failed"}">${item.tracking_status === "with_tracking" ? "已有 tracking number" : "缺失 tracking number"}</span>
+                <div class="file-meta">${escapeHtml(item.state || "-")}</div>
+                <div class="file-meta mono wrap-anywhere">${escapeHtml(item.tracking_number || "-")}</div>
+                ${item.x_studio_pod_link ? `<div class="file-meta"><a class="text-link" href="${escapeHtml(item.x_studio_pod_link)}" target="_blank" rel="noreferrer">打开 Odoo POD 链接</a></div>` : ""}
+              </div>
+            </td>
+            <td>${escapeHtml(item.business_datetime || "-")}</td>
+          </tr>
+        `).join("");
+      }
+
+      async function loadRows() {
+        const params = new URLSearchParams({
+          q: state.query,
+          carrier: state.carrier,
+          tracking_status: state.trackingStatus,
+          state: state.pickingState,
+          pod_link_status: state.podLinkStatus,
+          page: String(state.page),
+          page_size: String(state.pageSize),
+        });
+        elements.meta.textContent = "正在加载…";
+        const response = await fetch(`${endpoint}?${params.toString()}`, { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        updateCarrierOptions(payload.carrier_options, state.carrier);
+        updateStatusOptions(payload.tracking_status_options, state.trackingStatus);
+        updateStateOptions(payload.state_options, state.pickingState);
+        updatePodLinkOptions(payload.pod_link_status_options, state.podLinkStatus);
+        renderRows(payload.items);
+        elements.meta.textContent = payload.total
+          ? `当前筛选命中 ${payload.total} 条，正在显示第 ${payload.page_start} - ${payload.page_end} 条`
+          : "当前筛选没有命中明细。";
+        elements.indicator.textContent = `第 ${payload.page} / ${payload.total_pages} 页`;
+        elements.prev.disabled = payload.page <= 1;
+        elements.next.disabled = payload.page >= payload.total_pages;
+      }
+
+      function scheduleReload(resetPage = false) {
+        if (resetPage) state.page = 1;
+        if (debounceTimer) window.clearTimeout(debounceTimer);
+        debounceTimer = window.setTimeout(() => {
+          loadRows().catch((error) => {
+            elements.meta.textContent = `加载失败：${error.message}`;
+            elements.body.innerHTML = '<tr class="file-row"><td colspan="5" class="empty-cell">加载失败，请稍后重试。</td></tr>';
+          });
+        }, 180);
+      }
+
+      elements.search.addEventListener("input", (event) => {
+        state.query = event.target.value.trim();
+        scheduleReload(true);
+      });
+      elements.clear.addEventListener("click", () => {
+        state.query = "";
+        elements.search.value = "";
+        scheduleReload(true);
+      });
+      elements.carrier.addEventListener("change", (event) => {
+        state.carrier = event.target.value;
+        scheduleReload(true);
+      });
+      elements.status.addEventListener("change", (event) => {
+        state.trackingStatus = event.target.value;
+        scheduleReload(true);
+      });
+      elements.pickingState.addEventListener("change", (event) => {
+        state.pickingState = event.target.value;
+        scheduleReload(true);
+      });
+      elements.podLinkStatus.addEventListener("change", (event) => {
+        state.podLinkStatus = event.target.value;
+        scheduleReload(true);
+      });
+      elements.refresh.addEventListener("click", () => {
+        scheduleReload(false);
+      });
+
+      elements.search.value = state.query;
+      elements.pageSize.value = String(state.pageSize);
+      elements.pageSize.addEventListener("change", (event) => {
+        state.pageSize = Number(event.target.value || 25);
+        scheduleReload(true);
+      });
+      elements.prev.addEventListener("click", () => {
+        if (state.page > 1) {
+          state.page -= 1;
+          scheduleReload(false);
+        }
+      });
+      elements.next.addEventListener("click", () => {
+        state.page += 1;
+        scheduleReload(false);
+      });
+
+      loadRows().catch((error) => {
+        elements.meta.textContent = `加载失败：${error.message}`;
+        elements.body.innerHTML = '<tr class="file-row"><td colspan="5" class="empty-cell">加载失败，请稍后重试。</td></tr>';
+      });
+    </script>
+  {% endif %}
+{% endblock %}

@@ -1,0 +1,395 @@
+{% extends "base.html" %}
+{% block title %}对比 · POD 同步控制台{% endblock %}
+{% block content %}
+  <section class="grid grid-cards">
+    <article class="card stat-card">
+      <p class="label">最新刷新</p>
+      <h2>{% if snapshot %}{{ snapshot.generated_at }}{% else %}还没有快照{% endif %}</h2>
+      <p class="muted">基于最新 POD 识别结果和最新 Odoo 总明细快照</p>
+    </article>
+    <article class="card stat-card">
+      <p class="label">POD 唯一匹配键</p>
+      <h2>{% if snapshot %}{{ snapshot.totals.unique_identifier_count }}{% else %}0{% endif %}</h2>
+      <p class="muted">按来源 + 键类型 + 键值去重</p>
+    </article>
+    <article class="card stat-card">
+      <p class="label">匹配率</p>
+      <h2>{% if snapshot %}{{ snapshot.totals.match_rate_percent }}%{% else %}0%{% endif %}</h2>
+      <p class="muted">done 和 cancel 都计入命中</p>
+    </article>
+    <article class="card stat-card">
+      <p class="label">命中已取消单</p>
+      <h2>{% if snapshot %}{{ snapshot.totals.matched_cancelled_count }}{% else %}0{% endif %}</h2>
+      <p class="muted">POD 找到对应 Odoo，但单据状态是 cancel</p>
+    </article>
+    <article class="card stat-card">
+      <p class="label">命中其他承运商</p>
+      <h2>{% if snapshot %}{{ snapshot.totals.matched_other_carrier_count }}{% else %}0{% endif %}</h2>
+      <p class="muted">Odoo 里有单，但 carrier 已不是当前 POD 来源</p>
+    </article>
+    <article class="card stat-card">
+      <p class="label">按匹配键未命中 Odoo</p>
+      <h2>{% if snapshot %}{{ snapshot.totals.not_found_count }}{% else %}0{% endif %}</h2>
+      <p class="muted">POD 已识别匹配键，但在 Odoo 总明细中未命中</p>
+    </article>
+    <article class="card stat-card">
+      <p class="label">识别待处理</p>
+      <h2>{% if snapshot %}{{ snapshot.totals.review_document_count }}{% else %}0{% endif %}</h2>
+      <p class="muted">这些文档没有参与自动对比</p>
+    </article>
+  </section>
+
+  <section class="section two-col">
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">刷新</p>
+          <h2>最新 POD vs Odoo 对比</h2>
+        </div>
+      </div>
+      <p class="muted">默认对比最新一批 POD 识别结果和当前 Odoo 总明细快照。</p>
+      <form method="post" action="{{ request.url_for('action_refresh_compare') }}" class="stack-form compact-form" data-submit-state data-pending-notice="POD 对比报告正在刷新，请稍候…">
+        <button type="submit" class="action-button" data-loading-text="正在刷新 POD 对比报告…">刷新 POD 对比报告</button>
+      </form>
+      {% if snapshot %}
+        <ul class="compact-list">
+          <li>识别批次：<span class="mono">{{ snapshot.phase1a.run_name }}</span></li>
+          <li>识别时间：{{ snapshot.phase1a.generated_at }}</li>
+          <li>Odoo 快照时间：{{ snapshot.odoo.generated_at }}</li>
+        </ul>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">下载</p>
+          <h2>对比产物</h2>
+        </div>
+      </div>
+      {% if snapshot %}
+        <div class="artifact-actions">
+          {% for artifact_key, artifact_label in pod_compare_artifact_labels.items() %}
+            <a class="artifact-link" href="{{ request.url_for('compare_artifact', artifact_key=artifact_key) }}">{{ artifact_label }}</a>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="empty">刷新一次后才会生成下载文件。</p>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">来源汇总</p>
+          <h2>最新 POD 识别与 Odoo 的匹配情况</h2>
+        </div>
+      </div>
+      {% if snapshot and snapshot.summary_rows %}
+        <div class="files-table-wrap">
+          <table class="files-table compare-summary-table">
+            <thead>
+              <tr>
+                <th>来源</th>
+                <th>唯一匹配键数</th>
+                <th>匹配成功</th>
+                <th>命中已取消单</th>
+                <th>命中其他承运商</th>
+                <th>按匹配键未命中 Odoo</th>
+                <th>Odoo 命中多条</th>
+                <th>匹配率</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in snapshot.summary_rows %}
+                <tr class="file-row">
+                  <td>
+                    <div class="file-primary">
+                      <strong>{{ row.source_name }}</strong>
+                      <div class="file-meta">carrier_id = {{ row.carrier_id }}</div>
+                    </div>
+                  </td>
+                  <td>{{ row.unique_identifier_count }}</td>
+                  <td>{{ row.matched_count }}</td>
+                  <td>{{ row.matched_cancelled_count }}</td>
+                  <td>{{ row.matched_other_carrier_count }}</td>
+                  <td>{{ row.not_found_count }}</td>
+                  <td>{{ row.ambiguous_count }}</td>
+                  <td>{{ row.match_rate_percent }}%</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="empty">还没有 POD 对比快照。</p>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="card">
+        <div class="section-head section-head-tight">
+          <div>
+            <p class="eyebrow">对比明细</p>
+            <h2>查看匹配成功、命中其他承运商、按匹配键未命中 Odoo、Odoo 命中多条</h2>
+          </div>
+        </div>
+      {% if snapshot %}
+        <div class="toolbar filter-toolbar">
+          <label class="search-field">
+            <span>搜索</span>
+            <div class="search-input-wrap">
+              <input id="compareSearch" type="search" placeholder="匹配键、来源、文件名、路径、Odoo 单号">
+              <button id="compareClear" type="button" class="secondary-button">清空</button>
+            </div>
+          </label>
+          <label>
+            <span>来源</span>
+            <select id="compareSource">
+              <option value="">全部来源</option>
+            </select>
+          </label>
+          <label>
+            <span>状态</span>
+            <select id="compareStatus">
+              <option value="odoo_not_found" selected>按匹配键未命中 Odoo</option>
+            </select>
+          </label>
+          <div class="toolbar-actions">
+            <button id="compareRefresh" type="button" class="secondary-button">刷新列表</button>
+          </div>
+        </div>
+        <div class="filter-meta">
+          <div id="compareMeta">等待加载…</div>
+          <label class="page-size-label">
+            每页条数
+            <select id="comparePageSize">
+              <option value="25" selected>25</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+            </select>
+          </label>
+        </div>
+        <div class="files-table-wrap">
+          <table class="files-table compare-detail-table">
+            <thead>
+              <tr>
+                <th>来源 / 匹配键</th>
+                <th>状态 / 文档数</th>
+                <th>Odoo 命中</th>
+                <th>文件样本</th>
+                <th>路径样本</th>
+              </tr>
+            </thead>
+            <tbody id="compareBody">
+              <tr class="file-row"><td colspan="5" class="empty-cell">等待加载…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pagination-bar">
+          <div id="compareIndicator">第 1 / 1 页</div>
+          <div class="pagination-actions">
+            <button id="comparePrev" type="button" class="secondary-button">上一页</button>
+            <button id="compareNext" type="button" class="secondary-button">下一页</button>
+          </div>
+        </div>
+      {% else %}
+        <p class="empty">先刷新一次对比报告，再查看明细。</p>
+      {% endif %}
+    </div>
+  </section>
+
+  {% if snapshot %}
+    <script>
+      const endpoint = "{{ request.url_for('api_compare_details') }}";
+      const statusLabels = {
+        matched: "匹配成功",
+        matched_cancelled: "匹配到已取消单",
+        matched_other_carrier: "命中其他承运商",
+        odoo_not_found: "按匹配键未命中 Odoo",
+        multiple_odoo_matches: "Odoo 命中多条",
+      };
+      const queryParams = new URLSearchParams(window.location.search);
+      const state = {
+        page: Math.max(1, Number(queryParams.get("page") || 1)),
+        pageSize: Math.max(1, Number(queryParams.get("page_size") || 25)),
+        query: (queryParams.get("q") || "").trim(),
+        source: queryParams.get("source") || "",
+        status: queryParams.has("status") ? (queryParams.get("status") || "") : "odoo_not_found",
+      };
+
+      const elements = {
+        search: document.getElementById("compareSearch"),
+        clear: document.getElementById("compareClear"),
+        source: document.getElementById("compareSource"),
+        status: document.getElementById("compareStatus"),
+        refresh: document.getElementById("compareRefresh"),
+        pageSize: document.getElementById("comparePageSize"),
+        prev: document.getElementById("comparePrev"),
+        next: document.getElementById("compareNext"),
+        indicator: document.getElementById("compareIndicator"),
+        meta: document.getElementById("compareMeta"),
+        body: document.getElementById("compareBody"),
+      };
+
+      let debounceTimer = null;
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function updateSelectOptions(select, options, currentValue) {
+        select.innerHTML = options.map((item) => {
+          const selected = item.value === currentValue ? " selected" : "";
+          return `<option value="${escapeHtml(item.value)}"${selected}>${escapeHtml(item.label)}</option>`;
+        }).join("");
+      }
+
+      function renderSampleDocuments(samples) {
+        if (!Array.isArray(samples) || !samples.length) {
+          return `<span class="mono wrap-anywhere">-</span>`;
+        }
+        return samples.map((sample) => {
+          const links = [];
+          if (sample.file_url) {
+            links.push(`<a class="text-link" href="${escapeHtml(sample.file_url)}" target="_blank" rel="noreferrer">源文件</a>`);
+          }
+          if (sample.local_file_href) {
+            links.push(`<a class="text-link" href="${escapeHtml(sample.local_file_href)}" target="_blank" rel="noreferrer">本地文件</a>`);
+          }
+          const linkHtml = links.length ? `<div class="file-meta">${links.join(" · ")}</div>` : "";
+          return `
+            <div class="file-primary sample-path-block">
+              <strong class="mono wrap-anywhere">${escapeHtml(sample.source_path || sample.file_name || "-")}</strong>
+              ${linkHtml}
+            </div>
+          `;
+        }).join("");
+      }
+
+      function renderRows(items) {
+        if (!items.length) {
+          elements.body.innerHTML = '<tr class="file-row"><td colspan="5" class="empty-cell">当前筛选下没有明细。</td></tr>';
+          return;
+        }
+        elements.body.innerHTML = items.map((item) => `
+          <tr class="file-row">
+            <td>
+              <div class="file-primary">
+                <strong>${escapeHtml(item.source_name || "-")} · ${escapeHtml(item.preferred_key_type_label || item.preferred_key_type || "-")}</strong>
+                <div class="file-meta mono wrap-anywhere">${escapeHtml(item.preferred_key_display || item.preferred_key || "-")}</div>
+              </div>
+            </td>
+            <td>
+              <div class="file-primary">
+                <span class="badge ${item.compare_status === "matched" ? "badge-ok" : (item.compare_status === "matched_cancelled" || item.compare_status === "matched_other_carrier" || item.compare_status === "multiple_odoo_matches" ? "badge-running" : "badge-failed")}">${escapeHtml(statusLabels[item.compare_status] || item.compare_status || "-")}</span>
+                <div class="file-meta">文档数：${escapeHtml(item.document_count || 0)}</div>
+                <div class="file-meta">最新时间：${escapeHtml(item.latest_source_modified_at || "-")}</div>
+                ${item.compare_explanation ? `<div class="file-meta">${escapeHtml(item.compare_explanation)}</div>` : ""}
+              </div>
+            </td>
+            <td>
+              <div class="file-primary">
+                <strong>${escapeHtml(item.matched_odoo_count || 0)} 条</strong>
+                <div class="file-meta mono wrap-anywhere">${escapeHtml(item.matched_odoo_picking_names || "-")}</div>
+                ${item.matched_odoo_carrier_names ? `<div class="file-meta mono wrap-anywhere">承运商：${escapeHtml(item.matched_odoo_carrier_names)}</div>` : ""}
+                <div class="file-meta mono wrap-anywhere">状态：${escapeHtml(item.matched_odoo_states || "-")}</div>
+                <div class="file-meta mono wrap-anywhere">${escapeHtml(item.matched_odoo_tracking_numbers || "-")}</div>
+                ${item.matched_odoo_pod_links ? `<div class="file-meta mono wrap-anywhere">POD 链接：${escapeHtml(item.matched_odoo_pod_links)}</div>` : ""}
+              </div>
+            </td>
+            <td class="file-path-cell"><span class="mono wrap-anywhere">${escapeHtml(item.sample_file_names || "-")}</span></td>
+            <td class="file-path-cell">${renderSampleDocuments(item.sample_documents)}</td>
+          </tr>
+        `).join("");
+      }
+
+      async function loadRows() {
+        const params = new URLSearchParams({
+          q: state.query,
+          source: state.source,
+          status: state.status,
+          page: String(state.page),
+          page_size: String(state.pageSize),
+        });
+        elements.meta.textContent = "正在加载…";
+        const response = await fetch(`${endpoint}?${params.toString()}`, { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        updateSelectOptions(elements.source, payload.source_options, state.source);
+        updateSelectOptions(elements.status, payload.status_options, state.status);
+        renderRows(payload.items);
+        elements.meta.textContent = payload.total
+          ? `当前筛选命中 ${payload.total} 条，正在显示第 ${payload.page_start} - ${payload.page_end} 条`
+          : "当前筛选没有命中明细。";
+        elements.indicator.textContent = `第 ${payload.page} / ${payload.total_pages} 页`;
+        elements.prev.disabled = payload.page <= 1;
+        elements.next.disabled = payload.page >= payload.total_pages;
+      }
+
+      function scheduleReload(resetPage = false) {
+        if (resetPage) state.page = 1;
+        if (debounceTimer) window.clearTimeout(debounceTimer);
+        debounceTimer = window.setTimeout(() => {
+          loadRows().catch((error) => {
+            elements.meta.textContent = `加载失败：${error.message}`;
+            elements.body.innerHTML = '<tr class="file-row"><td colspan="5" class="empty-cell">加载失败，请稍后重试。</td></tr>';
+          });
+        }, 180);
+      }
+
+      elements.search.addEventListener("input", (event) => {
+        state.query = event.target.value.trim();
+        scheduleReload(true);
+      });
+      elements.clear.addEventListener("click", () => {
+        state.query = "";
+        elements.search.value = "";
+        scheduleReload(true);
+      });
+      elements.source.addEventListener("change", (event) => {
+        state.source = event.target.value;
+        scheduleReload(true);
+      });
+      elements.status.addEventListener("change", (event) => {
+        state.status = event.target.value;
+        scheduleReload(true);
+      });
+      elements.refresh.addEventListener("click", () => {
+        scheduleReload(false);
+      });
+      elements.pageSize.addEventListener("change", (event) => {
+        state.pageSize = Number(event.target.value || 25);
+        scheduleReload(true);
+      });
+      elements.prev.addEventListener("click", () => {
+        if (state.page > 1) {
+          state.page -= 1;
+          scheduleReload(false);
+        }
+      });
+      elements.next.addEventListener("click", () => {
+        state.page += 1;
+        scheduleReload(false);
+      });
+
+      elements.search.value = state.query;
+      elements.pageSize.value = String(state.pageSize);
+
+      loadRows().catch((error) => {
+        elements.meta.textContent = `加载失败：${error.message}`;
+        elements.body.innerHTML = '<tr class="file-row"><td colspan="5" class="empty-cell">加载失败，请稍后重试。</td></tr>';
+      });
+    </script>
+  {% endif %}
+{% endblock %}

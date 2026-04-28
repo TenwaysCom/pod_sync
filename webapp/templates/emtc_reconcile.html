@@ -1,0 +1,532 @@
+{% extends "base.html" %}
+{% block title %}对账 · POD 同步控制台{% endblock %}
+{% block content %}
+  <section class="section">
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">对账入口</p>
+          <h2>按来源看 Odoo 和 POD 的双向命中情况</h2>
+          <p>这里固定读取最新一批 POD 识别结果，并与最新 Odoo 总明细快照做双向对账。开始月份只作用于 Odoo 出库单池，按 `business_datetime` 过滤；POD 文件池保持全量，再去看是否能命中过滤后的 Odoo 单池。</p>
+        </div>
+      </div>
+      <div class="reconcile-toolbar">
+        <div class="reconcile-tabs">
+          {% for item in reconcile_sources %}
+            <a
+              class="reconcile-tab {% if item.slug == selected_source.slug %}active{% endif %}"
+              href="{{ request.url_for('reconcile_page') }}?kind={{ item.slug }}{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}"
+            >
+              {{ item.label }}
+            </a>
+          {% endfor %}
+        </div>
+        <form class="reconcile-range-form" method="get" action="{{ request.url_for('reconcile_page') }}">
+          <input type="hidden" name="kind" value="{{ selected_source.slug }}">
+          <label>
+            <span>开始月份</span>
+            <select id="reconcileStartMonth" name="start_month">
+              <option value="">全部时间</option>
+              {% for item in start_month_options %}
+                <option value="{{ item.value }}"{% if item.value == selected_start_month %} selected{% endif %}>{{ item.label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          {% if dataset %}
+            <a class="action-button" href="{{ request.url_for('reconcile_export') }}?kind={{ selected_source.slug }}{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}">
+              下载 总报告
+            </a>
+          {% endif %}
+        </form>
+      </div>
+    </div>
+  </section>
+
+  <section class="grid grid-cards">
+    <article class="card stat-card">
+      <p class="label">当前来源</p>
+      <h2>{{ selected_source.label }}</h2>
+      <p class="muted">匹配键：{{ selected_source.match_key_label }}</p>
+    </article>
+    <article class="card stat-card">
+      <p class="label">最新刷新</p>
+      <h2>{% if dataset %}{{ dataset.generated_at }}{% else %}还没有快照{% endif %}</h2>
+      <p class="muted">基于最新 Odoo 总明细快照和最新 POD 识别结果</p>
+    </article>
+    <article class="card stat-card">
+      <p class="label">识别批次</p>
+      <h2>{% if dataset %}{{ dataset.phase1a_run_name }}{% else %}-{% endif %}</h2>
+      <p class="muted">当前页面固定看最新一批全量 POD 识别结果中的 {{ selected_source.label }} 文件</p>
+    </article>
+  </section>
+
+  <section class="section">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">Odoo -> POD</p>
+        <h2>{{ selected_source.odoo_heading }}</h2>
+      </div>
+    </div>
+    {% if dataset %}
+      <div class="grid grid-cards">
+        <article class="card stat-card stat-card-inline">
+          <div class="stat-card-topline">
+            <p class="label">{{ selected_source.odoo_total_label }}</p>
+            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=odoo&metric=total{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}">下载</a>
+          </div>
+          <h2>{{ dataset.odoo_summary.total_count }}</h2>
+          <p class="stat-card-share">{{ dataset.odoo_summary.total_share_text }}</p>
+          <p class="muted">Odoo 中 `carrier_id = {{ selected_source.carrier_id }}` 的全部单据</p>
+        </article>
+        <article class="card stat-card stat-card-inline stat-card-alert">
+          <div class="stat-card-topline">
+            <p class="label">{{ selected_source.odoo_without_key_label }}</p>
+            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=odoo&metric=without_key{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}">下载</a>
+          </div>
+          <h2>{{ dataset.odoo_summary.without_match_key_count }}</h2>
+          <p class="stat-card-share">{{ dataset.odoo_summary.without_match_key_share_text }}</p>
+          <p class="muted">{{ selected_source.odoo_without_key_hint }}</p>
+        </article>
+        <article class="card stat-card stat-card-inline">
+          <div class="stat-card-topline">
+            <p class="label">{{ selected_source.odoo_with_key_label }}</p>
+            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=odoo&metric=with_key{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}">下载</a>
+          </div>
+          <h2>{{ dataset.odoo_summary.with_match_key_count }}</h2>
+          <p class="stat-card-share">{{ dataset.odoo_summary.with_match_key_share_text }}</p>
+          <p class="muted">{{ selected_source.odoo_with_key_hint }}</p>
+        </article>
+        <article class="card stat-card stat-card-inline">
+          <div class="stat-card-topline">
+            <p class="label">{{ selected_source.odoo_match_label }}</p>
+            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=odoo&metric=matched{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}">下载</a>
+          </div>
+          <h2>{{ dataset.odoo_summary.matched_pod_count }}</h2>
+          <p class="stat-card-share">{{ dataset.odoo_summary.matched_pod_share_text }}</p>
+          <p class="muted">{{ selected_source.odoo_match_hint }}</p>
+        </article>
+        <article class="card stat-card stat-card-inline stat-card-alert">
+          <div class="stat-card-topline">
+            <p class="label">{{ selected_source.odoo_missing_label }}</p>
+            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=odoo&metric=missing{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}">下载</a>
+          </div>
+          <h2>{{ dataset.odoo_summary.without_pod_count }}</h2>
+          <p class="stat-card-share">{{ dataset.odoo_summary.without_pod_share_text }}</p>
+          <p class="muted">{{ selected_source.odoo_missing_hint }}</p>
+        </article>
+      </div>
+
+      <details class="details-card details-card-block" id="odooToPodDetails">
+        <summary>查看 {{ selected_source.label }} Odoo -> POD 明细</summary>
+        <div class="card">
+          <div class="section-head section-head-tight">
+            <div>
+              <p class="eyebrow">明细</p>
+              <h2>{{ selected_source.label }} Odoo 单据在 POD 中的命中情况</h2>
+            </div>
+          </div>
+          <div class="toolbar filter-toolbar">
+            <label class="search-field">
+              <span>搜索</span>
+              <div class="search-input-wrap">
+                <input id="odooToPodSearch" type="search" placeholder="{{ selected_source.odoo_search_placeholder }}">
+                <button id="odooToPodClear" type="button" class="secondary-button">清空</button>
+              </div>
+            </label>
+            <label>
+              <span>状态</span>
+              <select id="odooToPodStatus">
+                <option value="">全部状态</option>
+              </select>
+            </label>
+            <div class="toolbar-actions">
+              <button id="odooToPodRefresh" type="button" class="secondary-button">刷新列表</button>
+            </div>
+          </div>
+          <div class="filter-meta">
+            <div id="odooToPodMeta">展开后加载明细…</div>
+            <label class="page-size-label">
+              每页条数
+              <select id="odooToPodPageSize">
+                <option value="25" selected>25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+              </select>
+            </label>
+          </div>
+          <div class="files-table-wrap">
+            <table class="files-table compare-detail-table">
+              <thead>
+                <tr>
+                  <th>Odoo 单据</th>
+                  <th>{{ selected_source.match_key_label }} / 状态</th>
+                  <th>POD 命中数</th>
+                  <th>POD 文件样本</th>
+                  <th>路径样本</th>
+                </tr>
+              </thead>
+              <tbody id="odooToPodBody">
+                <tr class="file-row"><td colspan="5" class="empty-cell">展开后加载明细。</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="pagination-bar">
+            <div id="odooToPodIndicator">第 1 / 1 页</div>
+            <div class="pagination-actions">
+              <button id="odooToPodPrev" type="button" class="secondary-button">上一页</button>
+              <button id="odooToPodNext" type="button" class="secondary-button">下一页</button>
+            </div>
+          </div>
+        </div>
+      </details>
+    {% else %}
+      <p class="empty">还没有可用的 {{ selected_source.label }} 对账数据。</p>
+    {% endif %}
+  </section>
+
+  <section class="section">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">POD -> Odoo</p>
+        <h2>{{ selected_source.pod_heading }}</h2>
+      </div>
+    </div>
+    {% if dataset %}
+      <div class="grid grid-cards">
+        <article class="card stat-card stat-card-inline">
+          <div class="stat-card-topline">
+            <p class="label">{{ selected_source.pod_total_label }}</p>
+            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=pod&metric=total{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}">下载</a>
+          </div>
+          <h2>{{ dataset.pod_summary.total_count }}</h2>
+          <p class="stat-card-share">{{ dataset.pod_summary.total_share_text }}</p>
+          <p class="muted">来自最新 POD 识别结果中的全部 {{ selected_source.label }} 文件</p>
+        </article>
+        <article class="card stat-card stat-card-inline stat-card-alert">
+          <div class="stat-card-topline">
+            <p class="label">{{ selected_source.pod_unparseable_label }}</p>
+            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=pod&metric=unparseable{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}">下载</a>
+          </div>
+          <h2>{{ dataset.pod_summary.unparseable_count }}</h2>
+          <p class="stat-card-share">{{ dataset.pod_summary.unparseable_share_text }}</p>
+          <p class="muted">{{ selected_source.pod_unparseable_hint }}</p>
+        </article>
+        <article class="card stat-card stat-card-inline">
+          <div class="stat-card-topline">
+            <p class="label">{{ selected_source.pod_parseable_label }}</p>
+            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=pod&metric=parseable{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}">下载</a>
+          </div>
+          <h2>{{ dataset.pod_summary.parseable_count }}</h2>
+          <p class="stat-card-share">{{ dataset.pod_summary.parseable_share_text }}</p>
+          <p class="muted">{{ selected_source.pod_parseable_hint }}</p>
+        </article>
+        <article class="card stat-card stat-card-inline">
+          <div class="stat-card-topline">
+            <p class="label">{{ selected_source.pod_found_label }}</p>
+            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=pod&metric=found{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}">下载</a>
+          </div>
+          <h2>{{ dataset.pod_summary.found_in_odoo_count }}</h2>
+          <p class="stat-card-share">{{ dataset.pod_summary.found_in_odoo_share_text }}</p>
+          <p class="muted">{{ selected_source.pod_found_hint }}</p>
+        </article>
+        <article class="card stat-card stat-card-inline stat-card-alert">
+          <div class="stat-card-topline">
+            <p class="label">{{ selected_source.pod_missing_label }}</p>
+            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=pod&metric=missing{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}">下载</a>
+          </div>
+          <h2>{{ dataset.pod_summary.not_found_in_odoo_count }}</h2>
+          <p class="stat-card-share">{{ dataset.pod_summary.not_found_in_odoo_share_text }}</p>
+          <p class="muted">{{ selected_source.pod_missing_hint }}</p>
+        </article>
+      </div>
+
+      <details class="details-card details-card-block" id="podToOdooDetails">
+        <summary>查看 {{ selected_source.label }} POD -> Odoo 明细</summary>
+        <div class="card">
+          <div class="section-head section-head-tight">
+            <div>
+              <p class="eyebrow">明细</p>
+              <h2>{{ selected_source.label }} POD 文件在 Odoo 中的命中情况</h2>
+            </div>
+          </div>
+          <div class="toolbar filter-toolbar">
+            <label class="search-field">
+              <span>搜索</span>
+              <div class="search-input-wrap">
+                <input id="podToOdooSearch" type="search" placeholder="{{ selected_source.pod_search_placeholder }}">
+                <button id="podToOdooClear" type="button" class="secondary-button">清空</button>
+              </div>
+            </label>
+            <label>
+              <span>状态</span>
+              <select id="podToOdooStatus">
+                <option value="">全部状态</option>
+              </select>
+            </label>
+            <div class="toolbar-actions">
+              <button id="podToOdooRefresh" type="button" class="secondary-button">刷新列表</button>
+            </div>
+          </div>
+          <div class="filter-meta">
+            <div id="podToOdooMeta">展开后加载明细…</div>
+            <label class="page-size-label">
+              每页条数
+              <select id="podToOdooPageSize">
+                <option value="25" selected>25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+              </select>
+            </label>
+          </div>
+          <div class="files-table-wrap">
+            <table class="files-table compare-detail-table">
+              <thead>
+                <tr>
+                  <th>POD 文件</th>
+                  <th>{{ selected_source.match_key_label }} / 状态</th>
+                  <th>Odoo 命中</th>
+                  <th>源路径</th>
+                  <th>链接</th>
+                </tr>
+              </thead>
+              <tbody id="podToOdooBody">
+                <tr class="file-row"><td colspan="5" class="empty-cell">展开后加载明细。</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="pagination-bar">
+            <div id="podToOdooIndicator">第 1 / 1 页</div>
+            <div class="pagination-actions">
+              <button id="podToOdooPrev" type="button" class="secondary-button">上一页</button>
+              <button id="podToOdooNext" type="button" class="secondary-button">下一页</button>
+            </div>
+          </div>
+        </div>
+      </details>
+    {% else %}
+      <p class="empty">还没有可用的 {{ selected_source.label }} 对账数据。</p>
+    {% endif %}
+  </section>
+
+  <script>
+    (() => {
+      const monthSelect = document.getElementById("reconcileStartMonth");
+      if (!monthSelect || !monthSelect.form) return;
+      monthSelect.addEventListener("change", () => {
+        if (typeof monthSelect.form.requestSubmit === "function") {
+          monthSelect.form.requestSubmit();
+          return;
+        }
+        monthSelect.form.submit();
+      });
+    })();
+  </script>
+
+  {% if dataset %}
+    <script>
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function createPager(config) {
+        const state = { page: 1, pageSize: 25, query: "", status: "" };
+        let debounceTimer = null;
+        let hasLoaded = false;
+
+        function updateSelectOptions(select, options, currentValue) {
+          select.innerHTML = options.map((item) => {
+            const selected = item.value === currentValue ? " selected" : "";
+            return `<option value="${escapeHtml(item.value)}"${selected}>${escapeHtml(item.label)}</option>`;
+          }).join("");
+        }
+
+        async function loadRows() {
+          const params = new URLSearchParams({
+            kind: config.kind,
+            start_month: config.startMonth,
+            q: state.query,
+            status: state.status,
+            page: String(state.page),
+            page_size: String(state.pageSize),
+          });
+          config.meta.textContent = "正在加载…";
+          const response = await fetch(`${config.endpoint}?${params.toString()}`, { cache: "no-store" });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          const payload = await response.json();
+          updateSelectOptions(config.status, payload.status_options, state.status);
+          config.renderRows(payload.items);
+          config.meta.textContent = payload.total
+            ? `当前筛选命中 ${payload.total} 条，正在显示第 ${payload.page_start} - ${payload.page_end} 条`
+            : "当前筛选没有命中明细。";
+          config.indicator.textContent = `第 ${payload.page} / ${payload.total_pages} 页`;
+          config.prev.disabled = payload.page <= 1;
+          config.next.disabled = payload.page >= payload.total_pages;
+          hasLoaded = true;
+        }
+
+        function scheduleReload(resetPage = false) {
+          if (resetPage) state.page = 1;
+          if (debounceTimer) window.clearTimeout(debounceTimer);
+          debounceTimer = window.setTimeout(() => {
+            loadRows().catch((error) => {
+              config.meta.textContent = `加载失败：${error.message}`;
+              config.body.innerHTML = `<tr class="file-row"><td colspan="${config.colspan}" class="empty-cell">加载失败，请稍后重试。</td></tr>`;
+            });
+          }, 180);
+        }
+
+        config.search.addEventListener("input", (event) => {
+          state.query = event.target.value.trim();
+          scheduleReload(true);
+        });
+        config.clear.addEventListener("click", () => {
+          state.query = "";
+          config.search.value = "";
+          scheduleReload(true);
+        });
+        config.status.addEventListener("change", (event) => {
+          state.status = event.target.value;
+          scheduleReload(true);
+        });
+        config.refresh.addEventListener("click", () => scheduleReload(false));
+        config.pageSize.addEventListener("change", (event) => {
+          state.pageSize = Number(event.target.value || 25);
+          scheduleReload(true);
+        });
+        config.prev.addEventListener("click", () => {
+          if (state.page > 1) {
+            state.page -= 1;
+            scheduleReload(false);
+          }
+        });
+        config.next.addEventListener("click", () => {
+          state.page += 1;
+          scheduleReload(false);
+        });
+
+        config.details.addEventListener("toggle", () => {
+          if (!config.details.open || hasLoaded) {
+            return;
+          }
+          loadRows().catch((error) => {
+            config.meta.textContent = `加载失败：${error.message}`;
+            config.body.innerHTML = `<tr class="file-row"><td colspan="${config.colspan}" class="empty-cell">加载失败，请稍后重试。</td></tr>`;
+          });
+        });
+      }
+
+      createPager({
+        details: document.getElementById("odooToPodDetails"),
+        endpoint: "{{ request.url_for('api_reconcile_odoo_to_pod') }}",
+        kind: "{{ selected_source.slug }}",
+        startMonth: "{{ selected_start_month or '' }}",
+        search: document.getElementById("odooToPodSearch"),
+        clear: document.getElementById("odooToPodClear"),
+        status: document.getElementById("odooToPodStatus"),
+        refresh: document.getElementById("odooToPodRefresh"),
+        pageSize: document.getElementById("odooToPodPageSize"),
+        prev: document.getElementById("odooToPodPrev"),
+        next: document.getElementById("odooToPodNext"),
+        indicator: document.getElementById("odooToPodIndicator"),
+        meta: document.getElementById("odooToPodMeta"),
+        body: document.getElementById("odooToPodBody"),
+        colspan: 5,
+        renderRows(items) {
+          if (!items.length) {
+            this.body.innerHTML = '<tr class="file-row"><td colspan="5" class="empty-cell">当前筛选下没有明细。</td></tr>';
+            return;
+          }
+          this.body.innerHTML = items.map((item) => `
+            <tr class="file-row">
+              <td>
+                <div class="file-primary">
+                  <strong>${escapeHtml(item.picking_name || "-")}</strong>
+                  <div class="file-meta">ID: ${escapeHtml(item.odoo_picking_id || "-")} · 状态：${escapeHtml(item.state || "-")}</div>
+                </div>
+              </td>
+              <td>
+                <div class="file-primary">
+                  <strong class="mono wrap-anywhere">${escapeHtml(item.match_key || "-")}</strong>
+                  <div class="file-meta">${escapeHtml(item.compare_status_label || "-")}</div>
+                </div>
+              </td>
+              <td>${escapeHtml(item.pod_file_count || 0)}</td>
+              <td class="file-path-cell"><span class="mono wrap-anywhere">${escapeHtml(item.sample_pod_files || "-")}</span></td>
+              <td class="file-path-cell">
+                ${Array.isArray(item.sample_documents) && item.sample_documents.length ? item.sample_documents.map((sample) => {
+                  const links = [];
+                  if (sample.file_url) links.push(`<a class="text-link" href="${escapeHtml(sample.file_url)}" target="_blank" rel="noreferrer">源文件</a>`);
+                  if (sample.local_file_href) links.push(`<a class="text-link" href="${escapeHtml(sample.local_file_href)}" target="_blank" rel="noreferrer">本地文件</a>`);
+                  return `<div class="file-primary sample-path-block"><strong class="mono wrap-anywhere">${escapeHtml(sample.source_path || sample.file_name || "-")}</strong><div class="file-meta">${links.join(" · ") || "-"}</div></div>`;
+                }).join("") : '<span class="mono wrap-anywhere">-</span>'}
+              </td>
+            </tr>
+          `).join("");
+        },
+      });
+
+      createPager({
+        details: document.getElementById("podToOdooDetails"),
+        endpoint: "{{ request.url_for('api_reconcile_pod_to_odoo') }}",
+        kind: "{{ selected_source.slug }}",
+        startMonth: "{{ selected_start_month or '' }}",
+        search: document.getElementById("podToOdooSearch"),
+        clear: document.getElementById("podToOdooClear"),
+        status: document.getElementById("podToOdooStatus"),
+        refresh: document.getElementById("podToOdooRefresh"),
+        pageSize: document.getElementById("podToOdooPageSize"),
+        prev: document.getElementById("podToOdooPrev"),
+        next: document.getElementById("podToOdooNext"),
+        indicator: document.getElementById("podToOdooIndicator"),
+        meta: document.getElementById("podToOdooMeta"),
+        body: document.getElementById("podToOdooBody"),
+        colspan: 5,
+        renderRows(items) {
+          if (!items.length) {
+            this.body.innerHTML = '<tr class="file-row"><td colspan="5" class="empty-cell">当前筛选下没有明细。</td></tr>';
+            return;
+          }
+          this.body.innerHTML = items.map((item) => `
+            <tr class="file-row">
+              <td>
+                <div class="file-primary">
+                  <strong>${escapeHtml(item.file_name || "-")}</strong>
+                  <div class="file-meta">${escapeHtml(item.source_modified_at || "-")}</div>
+                </div>
+              </td>
+              <td>
+                <div class="file-primary">
+                  <strong class="mono wrap-anywhere">${escapeHtml(item.match_key || "-")}</strong>
+                  <div class="file-meta">${escapeHtml(item.compare_status_label || "-")}</div>
+                </div>
+              </td>
+              <td>
+                <div class="file-primary">
+                  <strong>${escapeHtml(item.matched_odoo_count || 0)} 条</strong>
+                  <div class="file-meta mono wrap-anywhere">${escapeHtml(item.matched_odoo_picking_names || "-")}</div>
+                  <div class="file-meta mono wrap-anywhere">状态：${escapeHtml(item.matched_odoo_states || "-")}</div>
+                </div>
+              </td>
+              <td class="file-path-cell"><span class="mono wrap-anywhere">${escapeHtml(item.source_path || "-")}</span></td>
+              <td class="file-path-cell">
+                ${item.sample_document ? (() => {
+                  const links = [];
+                  if (item.sample_document.file_url) links.push(`<a class="text-link" href="${escapeHtml(item.sample_document.file_url)}" target="_blank" rel="noreferrer">源文件</a>`);
+                  if (item.sample_document.local_file_href) links.push(`<a class="text-link" href="${escapeHtml(item.sample_document.local_file_href)}" target="_blank" rel="noreferrer">本地文件</a>`);
+                  return links.join(" · ") || "-";
+                })() : '-'}
+              </td>
+            </tr>
+          `).join("");
+        },
+      });
+    </script>
+  {% endif %}
+{% endblock %}

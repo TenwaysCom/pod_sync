@@ -1,34 +1,34 @@
 {% extends "base.html" %}
-{% block title %}Overview · POD Sync Console{% endblock %}
+{% block title %}概览 · POD 同步控制台{% endblock %}
 {% block content %}
   <section class="grid grid-cards">
     <article class="card stat-card">
-      <p class="label">Config File</p>
+      <p class="label">配置文件</p>
       <h2>{{ config_snapshot.path }}</h2>
-      <p class="muted">{{ "Detected" if config_snapshot.exists else "Missing" }}</p>
+      <p class="muted">{{ "已检测到" if config_snapshot.exists else "未找到" }}</p>
     </article>
     <article class="card stat-card">
-      <p class="label">Storage Root</p>
+      <p class="label">存储根目录</p>
       <h2>{{ config_snapshot.storage_dir }}</h2>
-      <p class="muted">Local sync destination</p>
+      <p class="muted">本地同步落盘路径</p>
     </article>
     <article class="card stat-card">
-      <p class="label">Latest Phase 1A</p>
-      <h2>{% if latest_run %}{{ latest_run.summary.generated_at }}{% else %}No runs yet{% endif %}</h2>
-      <p class="muted">{% if latest_run %}{{ latest_run.summary.document_count }} docs · {{ latest_run.summary.matched_document_count }} matched{% else %}Run Phase 1A from the console{% endif %}</p>
+      <p class="label">最新识别结果</p>
+      <h2>{% if latest_run %}{{ latest_run.summary.generated_at }}{% else %}还没有运行记录{% endif %}</h2>
+      <p class="muted">{% if latest_run %}{{ latest_run.summary.document_count }} 个文档 · {{ latest_run.summary.ready_document_count or latest_run.summary.matched_document_count }} 个可推送{% else %}可以直接从控制台运行 POD 识别{% endif %}</p>
     </article>
     <article class="card stat-card">
-      <p class="label">Recent Jobs</p>
+      <p class="label">最近任务</p>
       <h2>{{ recent_jobs|length }}</h2>
-      <p class="muted">Latest queued / running / finished tasks</p>
+      <p class="muted">最近排队、运行和完成的任务</p>
     </article>
   </section>
 
   <section class="section">
     <div class="section-head">
       <div>
-        <p class="eyebrow">Runtime Config</p>
-        <h2>Configured sources</h2>
+        <p class="eyebrow">运行配置</p>
+        <h2>已配置来源</h2>
       </div>
     </div>
     <div class="grid grid-cards">
@@ -36,17 +36,17 @@
         <article class="card source-card">
           <div class="card-top">
             <h3>{{ source.label }}</h3>
-            <span class="badge {% if source.enabled %}badge-ok{% else %}badge-muted{% endif %}">{{ "Enabled" if source.enabled else "Disabled" }}</span>
+            <span class="badge {% if source.enabled %}badge-ok{% else %}badge-muted{% endif %}">{{ "已启用" if source.enabled else "已停用" }}</span>
           </div>
-          <p class="muted">Warehouse: {{ source.warehouse or "n/a" }}</p>
+          <p class="muted">仓库：{{ source.warehouse or "无" }}</p>
           <ul class="compact-list">
-            <li>Access token: {{ "present" if source.has_access_token else "missing" }}</li>
-            <li>Secret / refresh: {{ "present" if source.has_secret else "missing" }}</li>
+            <li>访问令牌：{{ "已配置" if source.has_access_token else "缺失" }}</li>
+            <li>刷新令牌 / 密钥：{{ "已配置" if source.has_secret else "缺失" }}</li>
             {% if source.key == "cmc_onedrive" %}
-              <li>Root item id: {{ "present" if source.has_root_item_id else "missing" }}</li>
+              <li>根项目 ID：{{ "已配置" if source.has_root_item_id else "缺失" }}</li>
             {% endif %}
             {% if source.key == "emtc_gdrive" %}
-              <li>Folder id: {{ "present" if source.has_folder_id else "missing" }}</li>
+              <li>文件夹 ID：{{ "已配置" if source.has_folder_id else "缺失" }}</li>
             {% endif %}
           </ul>
         </article>
@@ -58,53 +58,97 @@
     <div class="card">
       <div class="section-head section-head-tight">
         <div>
-          <p class="eyebrow">Phase 1A</p>
-          <h2>Recent runs</h2>
+          <p class="eyebrow">远端数量</p>
+          <h2>最新对比摘要</h2>
         </div>
-        <a class="text-link" href="{{ request.url_for('phase1a_page') }}">Open Phase 1A</a>
+        <a class="text-link" href="{{ request.url_for('sync_page') }}">打开同步页</a>
       </div>
-      {% if recent_runs %}
+      {% if remote_count_snapshot.exists %}
+        <p class="muted">上次刷新：{{ remote_count_snapshot.generated_at }}</p>
         <div class="list-stack">
-          {% for run in recent_runs %}
-            <a class="list-item" href="{{ request.url_for('phase1a_run_detail', run_name=run.run_name) }}">
+          {% for source in remote_count_snapshot.sources %}
+            <div class="list-item compare-inline-item">
               <div>
-                <strong>{{ run.run_name }}</strong>
-                <p>{{ run.generated_at }}</p>
+                <strong>{{ source.label }}</strong>
+                <p>远端 {{ source.remote_file_count if source.remote_file_count is not none else "-" }} · 本地 {{ source.local_file_count }} · Manifest {{ source.manifest_record_count }}</p>
               </div>
-              <div class="list-metrics">
-                <span>{{ run.document_count }} docs</span>
-                <span>{{ run.matched_document_count }} matched</span>
-              </div>
-            </a>
+              {% if source.delta_local_vs_remote == 0 %}
+                <span class="badge badge-ok">一致</span>
+              {% elif source.delta_local_vs_remote is not none %}
+                <span class="badge badge-failed">{{ "%+d"|format(source.delta_local_vs_remote) }}</span>
+              {% else %}
+                <span class="badge badge-muted">-</span>
+              {% endif %}
+            </div>
           {% endfor %}
         </div>
       {% else %}
-        <p class="empty">No Phase 1A runs detected under `phase1a/out` yet.</p>
+        <p class="empty">还没有远端数量快照。</p>
       {% endif %}
     </div>
 
     <div class="card">
       <div class="section-head section-head-tight">
         <div>
-          <p class="eyebrow">Jobs</p>
-          <h2>Recent activity</h2>
+          <p class="eyebrow">POD 识别</p>
+          <h2>最近识别运行</h2>
         </div>
-        <a class="text-link" href="{{ request.url_for('jobs_page') }}">Open Jobs</a>
+        <a class="text-link" href="{{ request.url_for('phase1a_page') }}">打开识别页面</a>
+      </div>
+      {% if recent_runs %}
+        <div class="list-stack">
+          {% for run in recent_runs %}
+            <div class="list-item list-item-shell">
+              <a class="list-item-main" href="{{ request.url_for('phase1a_run_detail', run_name=run.run_name) }}">
+                <div>
+                  <strong>{{ run.run_name }}</strong>
+                  <p>{{ run.generated_at }}</p>
+                </div>
+                <div class="list-metrics">
+                  <span>{{ run.document_count }} 个文档</span>
+                  <span>{{ run.ready_document_count or run.matched_document_count }} 个可推送</span>
+                </div>
+              </a>
+              <form method="post" action="{{ request.url_for('delete_phase1a_run_action', run_name=run.run_name) }}" class="inline-action-form" onsubmit="return confirm('确认删除运行 {{ run.run_name }} 吗？')">
+                <input type="hidden" name="redirect_to" value="{{ request.url.path }}">
+                <button type="submit" class="danger-button">删除</button>
+              </form>
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="empty">`phase1a/out` 下还没有检测到识别运行记录。</p>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">任务</p>
+          <h2>最近活动</h2>
+        </div>
+        <a class="text-link" href="{{ request.url_for('jobs_page') }}">打开任务页</a>
       </div>
       {% if recent_jobs %}
         <div class="list-stack">
           {% for job in recent_jobs %}
-            <a class="list-item" href="{{ request.url_for('job_detail', job_id=job.job_id) }}">
-              <div>
-                <strong>{{ job.label }}</strong>
-                <p>{{ job.created_at }}</p>
-              </div>
-              <span class="badge badge-{{ job.status }}">{{ job.status }}</span>
-            </a>
+            <div class="list-item list-item-shell">
+              <a class="list-item-main" href="{{ request.url_for('job_detail', job_id=job.job_id) }}">
+                <div>
+                  <strong>{{ job.label }}</strong>
+                  <p>{{ job.created_at }}</p>
+                </div>
+                <span class="badge badge-{{ job.status }}">{{ job_status_labels.get(job.status, job.status) }}</span>
+              </a>
+              <form method="post" action="{{ request.url_for('delete_job', job_id=job.job_id) }}" class="inline-action-form" onsubmit="return confirm('确认删除任务 {{ job.job_id }} 吗？')">
+                <input type="hidden" name="redirect_to" value="{{ request.url.path }}">
+                <button type="submit" class="danger-button" {% if job.status in ['queued', 'running'] %}disabled{% endif %}>删除</button>
+              </form>
+            </div>
           {% endfor %}
         </div>
       {% else %}
-        <p class="empty">No jobs have been submitted from the web console yet.</p>
+        <p class="empty">还没有从网页控制台提交过任务。</p>
       {% endif %}
     </div>
   </section>

@@ -6,11 +6,16 @@ __pycache__/
 config.local.json
 config.json
 
+# Runtime/generated artifacts
 storage/pod/*
 !storage/pod/.gitkeep
 
-phase1a/out/
-runtime/
+phase1a/out/*
+!phase1a/out/.gitkeep
+
+runtime/*
+!runtime/.gitkeep
+
 downloads/
 
 .DS_Store

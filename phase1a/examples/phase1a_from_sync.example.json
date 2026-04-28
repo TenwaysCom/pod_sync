@@ -1,6 +1,6 @@
 {
-  "job_id": "phase1a-live-sources-demo-20260424",
   "sync_config_path": "../../config.local.json",
-  "odoo_scope_path": "./odoo_scope.example.json",
-  "output_dir": "../out/live_style_demo"
+  "processing_mode": "parse_only",
+  "output_dir": "../out",
+  "auto_run_dir": true
 }
