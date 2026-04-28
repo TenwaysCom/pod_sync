@@ -12,6 +12,7 @@ from urllib.parse import quote
 from .actions import resolve_storage_dir
 from .odoo_missing_report import load_odoo_missing_snapshot
 from .phase1a_runs import get_latest_phase1a_run, resolve_artifact_path
+from .xlsx_utils import build_xlsx_workbook
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +25,7 @@ MATCHED_OTHER_CARRIER_CSV_PATH = RUNTIME_DIR / "pod_vs_odoo_matched_other_carrie
 NOT_FOUND_CSV_PATH = RUNTIME_DIR / "pod_vs_odoo_not_found.csv"
 AMBIGUOUS_CSV_PATH = RUNTIME_DIR / "pod_vs_odoo_ambiguous.csv"
 REPORT_MD_PATH = RUNTIME_DIR / "pod_vs_odoo_report.md"
+PUSH_READY_XLSX_PATH = RUNTIME_DIR / "pod_ready_for_odoo.xlsx"
 
 SOURCE_CARRIER_MAP = {
     "CMC": {"carrier_id": 25, "carrier_name": "CMC"},
@@ -302,6 +304,88 @@ def _build_odoo_indices(total_detail_rows):
     return by_picking, by_tracking, by_picking_any, by_tracking_any
 
 
+def _build_ready_for_odoo_push_rows(ready_rows, total_detail_rows):
+    by_picking, by_tracking, _, _ = _build_odoo_indices(total_detail_rows)
+    export_rows = []
+    for row in ready_rows:
+        preferred_key_type = row.get("preferred_key_type")
+        preferred_key = row.get("preferred_key")
+        if not preferred_key_type or not preferred_key:
+            continue
+
+        carrier_context = _resolve_carrier_context(row.get("source_name"))
+        carrier_id = carrier_context.get("carrier_id")
+        if carrier_id is None:
+            continue
+
+        if preferred_key_type == "picking_name":
+            normalized_key = _normalize_picking_name(preferred_key)
+            matches = list(by_picking.get((carrier_id, normalized_key), []))
+            preferred_key_display = _display_picking_name(preferred_key)
+        elif preferred_key_type == "tracking_number":
+            normalized_key = _normalize_tracking(preferred_key)
+            matches = list(by_tracking.get((carrier_id, normalized_key), []))
+            preferred_key_display = preferred_key
+        else:
+            continue
+
+        done_matches = [item for item in matches if item.get("state") == "done"]
+        if len(done_matches) != 1:
+            continue
+
+        odoo_row = done_matches[0]
+        if odoo_row.get("x_studio_pod_link"):
+            continue
+
+        local_context = _local_file_context(row.get("local_path"))
+        if not local_context.get("local_file_href"):
+            continue
+
+        export_rows.append(
+            {
+                "odoo_picking_id": odoo_row.get("odoo_picking_id"),
+                "local_static_file_url": local_context["local_file_href"],
+                "source_file_path": row.get("source_path") or "",
+                "file_name": row.get("file_name") or "",
+                "source_name": row.get("source_name") or "",
+                "matching_key_type": preferred_key_type,
+                "matching_key": preferred_key_display,
+            }
+        )
+    return export_rows
+
+
+def _build_ready_for_odoo_push_workbook(ready_rows, total_detail_rows):
+    export_rows = _build_ready_for_odoo_push_rows(ready_rows, total_detail_rows)
+    workbook_rows = [
+        [
+            "odoo_picking_id",
+            "local_static_file_url",
+            "source_file_path",
+            "file_name",
+            "source_name",
+            "matching_key_type",
+            "matching_key",
+        ]
+    ]
+    for row in export_rows:
+        workbook_rows.append(
+            [
+                row.get("odoo_picking_id") or "",
+                row.get("local_static_file_url") or "",
+                row.get("source_file_path") or "",
+                row.get("file_name") or "",
+                row.get("source_name") or "",
+                row.get("matching_key_type") or "",
+                row.get("matching_key") or "",
+            ]
+        )
+    return build_xlsx_workbook(
+        [{"name": "POD可推送进Odoo", "rows": workbook_rows}],
+        title="POD 可推送进 Odoo",
+    )
+
+
 def _build_detail_row(item, matches):
     preferred_key_type = item.get("preferred_key_type")
     return {
@@ -543,6 +627,7 @@ def render_pod_odoo_compare_markdown(snapshot):
             "- `pod_vs_odoo_matched_other_carrier.csv`",
             "- `pod_vs_odoo_not_found.csv`",
             "- `pod_vs_odoo_ambiguous.csv`",
+            "- `pod_ready_for_odoo.xlsx`",
             "- `latest_snapshot.json`",
             "",
         ]
@@ -575,6 +660,12 @@ def save_pod_odoo_compare_snapshot(snapshot):
 def refresh_pod_odoo_compare_snapshot():
     snapshot = build_pod_odoo_compare_snapshot()
     save_pod_odoo_compare_snapshot(snapshot)
+    phase1a_data = _load_latest_phase1a_ready_rows()
+    odoo_snapshot = load_odoo_missing_snapshot()
+    ready_rows = list((phase1a_data or {}).get("rows") or [])
+    total_detail_rows = list((odoo_snapshot or {}).get("total_detail_rows") or [])
+    _ensure_directory(RUNTIME_DIR)
+    PUSH_READY_XLSX_PATH.write_bytes(_build_ready_for_odoo_push_workbook(ready_rows, total_detail_rows))
     return snapshot
 
 
@@ -597,6 +688,7 @@ def resolve_pod_odoo_compare_artifact(artifact_key: str):
         "not_found_csv": NOT_FOUND_CSV_PATH,
         "ambiguous_csv": AMBIGUOUS_CSV_PATH,
         "report_md": REPORT_MD_PATH,
+        "push_ready_xlsx": PUSH_READY_XLSX_PATH,
     }
     path = mapping.get(artifact_key)
     if not path or not path.exists():

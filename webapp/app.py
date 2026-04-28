@@ -151,6 +151,7 @@ ODOO_MISSING_ARTIFACT_LABELS = {
 }
 
 POD_COMPARE_ARTIFACT_LABELS = {
+    "push_ready_xlsx": "POD 可推送进 Odoo Excel",
     # "summary_csv": "来源汇总 CSV",
     "matched_csv": "匹配成功 CSV",
     "matched_cancelled_csv": "匹配到已取消单 CSV",
@@ -174,6 +175,19 @@ def display_value(value):
     return value
 
 
+class TemplateRequestProxy:
+    def __init__(self, request: Request):
+        self._request = request
+
+    def __getattr__(self, name):
+        return getattr(self._request, name)
+
+    def url_for(self, name: str, /, **path_params):
+        # Render app-local paths instead of absolute URLs so reverse-proxy
+        # scheme/header mismatches do not create mixed-content links.
+        return str(self._request.app.url_path_for(name, **path_params))
+
+
 app = FastAPI(title="POD 同步控制台")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -186,7 +200,7 @@ def render(request: Request, template_name: str, *, page_id: str, **context):
         "error": request.query_params.get("error"),
     }
     base_context = {
-        "request": request,
+        "request": TemplateRequestProxy(request),
         "page_id": page_id,
         "flash": flash,
         "ui_defaults": UI_DEFAULTS,
@@ -218,6 +232,11 @@ def normalize_redirect_target(target: str | None, fallback: str):
     if target and target.startswith("/"):
         return target
     return fallback
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    return RedirectResponse(url="/static/favicon.svg", status_code=307)
 
 
 @app.get("/", response_class=HTMLResponse)
