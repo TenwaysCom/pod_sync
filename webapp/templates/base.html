@@ -27,6 +27,8 @@
       <a class="{% if page_id == 'files' %}active{% endif %}" href="{{ request.url_for('files_page') }}">文件</a>
       <a class="{% if page_id == 'phase1a' %}active{% endif %}" href="{{ request.url_for('phase1a_page') }}">识别</a>
       <a class="{% if page_id == 'reconcile' %}active{% endif %}" href="{{ request.url_for('reconcile_page') }}">总结对账</a>
+      <a class="{% if page_id == 'scheduler' %}active{% endif %}" href="{{ request.url_for('scheduler_page') }}">定时任务</a>
+      <a class="{% if page_id == 'odoo_push' %}active{% endif %}" href="{{ request.url_for('odoo_push_page') }}">Odoo 推送</a>
       <a class="{% if page_id == 'jobs' %}active{% endif %}" href="{{ request.url_for('jobs_page') }}">任务</a>
       <a class="{% if page_id == 'report' %}active{% endif %}" href="{{ request.url_for('report_page') }}">详细报告</a>
       </div>

@@ -20,6 +20,8 @@ from .actions import (
     build_cmc_onedrive_command,
     build_emtc_gdrive_command,
     build_phase1a_command,
+    build_odoo_push_command,
+    build_pipeline_command,
     build_refresh_remote_counts_command,
     build_status_check_command,
     build_verify_integrity_command,
@@ -36,6 +38,8 @@ from .odoo_missing_report import (
     refresh_odoo_missing_snapshot,
     resolve_odoo_missing_artifact,
 )
+from .odoo_push_history import list_push_runs, get_log_content
+from .odoo_pull import fetch_and_save_index, load_saved_index
 from .odoo_pod_compare import (
     build_pod_odoo_compare_listing,
     load_pod_odoo_compare_snapshot,
@@ -62,6 +66,7 @@ from .phase1a_runs import (
 )
 from .remote_counts import load_remote_count_snapshot
 from .reporting import build_report_context
+from .scheduler import Scheduler
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -254,6 +259,8 @@ app = FastAPI(title="POD 同步控制台")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 job_store = JobStore(JOB_DIR)
+scheduler = Scheduler(job_store)
+scheduler.start()
 
 
 def render(request: Request, template_name: str, *, page_id: str, **context):
@@ -299,7 +306,7 @@ def normalize_redirect_target(target: str | None, fallback: str):
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
-    public_paths = {"/login", "/logout", "/static", "/favicon.ico"}
+    public_paths = {"/login", "/logout", "/static", "/favicon.ico", "/api/odoo-status"}
     if any(path.startswith(p) for p in public_paths):
         return await call_next(request)
     if not _is_authenticated(request):
@@ -394,6 +401,80 @@ async def sync_page(request: Request):
         config_snapshot=config_snapshot,
         remote_count_snapshot=remote_count_snapshot,
     )
+
+
+@app.get("/scheduler", response_class=HTMLResponse)
+async def scheduler_page(request: Request):
+    return render(
+        request,
+        "scheduler.html",
+        page_id="scheduler",
+        scheduler_status=scheduler.status(),
+    )
+
+
+@app.get("/odoo-push", response_class=HTMLResponse)
+async def odoo_push_page(request: Request):
+    from .odoo_push_history import list_push_runs
+    from .phase1a_runs import discover_phase1a_runs
+    history = list_push_runs(limit=50)
+    last_push = history[0] if history else None
+    latest_run = discover_phase1a_runs(limit=1)
+    latest_payload = None
+    latest_payload_items = 0
+    comparison = None
+    if latest_run:
+        payload_path = PROJECT_ROOT / "phase1a" / "out" / latest_run[0]["run_name"] / "odoo_backfill_payload.json"
+        if payload_path.exists():
+            latest_payload = str(payload_path.relative_to(PROJECT_ROOT))
+            try:
+                payload = _json_lib.loads(payload_path.read_text(encoding="utf-8"))
+                latest_payload_items = len(payload.get("items", []))
+                # Compare with saved index
+                saved_index = load_saved_index()
+                if saved_index:
+                    existing_items = []
+                    missing_items = []
+                    for item in payload.get("items", []):
+                        if item.get("identifier_status") != "ready":
+                            continue
+                        key_value = item.get("preferred_key", "")
+                        if saved_index.has_pod(
+                            tracking_number=key_value if item.get("preferred_key_type") == "tracking_number" else None,
+                            picking_name=key_value if item.get("preferred_key_type") == "picking_name" else None,
+                        ):
+                            existing_items.append(item)
+                        else:
+                            missing_items.append(item)
+                    comparison = {
+                        "total_ready": len(existing_items) + len(missing_items),
+                        "existing_count": len(existing_items),
+                        "missing_count": len(missing_items),
+                        "index_fetched_at": saved_index.fetched_at,
+                        "index_total": saved_index.total_loaded,
+                    }
+            except Exception:
+                pass
+    return render(
+        request,
+        "odoo_push.html",
+        page_id="odoo_push",
+        history=history,
+        history_count=len(history),
+        last_push_status=last_push.get("status") if last_push else None,
+        last_push_at=last_push.get("finished_at") if last_push else None,
+        latest_payload_name=latest_payload,
+        latest_payload_items=latest_payload_items,
+        comparison=comparison,
+    )
+
+
+@app.get("/odoo-push/logs/{push_id}")
+async def odoo_push_log(push_id: str):
+    log = get_log_content(push_id)
+    if log is None:
+        raise HTTPException(status_code=404, detail="未找到推送日志。")
+    return PlainTextResponse(log, media_type="text/plain; charset=utf-8")
 
 
 @app.get("/phase1a", response_class=HTMLResponse)
@@ -960,6 +1041,65 @@ async def action_refresh_report(
     return redirect_with_notice("/report", "统一报告已刷新。")
 
 
+@app.post("/actions/run-pipeline")
+async def action_run_pipeline(
+    config_path: str = Form(DEFAULT_SYNC_CONFIG_REL),
+    phase1a_config_path: str = Form(DEFAULT_PHASE1A_CONFIG_REL),
+    cmc_incremental: bool = Form(False),
+    emtc_incremental: bool = Form(False),
+    cmc_limit: int = Form(0),
+    emtc_limit: int = Form(0),
+    cmc_workers: int = Form(3),
+    emtc_workers: int = Form(3),
+):
+    try:
+        label, command, metadata = build_pipeline_command(
+            config_path=config_path,
+            cmc_incremental=cmc_incremental,
+            emtc_incremental=emtc_incremental,
+            phase1a_config_path=phase1a_config_path,
+            cmc_limit=cmc_limit,
+            emtc_limit=emtc_limit,
+            cmc_workers=cmc_workers,
+            emtc_workers=emtc_workers,
+        )
+    except ValueError as exc:
+        return redirect_with_error("/scheduler", str(exc))
+    job = job_store.start_job(action="run_pipeline", label=label, command=command, metadata=metadata)
+    return RedirectResponse(url=f"/jobs/{job['job_id']}", status_code=303)
+
+
+@app.post("/actions/update-scheduler")
+async def action_update_scheduler(
+    enabled: str = Form("0"),
+    interval_hours: int = Form(24),
+    pipeline_config_path: str = Form("config.local.json"),
+    pipeline_phase1a_config_path: str = Form("phase1a/examples/phase1a_from_sync.example.json"),
+    pipeline_cmc_incremental: bool = Form(False),
+    pipeline_emtc_incremental: bool = Form(False),
+    pipeline_cmc_limit: int = Form(0),
+    pipeline_emtc_limit: int = Form(0),
+    pipeline_cmc_workers: int = Form(3),
+    pipeline_emtc_workers: int = Form(3),
+):
+    patch = {
+        "enabled": enabled in ("1", "on", "true", "yes"),
+        "interval_hours": max(1, min(168, interval_hours)),
+        "pipeline_options": {
+            "config_path": pipeline_config_path,
+            "phase1a_config_path": pipeline_phase1a_config_path,
+            "cmc_incremental": pipeline_cmc_incremental,
+            "emtc_incremental": pipeline_emtc_incremental,
+            "cmc_limit": pipeline_cmc_limit,
+            "emtc_limit": pipeline_emtc_limit,
+            "cmc_workers": pipeline_cmc_workers,
+            "emtc_workers": pipeline_emtc_workers,
+        },
+    }
+    scheduler.update_config(patch)
+    return redirect_with_notice("/scheduler", "定时任务配置已保存。")
+
+
 @app.post("/actions/phase1a")
 async def action_phase1a(config_path: str = Form(DEFAULT_PHASE1A_CONFIG_REL)):
     try:
@@ -968,3 +1108,72 @@ async def action_phase1a(config_path: str = Form(DEFAULT_PHASE1A_CONFIG_REL)):
         return redirect_with_error("/phase1a", str(exc))
     job = job_store.start_job(action="phase1a", label=label, command=command, metadata=metadata)
     return RedirectResponse(url=f"/jobs/{job['job_id']}", status_code=303)
+
+
+@app.post("/actions/refresh-odoo-pod-index")
+async def action_refresh_odoo_pod_index(
+    config_path: str = Form(DEFAULT_SYNC_CONFIG_REL),
+):
+    try:
+        fetch_and_save_index(config_path)
+        return redirect_with_notice("/odoo-push", "Odoo POD 索引已刷新。")
+    except Exception as exc:
+        return redirect_with_error("/odoo-push", f"刷新失败: {exc}")
+
+
+@app.post("/actions/odoo-push")
+async def action_odoo_push(
+    config_path: str = Form(DEFAULT_SYNC_CONFIG_REL),
+    payload_path: str = Form(""),
+    dry_run: bool = Form(False),
+    limit: int = Form(0),
+    missing_only: bool = Form(False),
+    source_filter: str = Form(""),
+):
+    try:
+        label, command, metadata = build_odoo_push_command(
+            config_path=config_path,
+            payload_path=payload_path or None,
+            dry_run=dry_run,
+            limit=limit,
+            missing_only=missing_only,
+            source_filter=source_filter or None,
+        )
+    except ValueError as exc:
+        return redirect_with_error("/odoo-push", str(exc))
+    job = job_store.start_job(action="odoo_push", label=label, command=command, metadata=metadata)
+    return RedirectResponse(url=f"/jobs/{job['job_id']}", status_code=303)
+
+
+@app.get("/api/odoo-status")
+async def api_odoo_status(config_path: str = DEFAULT_SYNC_CONFIG_REL):
+    try:
+        from .odoo_push import load_config, get_odoo_cfg, connect_odoo
+        full_cfg = load_config(config_path)
+        odoo_cfg = get_odoo_cfg(full_cfg)
+        if not odoo_cfg.get("enabled", False):
+            return {"ok": False, "error": "Odoo push is disabled in config"}
+        missing = [k for k in ("url", "db", "uid", "api_key") if not odoo_cfg.get(k)]
+        if missing:
+            return {"ok": False, "error": f"Missing Odoo config keys: {missing}"}
+        common, models = connect_odoo(odoo_cfg)
+        version = common.version()
+        # Verify DB actually exists by doing a lightweight query
+        try:
+            models.execute_kw(
+                odoo_cfg["db"], odoo_cfg["uid"], odoo_cfg["api_key"],
+                "res.users", "search_count", [[]]
+            )
+        except Exception as db_exc:
+            err = str(db_exc)
+            if "KeyError" in err or "database" in err.lower():
+                return {"ok": False, "error": f"Database '{odoo_cfg['db']}' not found on server"}
+            raise
+        return {
+            "ok": True,
+            "url": odoo_cfg.get("url"),
+            "db": odoo_cfg.get("db"),
+            "server_version": version.get("server_version", "unknown"),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}

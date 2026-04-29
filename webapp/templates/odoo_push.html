@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+{% block title %}Odoo 推送 · POD 同步控制台{% endblock %}
+{% block content %}
+  <section class="section">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">Odoo 推送</p>
+        <h2>推送 POD 到 Odoo</h2>
+        <p>将 Phase 1A 识别的 POD 文件推送到 Odoo <code>stock.tracking</code> 模型。</p>
+      </div>
+    </div>
+
+    <div class="grid grid-cards">
+      <article class="card stat-card">
+        <p class="label">Odoo 连接</p>
+        <h2 id="odooStatusText">检测中…</h2>
+        <p class="muted" id="odooStatusDetail">正在检查…</p>
+      </article>
+      <article class="card stat-card">
+        <p class="label">最新 Payload</p>
+        <h2>{{ latest_payload_items }} 条</h2>
+        <p class="muted">{{ latest_payload_name or "无" }}</p>
+      </article>
+      <article class="card stat-card">
+        <p class="label">历史推送次数</p>
+        <h2>{{ history_count }}</h2>
+        <p class="muted">最近保留 500 条</p>
+      </article>
+      <article class="card stat-card">
+        <p class="label">最后推送</p>
+        <h2>{{ last_push_status or "-" }}</h2>
+        <p class="muted">{{ last_push_at or "无记录" }}</p>
+      </article>
+    </div>
+  </section>
+
+  {# Step 1: Refresh Odoo POD index #}
+  <section class="section">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">第一步</p>
+        <h2>拉取 Odoo 已有 POD 数据</h2>
+        <p>从 Odoo QueryDeluxe API 获取当前已有 POD 的记录，用于对比和去重。</p>
+      </div>
+    </div>
+    <div class="grid forms-grid">
+      <article class="card">
+        <form method="post" action="{{ request.url_for('action_refresh_odoo_pod_index') }}" class="form-grid" data-submit-state data-pending-notice="正在拉取 Odoo POD 数据...">
+          <input type="hidden" name="config_path" value="config.local.json">
+          <button type="submit" class="primary-button" data-loading-text="拉取中...">刷新 Odoo POD 索引</button>
+        </form>
+        {% if comparison %}
+        <hr style="border: none; border-top: 1px solid var(--border-color); margin: 16px 0;">
+        <p class="muted">索引时间：{{ comparison.index_fetched_at }} | 索引总量：{{ comparison.index_total }} 条</p>
+        <div class="grid grid-cards" style="margin-top: 12px;">
+          <article class="card stat-card">
+            <p class="label">Payload 就绪</p>
+            <h2>{{ comparison.total_ready }}</h2>
+            <p class="muted">可推送总数</p>
+          </article>
+          <article class="card stat-card">
+            <p class="label">已有 POD</p>
+            <h2 style="color: var(--ok-color)">{{ comparison.existing_count }}</h2>
+            <p class="muted">Odoo 中已存在</p>
+          </article>
+          <article class="card stat-card">
+            <p class="label">缺失 POD</p>
+            <h2 style="color: var(--warn-color)">{{ comparison.missing_count }}</h2>
+            <p class="muted">需要推送</p>
+          </article>
+        </div>
+        {% else %}
+        <p class="muted" style="margin-top: 12px;">尚未刷新索引，请点击上方按钮拉取 Odoo 数据。</p>
+        {% endif %}
+      </article>
+    </div>
+  </section>
+
+  {# Step 2: Push #}
+  {% if comparison and comparison.missing_count > 0 %}
+  <section class="section">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">第二步</p>
+        <h2>执行推送</h2>
+        <p>仅推送 Odoo 中缺失的 {{ comparison.missing_count }} 条记录。</p>
+      </div>
+    </div>
+    <div class="grid forms-grid">
+      <article class="card">
+        <h3>推送配置</h3>
+        <form method="post" action="{{ request.url_for('action_odoo_push') }}" class="form-grid" data-submit-state data-pending-notice="推送任务已提交，正在后台执行...">
+          <input type="hidden" name="config_path" value="config.local.json">
+          <label>Payload 路径<input name="payload_path" value="{{ latest_payload_name or '' }}" readonly></label>
+          <label>最大数量（0=不限）<input type="number" name="limit" value="0" min="0"></label>
+          <label>来源过滤
+            <select name="source_filter">
+              <option value="">全部</option>
+              <option value="CMC">CMC</option>
+              <option value="EMTC">EMTC</option>
+            </select>
+          </label>
+          <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+            <label style="display: flex; align-items: center; gap: 6px;">
+              <input type="checkbox" name="dry_run" value="on"> 仅预览（不写入）
+            </label>
+            <label style="display: flex; align-items: center; gap: 6px;">
+              <input type="checkbox" name="missing_only" value="on" checked> 仅推送缺失记录
+            </label>
+          </div>
+          <button type="submit" class="primary-button" data-loading-text="提交中...">开始推送缺失记录（{{ comparison.missing_count }} 条）</button>
+        </form>
+      </article>
+    </div>
+  </section>
+  {% endif %}
+
+  {# History #}
+  <section class="section">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">历史记录</p>
+        <h2>推送记录</h2>
+      </div>
+    </div>
+    {% if history %}
+    <div class="list-stack">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>推送 ID</th>
+            <th>时间</th>
+            <th>模式</th>
+            <th>总数</th>
+            <th>推送</th>
+            <th>跳过</th>
+            <th>未找到</th>
+            <th>失败</th>
+            <th>状态</th>
+            <th>日志</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for rec in history %}
+          <tr>
+            <td><code>{{ rec.push_id }}</code></td>
+            <td>{{ rec.started_at }}</td>
+            <td>{{ "预览" if rec.dry_run else "写入" }}</td>
+            <td>{{ rec.total }}</td>
+            <td>{{ rec.tracking_pushed }}</td>
+            <td>{{ rec.tracking_skipped_same + (rec.skipped_existing or 0) }}</td>
+            <td>{{ rec.tracking_not_found + rec.picking_not_found }}</td>
+            <td>{{ rec.failed }}</td>
+            <td>
+              {% if rec.status == "success" %}
+                <span style="color: var(--ok-color)">成功</span>
+              {% elif rec.status == "failed" %}
+                <span style="color: var(--error-color)">失败</span>
+              {% else %}
+                <span style="color: var(--warn-color)">运行中</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if rec.log_file %}
+                <a href="{{ request.url_for('odoo_push_log', push_id=rec.push_id) }}">查看</a>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="muted">暂无推送记录。</p>
+    {% endif %}
+  </section>
+
+  <script>
+    (() => {
+      fetch("{{ request.url_for('api_odoo_status') }}")
+        .then(r => r.json())
+        .then(data => {
+          const text = document.getElementById("odooStatusText");
+          const detail = document.getElementById("odooStatusDetail");
+          if (data.ok) {
+            text.textContent = "正常";
+            text.style.color = "var(--ok-color)";
+            detail.textContent = data.server_version + " / " + data.db;
+          } else {
+            text.textContent = "异常";
+            text.style.color = "var(--error-color)";
+            detail.textContent = data.error || "连接失败";
+          }
+        })
+        .catch(() => {
+          document.getElementById("odooStatusText").textContent = "异常";
+          document.getElementById("odooStatusDetail").textContent = "网络错误";
+        });
+    })();
+  </script>
+{% endblock %}

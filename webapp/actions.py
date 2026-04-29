@@ -333,6 +333,91 @@ def build_refresh_remote_counts_command(*, config_path: str):
     return label, command, metadata
 
 
+def build_pipeline_command(
+    *,
+    config_path: str,
+    cmc_incremental: bool,
+    emtc_incremental: bool,
+    phase1a_config_path: str,
+    cmc_limit: int,
+    emtc_limit: int,
+    cmc_workers: int,
+    emtc_workers: int,
+    skip_odoo_push: bool = False,
+    odoo_push_limit: int = 0,
+):
+    resolved_config = ensure_existing_file(resolve_project_path(config_path, DEFAULT_SYNC_CONFIG_REL), "同步配置文件")
+    resolved_phase1a = ensure_existing_file(resolve_project_path(phase1a_config_path, DEFAULT_PHASE1A_CONFIG_REL), "识别配置文件")
+
+    command = [
+        sys.executable,
+        str(PROJECT_ROOT / "webapp" / "pipeline_runner.py"),
+        "--config", str(resolved_config),
+        "--phase1a-config", str(resolved_phase1a),
+        "--cmc-workers", str(cmc_workers),
+        "--emtc-workers", str(emtc_workers),
+    ]
+    if not cmc_incremental:
+        command.append("--full-sync")
+    if cmc_limit > 0:
+        command.extend(["--cmc-limit", str(cmc_limit)])
+    if emtc_limit > 0:
+        command.extend(["--emtc-limit", str(emtc_limit)])
+    if skip_odoo_push:
+        command.append("--skip-odoo-push")
+    if odoo_push_limit > 0:
+        command.extend(["--odoo-push-limit", str(odoo_push_limit)])
+    mode_label = "增量" if cmc_incremental and emtc_incremental else "全量"
+    push_label = "+ Odoo推送" if not skip_odoo_push else ""
+    label = f"完整流水线 / {mode_label}同步 + 识别 + 报告{push_label}"
+    metadata = {
+        "category": "pipeline",
+        "action_type": "run_pipeline",
+        "config_path": str(resolved_config),
+        "phase1a_config_path": str(resolved_phase1a),
+        "cmc_incremental": cmc_incremental,
+        "emtc_incremental": emtc_incremental,
+        "cmc_limit": cmc_limit,
+        "emtc_limit": emtc_limit,
+        "cmc_workers": cmc_workers,
+        "emtc_workers": emtc_workers,
+        "skip_odoo_push": skip_odoo_push,
+        "odoo_push_limit": odoo_push_limit,
+    }
+    return label, command, metadata
+
+
+def build_odoo_push_command(*, config_path: str, payload_path: str | None = None, dry_run: bool = False, limit: int = 0, missing_only: bool = False, source_filter: str | None = None):
+    resolved_config = ensure_existing_file(resolve_project_path(config_path, DEFAULT_SYNC_CONFIG_REL), "同步配置文件")
+    command = [
+        sys.executable,
+        str(PROJECT_ROOT / "webapp" / "odoo_push.py"),
+        "--config", str(resolved_config),
+    ]
+    if payload_path:
+        command.extend(["--payload", str(payload_path)])
+    if dry_run:
+        command.append("--dry-run")
+    if limit > 0:
+        command.extend(["--limit", str(limit)])
+    if missing_only:
+        command.append("--missing-only")
+    if source_filter:
+        command.extend(["--source", source_filter])
+    label = "推送 POD 链接到 Odoo" + (" (预览)" if dry_run else "")
+    metadata = {
+        "category": "odoo_push",
+        "action_type": "odoo_push",
+        "config_path": str(resolved_config),
+        "payload_path": payload_path,
+        "dry_run": dry_run,
+        "limit": limit,
+        "missing_only": missing_only,
+        "source_filter": source_filter,
+    }
+    return label, command, metadata
+
+
 def load_runtime_config_snapshot(config_path: str | None = None):
     resolved_config = resolve_project_path(config_path, DEFAULT_SYNC_CONFIG_REL)
     if not resolved_config.exists():

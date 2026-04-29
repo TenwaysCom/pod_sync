@@ -41,5 +41,17 @@
     "base64_content_field": "",
     "warehouse": "Westerman",
     "timeout_seconds": 30
+  },
+  "odoo": {
+    "enabled": false,
+    "url": "https://tenways.odoo.com",
+    "db": "adriegrip-tenways-main-4224690",
+    "uid": 9,
+    "api_key": "PASTE_ODOO_API_KEY",
+    "push_model": "stock.picking",
+    "push_field": "x_studio_pod_link",
+    "picking_name_field": "name",
+    "tracking_number_field": "carrier_tracking_ref",
+    "timeout_seconds": 30
   }
 }
