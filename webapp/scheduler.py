@@ -142,6 +142,7 @@ class Scheduler:
                 emtc_limit=int(opts.get("emtc_limit", 0) or 0),
                 cmc_workers=int(opts.get("cmc_workers", 3) or 3),
                 emtc_workers=int(opts.get("emtc_workers", 3) or 3),
+                skip_odoo_push=True,
             )
         except Exception as exc:
             self._log(f"Failed to build pipeline command: {exc}")
