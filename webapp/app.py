@@ -69,6 +69,68 @@ TEMPLATES_DIR = PROJECT_ROOT / "webapp" / "templates"
 STATIC_DIR = PROJECT_ROOT / "webapp" / "static"
 JOB_DIR = PROJECT_ROOT / "runtime" / "jobs"
 
+# Auth
+import hmac
+import hashlib
+import base64
+import json as _json_lib
+import time
+import os
+
+SESSION_COOKIE = "pod_sync_session"
+SESSION_MAX_AGE = 86400 * 7  # 7 days
+
+# Read admin password: env var > config.local.json > default
+ADMIN_PASSWORD = os.environ.get("POD_SYNC_ADMIN_PASSWORD", "")
+if not ADMIN_PASSWORD:
+    try:
+        _cfg_path = PROJECT_ROOT / "config.local.json"
+        if _cfg_path.exists():
+            _cfg = _json_lib.loads(_cfg_path.read_text(encoding="utf-8"))
+            ADMIN_PASSWORD = _cfg.get("admin_password", "")
+    except Exception:
+        pass
+if not ADMIN_PASSWORD:
+    ADMIN_PASSWORD = "pod_sync_admin"
+    import warnings
+    warnings.warn("POD_SYNC_ADMIN_PASSWORD not set. Using default password 'pod_sync_admin'.")
+
+SESSION_SECRET = os.environ.get("POD_SYNC_SECRET_KEY", "")
+if not SESSION_SECRET:
+    SESSION_SECRET = os.urandom(32).hex()
+
+
+def _sign(value: str, secret: str) -> str:
+    return hmac.new(secret.encode(), value.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def _encode_session(data: dict, secret: str) -> str:
+    payload = base64.urlsafe_b64encode(_json_lib.dumps(data).encode()).decode().rstrip("=")
+    return f"{payload}.{_sign(payload, secret)}"
+
+
+def _decode_session(cookie: str, secret: str) -> dict | None:
+    try:
+        payload_b64, sig = cookie.split(".", 1)
+        expected = _sign(payload_b64, secret)
+        if not hmac.compare_digest(sig, expected):
+            return None
+        data = _json_lib.loads(base64.urlsafe_b64decode(payload_b64 + "==").decode())
+        if data.get("exp", 0) < time.time():
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def _is_authenticated(request: Request) -> bool:
+    cookie = request.cookies.get(SESSION_COOKIE)
+    if not cookie:
+        return False
+    session = _decode_session(cookie, SESSION_SECRET)
+    return bool(session and session.get("role") == "admin")
+
+
 JOB_STATUS_LABELS = {
     "queued": "排队中",
     "running": "运行中",
@@ -232,6 +294,53 @@ def normalize_redirect_target(target: str | None, fallback: str):
     if target and target.startswith("/"):
         return target
     return fallback
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    public_paths = {"/login", "/logout", "/static", "/favicon.ico"}
+    if any(path.startswith(p) for p in public_paths):
+        return await call_next(request)
+    if not _is_authenticated(request):
+        return RedirectResponse(url=f"/login?next={path}", status_code=303)
+    return await call_next(request)
+
+
+@app.get("/login", response_class=HTMLResponse, name="login")
+async def login_page(request: Request, next: str = "/", error: str = ""):
+    if _is_authenticated(request):
+        return RedirectResponse(url=next, status_code=303)
+    return templates.TemplateResponse(
+        request=request,
+        name="login.html",
+        context={"request": TemplateRequestProxy(request), "next": next, "error": error},
+    )
+
+
+@app.post("/login", name="login_post")
+async def login_post(request: Request, password: str = Form(""), next: str = Form("/")):
+    if password == ADMIN_PASSWORD:
+        session = {"role": "admin", "exp": time.time() + SESSION_MAX_AGE}
+        response = RedirectResponse(url=next, status_code=303)
+        response.set_cookie(
+            SESSION_COOKIE,
+            _encode_session(session, SESSION_SECRET),
+            max_age=SESSION_MAX_AGE,
+            httponly=True,
+            samesite="lax",
+            path="/",
+        )
+        return response
+    params = {"next": next, "error": "密码错误"}
+    return RedirectResponse(url=f"/login?{urlencode(params)}", status_code=303)
+
+
+@app.post("/logout", name="logout")
+async def logout_post():
+    response = RedirectResponse(url="/login", status_code=303)
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return response
 
 
 @app.get("/favicon.ico")

@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 · POD 同步控制台</title>
+  <link rel="icon" href="{{ request.url_for('static', path='favicon.svg') }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}">
+  <style>
+    .login-page {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: radial-gradient(circle at top left, rgba(13, 110, 253, 0.08), transparent 30%),
+                  linear-gradient(180deg, #f8f9fa 0%, #eef1f5 100%);
+    }
+    .login-card {
+      width: min(420px, 100%);
+      padding: 32px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      background: var(--panel);
+      box-shadow: var(--shadow-md);
+    }
+    .login-card .brand-copy {
+      text-align: center;
+      margin-bottom: 28px;
+    }
+    .login-card .brand-copy h1 {
+      margin: 8px 0 0;
+      font-size: 1.6rem;
+      color: var(--ink);
+    }
+    .login-card .eyebrow {
+      color: var(--muted);
+    }
+    .login-form {
+      display: grid;
+      gap: 18px;
+    }
+    .login-form label {
+      display: grid;
+      gap: 8px;
+      color: var(--ink);
+      font-size: 0.92rem;
+      font-weight: 600;
+    }
+    .login-form input {
+      width: 100%;
+      min-height: 46px;
+      padding: 12px 14px;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius-sm);
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+      font-size: 1rem;
+    }
+    .login-form input:focus {
+      outline: none;
+      border-color: #86b7fe;
+      box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.15);
+    }
+    .login-form button {
+      min-height: 46px;
+      padding: 12px 16px;
+      border: 1px solid #0b5ed7;
+      border-radius: var(--radius-sm);
+      background: var(--accent);
+      color: #fff;
+      font: inherit;
+      font-size: 1rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .login-form button:hover {
+      background: #0b5ed7;
+    }
+    .login-error {
+      padding: 12px 14px;
+      border-radius: var(--radius-sm);
+      border: 1px solid #f5c2c7;
+      background: var(--danger-soft);
+      color: #842029;
+      font-size: 0.92rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-page">
+    <div class="login-card">
+      <div class="brand-copy">
+        <p class="eyebrow">TENWAYS POD 运维台</p>
+        <h1>管理后台登录</h1>
+      </div>
+
+      {% if error %}
+        <div class="login-error" style="margin-bottom: 18px;">{{ error }}</div>
+      {% endif %}
+
+      <form class="login-form" method="post" action="{{ request.url_for('login') }}">
+        <input type="hidden" name="next" value="{{ next }}" />
+        <label>
+          管理密码
+          <input type="password" name="password" placeholder="请输入管理密码" required autofocus />
+        </label>
+        <button type="submit">登录</button>
+      </form>
+    </div>
+  </div>
+</body>
+</html>

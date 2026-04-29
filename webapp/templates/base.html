@@ -20,7 +20,8 @@
   </header>
 
   <div class="shell">
-    <nav class="nav">
+    <nav class="nav" style="justify-content: space-between; align-items: center;">
+      <div style="display: flex; flex-wrap: wrap;">
       <a class="{% if page_id == 'overview' %}active{% endif %}" href="{{ request.url_for('overview') }}">概览</a>
       <a class="{% if page_id == 'sync' %}active{% endif %}" href="{{ request.url_for('sync_page') }}">同步</a>
       <a class="{% if page_id == 'files' %}active{% endif %}" href="{{ request.url_for('files_page') }}">文件</a>
@@ -28,6 +29,10 @@
       <a class="{% if page_id == 'reconcile' %}active{% endif %}" href="{{ request.url_for('reconcile_page') }}">总结对账</a>
       <a class="{% if page_id == 'jobs' %}active{% endif %}" href="{{ request.url_for('jobs_page') }}">任务</a>
       <a class="{% if page_id == 'report' %}active{% endif %}" href="{{ request.url_for('report_page') }}">详细报告</a>
+      </div>
+      <form method="post" action="{{ request.url_for('logout') }}" style="display:inline-flex; align-items:center; padding: 10px 14px;">
+        <button type="submit" class="ghost-button" style="min-height: 32px; padding: 6px 12px; font-size: 0.85rem;">退出登录</button>
+      </form>
     </nav>
 
     <div id="flashStack" class="flash-stack">
