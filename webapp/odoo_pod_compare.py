@@ -86,6 +86,7 @@ DETAIL_FIELDS = [
     "matched_odoo_tracking_numbers",
     "matched_odoo_pod_links",
     "matched_odoo_states",
+    "matched_odoo_primary_business_datetime",
 ]
 
 
@@ -423,6 +424,7 @@ def _build_detail_row(item, matches):
         ),
         "matched_odoo_pod_links": " | ".join(str(row.get("x_studio_pod_link") or "") for row in matches[:10] if row.get("x_studio_pod_link")),
         "matched_odoo_states": " | ".join(str(row.get("state") or "") for row in matches[:10] if row.get("state")),
+        "matched_odoo_primary_business_datetime": (matches[0].get("business_datetime") if matches else None),
         "compare_status_label": None,
         "compare_explanation": None,
     }

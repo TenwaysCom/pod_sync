@@ -5,6 +5,7 @@ import json
 import math
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 
 import requests
@@ -295,11 +296,23 @@ def refresh_odoo_missing_snapshot(
     return snapshot
 
 
+def _file_signature(path: Path | None):
+    if not path or not path.exists():
+        return (0, 0)
+    stat = path.stat()
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+@lru_cache(maxsize=2)
+def _load_odoo_missing_snapshot_cached(signature: tuple[int, int]):
+    return json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
+
+
 def load_odoo_missing_snapshot():
     if not SNAPSHOT_PATH.exists():
         return None
     try:
-        return json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
+        return _load_odoo_missing_snapshot_cached(_file_signature(SNAPSHOT_PATH))
     except json.JSONDecodeError:
         return None
 

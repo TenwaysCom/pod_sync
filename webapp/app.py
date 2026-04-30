@@ -447,15 +447,25 @@ async def odoo_push_page(request: Request):
                 # Compare with saved index
                 saved_index = load_saved_index()
                 if saved_index:
+                    from .odoo_push import _display_picking_name_for_search
                     existing_items = []
                     missing_items = []
                     for item in payload.get("items", []):
                         if item.get("identifier_status") != "ready":
                             continue
                         key_value = item.get("preferred_key", "")
+                        key_type = item.get("preferred_key_type", "")
+                        # For picking_name, convert canonical format back to display format
+                        # so it matches the picking names stored in the Odoo index
+                        lookup_tracking = key_value if key_type == "tracking_number" else None
+                        lookup_picking = key_value if key_type == "picking_name" else None
+                        if lookup_picking:
+                            display_picking = _display_picking_name_for_search(lookup_picking)
+                            if display_picking:
+                                lookup_picking = display_picking
                         if saved_index.has_pod(
-                            tracking_number=key_value if item.get("preferred_key_type") == "tracking_number" else None,
-                            picking_name=key_value if item.get("preferred_key_type") == "picking_name" else None,
+                            tracking_number=lookup_tracking,
+                            picking_name=lookup_picking,
                         ):
                             existing_items.append(item)
                         else:
@@ -1103,6 +1113,23 @@ async def action_refresh_report(
     return redirect_with_notice("/report", "统一报告已刷新。")
 
 
+@app.post("/api/refresh-report")
+async def api_refresh_report(
+    detail_url: str = Form(_get_odoo_missing_detail_url()),
+):
+    try:
+        refresh_odoo_missing_snapshot(detail_url=detail_url)
+        refresh_pod_odoo_compare_snapshot()
+        return JSONResponse(
+            content={"ok": True, "message": "统一报告已刷新。"}
+        )
+    except Exception as exc:
+        return JSONResponse(
+            content={"ok": False, "error": f"统一报告刷新失败：{exc}"},
+            status_code=500,
+        )
+
+
 @app.post("/actions/run-pipeline")
 async def action_run_pipeline(
     config_path: str = Form(DEFAULT_SYNC_CONFIG_REL),
@@ -1203,6 +1230,26 @@ async def action_refresh_odoo_pod_index(
         return redirect_with_error("/odoo-push", f"刷新失败: {exc}")
 
 
+@app.post("/api/refresh-odoo-pod-index")
+async def api_refresh_odoo_pod_index(
+    config_path: str = Form(DEFAULT_SYNC_CONFIG_REL),
+):
+    try:
+        index = fetch_and_save_index(config_path)
+        return JSONResponse(
+            content={
+                "ok": True,
+                "message": "Odoo POD 索引已刷新。",
+                "index": index.summary(),
+            }
+        )
+    except Exception as exc:
+        return JSONResponse(
+            content={"ok": False, "error": f"刷新失败: {exc}"},
+            status_code=500,
+        )
+
+
 @app.post("/actions/odoo-push")
 async def action_odoo_push(
     config_path: str = Form(DEFAULT_SYNC_CONFIG_REL),
@@ -1225,6 +1272,31 @@ async def action_odoo_push(
         return redirect_with_error("/odoo-push", str(exc))
     job = job_store.start_job(action="odoo_push", label=label, command=command, metadata=metadata)
     return RedirectResponse(url=f"/jobs/{job['job_id']}", status_code=303)
+
+
+@app.post("/api/odoo-push/preflight")
+async def api_odoo_push_preflight(
+    config_path: str = Form(DEFAULT_SYNC_CONFIG_REL),
+    payload_path: str = Form(""),
+    limit: int = Form(0),
+    missing_only: bool = Form(False),
+    source_filter: str = Form(""),
+):
+    from .odoo_push import preflight_payload
+    try:
+        result = preflight_payload(
+            config_path=config_path,
+            payload_path=payload_path,
+            limit=limit,
+            missing_only=missing_only,
+            source_filter=source_filter or None,
+        )
+        return JSONResponse(content=result)
+    except Exception as exc:
+        return JSONResponse(
+            content={"ok": False, "error": str(exc)},
+            status_code=500,
+        )
 
 
 @app.get("/api/odoo-status")

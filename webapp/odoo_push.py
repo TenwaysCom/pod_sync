@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import xmlrpc.client
 from collections import defaultdict
@@ -119,6 +120,31 @@ def search_stock_tracking(models, odoo_cfg: dict, tracking_number: str):
     return records
 
 
+def _display_picking_name_for_search(value: str | None) -> str | None:
+    """Convert canonical picking name back to display format for Odoo search.
+
+    e.g. WCB2BOUT33271 -> WCB2B/OUT/33271
+    """
+    if not value:
+        return value
+    normalized = re.sub(r"[^A-Z0-9]", "", str(value).upper())
+    if normalized.startswith("WCB2BOUT"):
+        return f"WCB2B/OUT/{normalized[len('WCB2BOUT'):]}"
+    if normalized.startswith("WCB2COUT"):
+        return f"WCB2C/OUT/{normalized[len('WCB2COUT'):]}"
+    if normalized.startswith("WBB2BRET"):
+        return f"WBB2B/RET/{normalized[len('WBB2BRET'):]}"
+    if normalized.startswith("WCB2BRET"):
+        return f"WCB2B/RET/{normalized[len('WCB2BRET'):]}"
+    if normalized.startswith("WRB2BRET"):
+        return f"WRB2B/RET/{normalized[len('WRB2BRET'):]}"
+    if normalized.startswith("OTHER"):
+        return f"Other/{normalized[len('OTHER'):]}"
+    if normalized.startswith("WHOUT"):
+        return f"WH/OUT/{normalized[len('WHOUT'):]}"
+    return value
+
+
 def search_picking(models, odoo_cfg: dict, key_type: str, key_value: str):
     """Search stock.picking by picking_name or tracking_number."""
     db = odoo_cfg["db"]
@@ -131,12 +157,19 @@ def search_picking(models, odoo_cfg: dict, key_type: str, key_value: str):
     else:
         field = odoo_cfg.get("tracking_number_field", "carrier_tracking_ref")
 
+    # Build domain: try both canonical and display formats for picking_name
+    domain = [(field, "=", key_value)]
+    if key_type == "picking_name":
+        display_value = _display_picking_name_for_search(key_value)
+        if display_value and display_value != key_value:
+            domain = ["|", (field, "=", key_value), (field, "=", display_value)]
+
     res = models.execute_kw(
         db, uid, password,
         model, "web_search_read",
         [],
         {
-            "domain": [(field, "=", key_value)],
+            "domain": domain,
             "specification": {"id": {}, "name": {}, field: {}, "x_studio_pod_link": {}},
             "limit": 5,
             "order": "id DESC",
@@ -221,13 +254,22 @@ def push_payload(
             except ImportError:
                 from webapp.odoo_pull import get_index
             existing_index = get_index(config_path)
-            items = [
-                item for item in items
+            filtered_items = []
+            for item in items:
+                key_value = item.get("preferred_key", "")
+                key_type = item.get("preferred_key_type", "")
+                lookup_tracking = key_value if key_type == "tracking_number" else None
+                lookup_picking = key_value if key_type == "picking_name" else None
+                if lookup_picking:
+                    display_picking = _display_picking_name_for_search(lookup_picking)
+                    if display_picking:
+                        lookup_picking = display_picking
                 if not existing_index.has_pod(
-                    tracking_number=item.get("preferred_key") if item.get("preferred_key_type") == "tracking_number" else None,
-                    picking_name=item.get("preferred_key") if item.get("preferred_key_type") == "picking_name" else None,
-                )
-            ]
+                    tracking_number=lookup_tracking,
+                    picking_name=lookup_picking,
+                ):
+                    filtered_items.append(item)
+            items = filtered_items
             print(f"[MISSING_ONLY] Filtered to {len(items)} missing records")
         except Exception as exc:
             print(f"[MISSING_ONLY] Warning: failed to filter: {exc}")
@@ -276,6 +318,12 @@ def push_payload(
     for item in items:
         key_type = item.get("preferred_key_type", "")
         key_value = item.get("preferred_key", "")
+        # For picking_name keys, convert canonical format (e.g. WCB2BOUT33271)
+        # back to display format (e.g. WCB2B/OUT/33271) so Odoo search works
+        if key_type == "picking_name":
+            display_key = _display_picking_name_for_search(key_value)
+            if display_key:
+                key_value = display_key
         source_file_url = item.get("file_url", "")
         local_path = item.get("local_path", "")
         source = item.get("source_name", "unknown")
@@ -548,6 +596,147 @@ def push_single_item(
         result["error"] = f"create tracking error: {exc}"
 
     return result
+
+
+def preflight_payload(
+    *,
+    config_path: str,
+    payload_path: str,
+    limit: int = 0,
+    source_filter: str | None = None,
+    missing_only: bool = False,
+):
+    """Check which payload items are actually findable in Odoo before pushing.
+
+    Returns categories:
+        - ready_to_push: items that exist in Odoo and don't already have POD
+        - already_has_pod: items that already have a POD link in Odoo
+        - not_found: items whose key cannot be found in Odoo
+        - invalid: items missing key or file_url
+    """
+    full_cfg = load_config(config_path)
+    odoo_cfg = get_odoo_cfg(full_cfg)
+    if not odoo_cfg.get("enabled", False):
+        return {"ok": False, "error": "Odoo push is disabled in config"}
+
+    required_keys = ("url", "db", "uid", "api_key")
+    missing = [k for k in required_keys if not odoo_cfg.get(k)]
+    if missing:
+        return {"ok": False, "error": f"Missing Odoo config keys: {missing}"}
+
+    payload = json.loads(Path(payload_path).read_text(encoding="utf-8"))
+    items = [item for item in payload.get("items", []) if item.get("identifier_status") == "ready"]
+    if source_filter:
+        items = [item for item in items if item.get("source_name") == source_filter]
+
+    # Pre-filter to missing-only if requested
+    if missing_only:
+        try:
+            try:
+                from .odoo_pull import get_index
+            except ImportError:
+                from webapp.odoo_pull import get_index
+            existing_index = get_index(config_path)
+            items = [
+                item for item in items
+                if not existing_index.has_pod(
+                    tracking_number=item.get("preferred_key") if item.get("preferred_key_type") == "tracking_number" else None,
+                    picking_name=item.get("preferred_key") if item.get("preferred_key_type") == "picking_name" else None,
+                )
+            ]
+        except Exception as exc:
+            print(f"[MISSING_ONLY] Warning: failed to filter: {exc}")
+
+    if limit > 0:
+        items = items[:limit]
+
+    # Load existing POD index for deduplication
+    existing_index = None
+    try:
+        try:
+            from .odoo_pull import get_index
+        except ImportError:
+            from webapp.odoo_pull import get_index
+        existing_index = get_index(config_path)
+    except Exception as exc:
+        print(f"[PREFLIGHT] Warning: failed to load index: {exc}")
+
+    common, models = connect_odoo(odoo_cfg)
+    try:
+        version = common.version()
+    except Exception as exc:
+        return {"ok": False, "error": f"Odoo connection failed: {exc}"}
+
+    ready_to_push = []
+    already_has_pod = []
+    not_found = []
+    invalid = []
+
+    for item in items:
+        key_type = item.get("preferred_key_type", "")
+        key_value = item.get("preferred_key", "")
+        source = item.get("source_name", "unknown")
+        payload_item_id = item.get("payload_item_id", "")
+
+        entry = {
+            "payload_item_id": payload_item_id,
+            "source": source,
+            "key_type": key_type,
+            "key_value": key_value,
+            "picking_name": item.get("picking_name"),
+            "tracking_number": item.get("tracking_number"),
+            "file_name": item.get("file_name"),
+        }
+
+        if not key_value:
+            invalid.append(entry)
+            continue
+
+        # Check existing POD
+        if existing_index and existing_index.has_pod(
+            tracking_number=key_value if key_type == "tracking_number" else None,
+            picking_name=key_value if key_type == "picking_name" else None,
+        ):
+            already_has_pod.append(entry)
+            continue
+
+        # Check Odoo existence
+        found = False
+        if key_type == "tracking_number" or key_value:
+            search_tn = key_value if key_type == "tracking_number" else key_value
+            try:
+                tracking_records = search_stock_tracking(models, odoo_cfg, search_tn)
+                if tracking_records:
+                    found = True
+            except Exception:
+                pass
+
+        if not found:
+            try:
+                pickings = search_picking(models, odoo_cfg, key_type, key_value)
+                if pickings:
+                    found = True
+            except Exception:
+                pass
+
+        if found:
+            ready_to_push.append(entry)
+        else:
+            not_found.append(entry)
+
+    return {
+        "ok": True,
+        "server_version": version.get("server_version", "unknown"),
+        "total": len(items),
+        "ready_to_push_count": len(ready_to_push),
+        "already_has_pod_count": len(already_has_pod),
+        "not_found_count": len(not_found),
+        "invalid_count": len(invalid),
+        "ready_to_push": ready_to_push,
+        "already_has_pod": already_has_pod,
+        "not_found": not_found,
+        "invalid": invalid,
+    }
 
 
 def main():
