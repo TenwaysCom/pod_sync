@@ -14,8 +14,12 @@ Core rules used by the current Phase 1A / POD recognition pipeline:
     are also treated as tracking numbers.
 
 - CMC OneDrive
-  - `EU22114.pdf` and `HK23898.pdf` are restored to `WCB2B/OUT/22114`
-    and `WCB2B/OUT/23898`.
+  - `EU22114.pdf` is restored to `WCB2B/OUT/22114`.
+  - `HK23898.pdf` is restored to `WCB2C/OUT/23898`.
+  - `WBB2BRET01301` is treated as `WBB2B/RET/01301`.
+  - `Other07400` is treated as `Other/07400`.
+  - Trailing alphabetic characters after the numeric portion are stripped,
+    e.g. `WCB2BOUT19782A` -> `WCB2B/OUT/19782`.
   - Pure numeric file names like `23735.pdf` are also restored to
     `WCB2B/OUT/23735`.
   - Numeric page suffixes such as `23735-1.pdf` or `EU22114-2.pdf` are
@@ -28,8 +32,11 @@ Core rules used by the current Phase 1A / POD recognition pipeline:
 # Tracking extraction is intentionally broad because EMTC mostly exposes
 # tracking numbers rather than outbound picking names in its file names.
 TRACKING_PATTERNS = [
-    re.compile(r"(?<![A-Z0-9])WHOUT\d{4,}(?![A-Z0-9])"),
-    re.compile(r"(?<![A-Z0-9])WCB2BOUT\d{4,}(?![A-Z0-9])"),
+    re.compile(r"(?<![A-Z0-9])WHOUT\d{4,}[A-Z]?(?![A-Z0-9])"),
+    re.compile(r"(?<![A-Z0-9])WCB2BOUT\d{4,}[A-Z]?(?![A-Z0-9])"),
+    re.compile(r"(?<![A-Z0-9])WCB2COUT\d{4,}[A-Z]?(?![A-Z0-9])"),
+    re.compile(r"(?<![A-Z0-9])WBB2BRET\d{4,}[A-Z]?(?![A-Z0-9])"),
+    re.compile(r"(?i)(?<![A-Z0-9])Other\d{4,}[A-Z]?(?![A-Z0-9])"),
     re.compile(r"(?<![A-Z0-9])3SHOHR\d{6,}(?![A-Z0-9])"),
     re.compile(r"(?<![A-Z0-9])[A-Z]{2}\d{8,14}[A-Z]{2}(?![A-Z0-9])"),
     re.compile(r"(?<![A-Z0-9])[0-9][A-Z]{2,10}\d{6,24}(?![A-Z0-9])"),
@@ -38,13 +45,19 @@ TRACKING_PATTERNS = [
 ]
 
 # Direct picking keys already embedded in file names.
+# Lookbehind is intentionally omitted so that patterns can match after
+# shorthand prefixes like EU/HK (e.g. EUWBB2BRET01162).
 PICKING_PATTERNS = [
-    re.compile(r"(?<![A-Z0-9])WHOUT\d{4,}(?![A-Z0-9])"),
-    re.compile(r"(?<![A-Z])WCB2B[-_ /]?OUT[-_ /]?\d{4,}(?![A-Z0-9])"),
-    re.compile(r"(?<![A-Z])WCB2C[-_ /]?OUT[-_ /]?\d{4,}(?![A-Z0-9])"),
+    re.compile(r"WHOUT\d{4,}[A-Z]?(?![A-Z0-9])"),
+    re.compile(r"WCB2B[-_ /]?OUT[-_ /]?\d{4,}[A-Z]?(?![A-Z0-9])"),
+    re.compile(r"WCB2C[-_ /]?OUT[-_ /]?\d{4,}[A-Z]?(?![A-Z0-9])"),
+    re.compile(r"WBB2B[-_ /]?RET[-_ /]?\d{4,}[A-Z]?(?![A-Z0-9])"),
+    re.compile(r"WCB2B[-_ /]?RET[-_ /]?\d{4,}[A-Z]?(?![A-Z0-9])"),
+    re.compile(r"WRB2B[-_ /]?RET[-_ /]?\d{4,}[A-Z]?(?![A-Z0-9])"),
+    re.compile(r"(?i)Other\d{4,}[A-Z]?(?![A-Z0-9])"),
 ]
 
-# CMC shorthand file names. These are restored to WCB2B/OUT/<number>.
+# CMC shorthand file names.
 PREFIX_GROUP_PATTERNS = {
     "EU": re.compile(r"(?i)\bEU[-_ ]?(\d+[A-Z]?(?:-\d+[A-Z]?){0,12})\b"),
     "HK": re.compile(r"(?i)\bHK[-_ ]?(\d+[A-Z]?(?:-\d+[A-Z]?){0,12})\b"),
@@ -90,6 +103,30 @@ def parse_bool(value, default=False):
     return default
 
 
+def _strip_trailing_alpha(value):
+    """Remove trailing alphabetic characters after the last digit sequence.
+
+    Only strips noise letters from picking-like tokens.
+    Preserves postal tracking codes (e.g. LA857793468NL, CF438625735NL).
+
+    Examples:
+        WCB2BOUT19782A -> WCB2BOUT19782
+        EU22114B -> EU22114
+        Other07400X -> Other07400
+        LA857793468NL -> LA857793468NL   (preserved)
+    """
+    if not value:
+        return value
+    upper = value.upper()
+    # Postal tracking codes: two letters, digits, two letters — trailing letters are real
+    if re.fullmatch(r"[A-Z]{2}\d+[A-Z]{2}", upper):
+        return upper
+    match = re.search(r"^(.+?\d+)[A-Z]+$", upper)
+    if match:
+        return match.group(1)
+    return upper
+
+
 def _expand_prefixed_groups(prefix, group_text):
     parts = [part for part in group_text.upper().split("-") if part]
     if not parts:
@@ -103,7 +140,7 @@ def _expand_prefixed_groups(prefix, group_text):
     # Single-digit trailing chunks are treated as page markers, e.g.
     # `EU22114-1.pdf` or `HK23898-2.pdf`.
     if trailing_parts and all(re.fullmatch(r"\d{1,2}", part) and int(part) <= 9 for part in trailing_parts):
-        return [f"{prefix}{base}"]
+        return [_strip_trailing_alpha(f"{prefix}{base}")]
 
     resolved = [base]
     previous_digits = re.match(r"^(\d+)", base).group(1)
@@ -132,7 +169,7 @@ def _expand_prefixed_groups(prefix, group_text):
         previous_digits = full_digits
         previous_number = int(full_digits)
 
-    return [f"{prefix}{part}" for part in resolved]
+    return [_strip_trailing_alpha(f"{prefix}{part}") for part in resolved]
 
 
 def extract_picking_candidates(*texts):
@@ -146,6 +183,7 @@ def extract_picking_candidates(*texts):
                 candidates.extend(_expand_prefixed_groups(prefix, match.group(1)))
     normalized = []
     for candidate in candidates:
+        candidate = _strip_trailing_alpha(candidate)
         key = normalize_picking_name(candidate)
         if key and key not in normalized:
             normalized.append(key)
@@ -169,22 +207,32 @@ def _extract_cmc_numeric_filename_candidates(file_name):
 def _restore_cmc_picking_candidates(*texts):
     restored = []
     for candidate in extract_picking_candidates(*texts):
-        if not (candidate.startswith("EU") or candidate.startswith("HK")):
-            continue
-        suffix = candidate[2:]
-        restored_candidate = normalize_picking_name(f"WCB2B/OUT/{suffix}")
-        if restored_candidate and restored_candidate not in restored:
-            restored.append(restored_candidate)
+        if candidate.startswith("EU"):
+            suffix = candidate[len("EU"):]
+            restored_candidate = normalize_picking_name(f"WCB2B/OUT/{suffix}")
+            if restored_candidate and restored_candidate not in restored:
+                restored.append(restored_candidate)
+        elif candidate.startswith("HK"):
+            suffix = candidate[len("HK"):]
+            restored_candidate = normalize_picking_name(f"WCB2C/OUT/{suffix}")
+            if restored_candidate and restored_candidate not in restored:
+                restored.append(restored_candidate)
     return restored
 
 
 def _picking_candidate_suffix(candidate):
     if candidate.startswith("WCB2BOUT"):
-        return candidate[len("WCB2BOUT") :]
+        return candidate[len("WCB2BOUT"):]
+    if candidate.startswith("WCB2COUT"):
+        return candidate[len("WCB2COUT"):]
+    if candidate.startswith("WBB2BRET"):
+        return candidate[len("WBB2BRET"):]
+    if candidate.startswith("Other"):
+        return candidate[len("Other"):]
     if candidate.startswith("EU"):
-        return candidate[len("EU") :]
+        return candidate[len("EU"):]
     if candidate.startswith("HK"):
-        return candidate[len("HK") :]
+        return candidate[len("HK"):]
     return None
 
 
@@ -209,6 +257,7 @@ def extract_tracking_candidates(*texts):
             candidates.extend(pattern.findall(upper_text))
     normalized = []
     for candidate in candidates:
+        candidate = _strip_trailing_alpha(candidate)
         key = normalize_tracking(candidate)
         if not key or _looks_like_date_token(key):
             continue

@@ -65,7 +65,7 @@ class Phase1APipelineTests(unittest.TestCase):
         self.assertEqual(doc["inferred_picking_names"][0], "WCB2BOUT22114")
         self.assertIn("EU22114", doc["inferred_picking_names"])
 
-    def test_restores_cmc_hk_filename_to_wcb2bout_picking(self):
+    def test_restores_cmc_hk_filename_to_wcb2cout_picking(self):
         doc = parsing.infer_document_fields(
             {
                 "source": "onedrive",
@@ -76,7 +76,7 @@ class Phase1APipelineTests(unittest.TestCase):
                 "source_url": "https://example.test/file.pdf",
             }
         )
-        self.assertEqual(doc["inferred_picking_names"][0], "WCB2BOUT23898")
+        self.assertEqual(doc["inferred_picking_names"][0], "WCB2COUT23898")
         self.assertIn("HK23898", doc["inferred_picking_names"])
 
     def test_extracts_postal_tracking_with_suffix_letters(self):
@@ -170,7 +170,7 @@ class Phase1APipelineTests(unittest.TestCase):
         )
         self.assertEqual(doc["inferred_picking_names"], ["WCB2BOUT23735"])
 
-    def test_run_phase1a_parse_only_treats_hk_and_restored_wcb2bout_as_single_picking(self):
+    def test_run_phase1a_parse_only_treats_hk_and_restored_wcb2cout_as_single_picking(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             manifest_path = tmp / "cmc.jsonl"
@@ -215,7 +215,7 @@ class Phase1APipelineTests(unittest.TestCase):
 
             self.assertEqual(summary["ready_document_count"], 1)
             self.assertEqual(summary["review_document_count"], 0)
-            self.assertEqual(ready_report[0]["primary_picking_name"], "WCB2BOUT23898")
+            self.assertEqual(ready_report[0]["primary_picking_name"], "WCB2COUT23898")
 
     def test_run_phase1a_parse_only_splits_multi_eu_file_into_multiple_ready_rows(self):
         with tempfile.TemporaryDirectory() as tmpdir:

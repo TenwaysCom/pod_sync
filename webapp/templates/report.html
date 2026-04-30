@@ -93,6 +93,12 @@
             {% endfor %}
           </div>
         </div>
+        <div>
+          <p class="label">年度 POD 提供率</p>
+          <div class="artifact-actions">
+            <a class="artifact-link" href="{{ request.url_for('report_export_annual_pod_coverage') }}">下载 XLSX</a>
+          </div>
+        </div>
       </div>
     </div>
   </section>

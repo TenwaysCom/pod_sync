@@ -143,6 +143,10 @@ def _display_picking_name(value: str | None):
         return f"WCB2B/OUT/{normalized[len('WCB2BOUT'):]}"
     if normalized.startswith("WCB2COUT"):
         return f"WCB2C/OUT/{normalized[len('WCB2COUT'):]}"
+    if normalized.startswith("WBB2BRET"):
+        return f"WBB2B/RET/{normalized[len('WBB2BRET'):]}"
+    if normalized.startswith("OTHER"):
+        return f"Other/{normalized[len('OTHER'):]}"
     if normalized.startswith("WHOUT"):
         return f"WH/OUT/{normalized[len('WHOUT'):]}"
     return value or normalized

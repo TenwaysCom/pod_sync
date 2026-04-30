@@ -51,6 +51,7 @@ def _get_odoo_missing_detail_url() -> str:
     if not odoo_url:
         raise ValueError("Odoo URL not configured in config.local.json")
     return f"{odoo_url}/api/querydeluxe/{query_id}/data"
+from .annual_pod_report import build_annual_pod_workbook
 from .odoo_push_history import list_push_runs, get_log_content
 from .odoo_pull import fetch_and_save_index, load_saved_index
 from .odoo_pod_compare import (
@@ -600,6 +601,21 @@ async def reconcile_pod_export(kind: str = "emtc", start_month: str = ""):
     payload = build_reconcile_pod_export_workbook(kind, start_month)
     if payload is None:
         raise HTTPException(status_code=404, detail="还没有可导出的 POD -> Odoo 明细。")
+    return Response(
+        content=payload["content"],
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{payload["filename"]}"',
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        },
+    )
+
+
+@app.get("/report/export/annual-pod-coverage")
+async def report_export_annual_pod_coverage():
+    payload = build_annual_pod_workbook()
+    if payload is None:
+        raise HTTPException(status_code=404, detail="还没有可生成的年度 POD 提供率数据。")
     return Response(
         content=payload["content"],
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

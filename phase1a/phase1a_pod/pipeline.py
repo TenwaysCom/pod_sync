@@ -323,11 +323,17 @@ def _picking_alias_suffix(value):
     if not value:
         return None
     if value.startswith("WCB2BOUT"):
-        return value[len("WCB2BOUT") :]
+        return value[len("WCB2BOUT"):]
+    if value.startswith("WCB2COUT"):
+        return value[len("WCB2COUT"):]
+    if value.startswith("WBB2BRET"):
+        return value[len("WBB2BRET"):]
+    if value.startswith("OTHER"):
+        return value[len("OTHER"):]
     if value.startswith("EU"):
-        return value[len("EU") :]
+        return value[len("EU"):]
     if value.startswith("HK"):
-        return value[len("HK") :]
+        return value[len("HK"):]
     return None
 
 
@@ -339,7 +345,7 @@ def _resolve_primary_picking_name(candidates):
     alias_suffixes.discard(None)
     if len(alias_suffixes) == 1 and all(suffix is not None for suffix in suffixes):
         for candidate in candidates:
-            if candidate.startswith("WCB2BOUT"):
+            if candidate.startswith("WCB2BOUT") or candidate.startswith("WCB2COUT"):
                 return candidate
         return candidates[0]
     return None
@@ -353,10 +359,16 @@ def _canonical_direct_split_picking(candidate):
     # `EU-22246-47.pdf` into multiple payload items. The parser already emits
     # both restored WCB2B keys and shorthand aliases, so we collapse them into
     # a single canonical picking key here.
+    if candidate.startswith("WBB2BRET") or candidate.startswith("OTHER"):
+        return candidate
+    if candidate.startswith("WCB2COUT"):
+        return candidate
     suffix = _picking_alias_suffix(candidate)
     if suffix is not None:
+        if candidate.startswith("HK"):
+            return f"WCB2COUT{suffix}"
         return f"WCB2BOUT{suffix}"
-    if candidate.startswith("WCB2COUT") or candidate.startswith("WHOUT"):
+    if candidate.startswith("WHOUT"):
         return candidate
     return None
 
