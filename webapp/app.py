@@ -319,7 +319,7 @@ def normalize_redirect_target(target: str | None, fallback: str):
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
-    public_paths = {"/login", "/logout", "/static", "/favicon.ico", "/api/odoo-status"}
+    public_paths = {"/login", "/logout", "/static", "/favicon.ico", "/api/odoo-status", "/storage/files"}
     if any(path.startswith(p) for p in public_paths):
         return await call_next(request)
     if not _is_authenticated(request):
@@ -1098,6 +1098,9 @@ async def action_run_pipeline(
     cmc_workers: int = Form(3),
     emtc_workers: int = Form(3),
 ):
+    # Read current scheduler steps config
+    scheduler_cfg = scheduler.load_config()
+    steps = scheduler_cfg.get("steps", {})
     try:
         label, command, metadata = build_pipeline_command(
             config_path=config_path,
@@ -1108,6 +1111,11 @@ async def action_run_pipeline(
             emtc_limit=emtc_limit,
             cmc_workers=cmc_workers,
             emtc_workers=emtc_workers,
+            skip_cmc=not steps.get("cmc_sync", True),
+            skip_emtc=not steps.get("emtc_sync", True),
+            skip_phase1a=not steps.get("phase1a", True),
+            skip_reports=not steps.get("refresh_reports", True),
+            skip_odoo_push=not steps.get("odoo_push", False),
         )
     except ValueError as exc:
         return redirect_with_error("/scheduler", str(exc))

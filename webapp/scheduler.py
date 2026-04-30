@@ -144,6 +144,7 @@ class Scheduler:
 
         cfg = self.load_config()
         opts = cfg.get("pipeline_options", {})
+        steps = cfg.get("steps", {})
         try:
             label, command, metadata = build_pipeline_command(
                 config_path=opts.get("config_path", "config.local.json"),
@@ -154,7 +155,11 @@ class Scheduler:
                 emtc_limit=int(opts.get("emtc_limit", 0) or 0),
                 cmc_workers=int(opts.get("cmc_workers", 3) or 3),
                 emtc_workers=int(opts.get("emtc_workers", 3) or 3),
-                skip_odoo_push=True,
+                skip_cmc=not steps.get("cmc_sync", True),
+                skip_emtc=not steps.get("emtc_sync", True),
+                skip_phase1a=not steps.get("phase1a", True),
+                skip_reports=not steps.get("refresh_reports", True),
+                skip_odoo_push=not steps.get("odoo_push", False),
             )
         except Exception as exc:
             self._log(f"Failed to build pipeline command: {exc}")
