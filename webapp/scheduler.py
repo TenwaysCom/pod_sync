@@ -35,6 +35,15 @@ def _parse_iso(value: str | None) -> datetime | None:
         return None
 
 
+DEFAULT_STEPS = [
+    {"key": "cmc_sync", "label": "CMC OneDrive 同步", "default": True},
+    {"key": "emtc_sync", "label": "EMTC Google Drive 同步", "default": True},
+    {"key": "phase1a", "label": "Phase 1A 识别", "default": True},
+    {"key": "refresh_reports", "label": "刷新统一报告", "default": True},
+    {"key": "odoo_push", "label": "推送 POD 到 Odoo", "default": False},
+]
+
+
 def _default_config():
     return {
         "enabled": False,
@@ -44,6 +53,7 @@ def _default_config():
         "last_run_job_id": None,
         "last_run_ok": None,
         "created_at": _fmt_iso(_utc_now()),
+        "steps": {s["key"]: s["default"] for s in DEFAULT_STEPS},
         "pipeline_options": {
             "config_path": "config.local.json",
             "phase1a_config_path": "phase1a/examples/phase1a_from_sync.example.json",
@@ -109,6 +119,8 @@ class Scheduler:
             for key in ("enabled", "interval_hours"):
                 if key in patch:
                     cfg[key] = patch[key]
+            if "steps" in patch:
+                cfg["steps"] = {**cfg.get("steps", {}), **patch["steps"]}
             if "pipeline_options" in patch:
                 cfg["pipeline_options"] = {**cfg.get("pipeline_options", {}), **patch["pipeline_options"]}
             cfg["updated_at"] = _fmt_iso(_utc_now())
@@ -221,5 +233,7 @@ class Scheduler:
             "last_run_job_id": cfg.get("last_run_job_id"),
             "last_run_ok": cfg.get("last_run_ok"),
             "is_running": self._thread is not None and self._thread.is_alive(),
+            "steps": cfg.get("steps", {}),
+            "step_definitions": DEFAULT_STEPS,
             "pipeline_options": cfg.get("pipeline_options", {}),
         }

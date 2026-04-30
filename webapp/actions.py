@@ -343,6 +343,10 @@ def build_pipeline_command(
     emtc_limit: int,
     cmc_workers: int,
     emtc_workers: int,
+    skip_cmc: bool = False,
+    skip_emtc: bool = False,
+    skip_phase1a: bool = False,
+    skip_reports: bool = False,
     skip_odoo_push: bool = False,
     odoo_push_limit: int = 0,
 ):
@@ -363,13 +367,32 @@ def build_pipeline_command(
         command.extend(["--cmc-limit", str(cmc_limit)])
     if emtc_limit > 0:
         command.extend(["--emtc-limit", str(emtc_limit)])
+    if skip_cmc:
+        command.append("--skip-cmc")
+    if skip_emtc:
+        command.append("--skip-emtc")
+    if skip_phase1a:
+        command.append("--skip-phase1a")
+    if skip_reports:
+        command.append("--skip-reports")
     if skip_odoo_push:
         command.append("--skip-odoo-push")
     if odoo_push_limit > 0:
         command.extend(["--odoo-push-limit", str(odoo_push_limit)])
+
+    parts = []
+    if not skip_cmc:
+        parts.append("CMC")
+    if not skip_emtc:
+        parts.append("EMTC")
+    if not skip_phase1a:
+        parts.append("识别")
+    if not skip_reports:
+        parts.append("报告")
+    if not skip_odoo_push:
+        parts.append("推送")
     mode_label = "增量" if cmc_incremental and emtc_incremental else "全量"
-    push_label = "+ Odoo推送" if not skip_odoo_push else ""
-    label = f"完整流水线 / {mode_label}同步 + 识别 + 报告{push_label}"
+    label = f"流水线 / {mode_label} / {' + '.join(parts)}" if parts else "流水线 / 无步骤"
     metadata = {
         "category": "pipeline",
         "action_type": "run_pipeline",
@@ -381,6 +404,10 @@ def build_pipeline_command(
         "emtc_limit": emtc_limit,
         "cmc_workers": cmc_workers,
         "emtc_workers": emtc_workers,
+        "skip_cmc": skip_cmc,
+        "skip_emtc": skip_emtc,
+        "skip_phase1a": skip_phase1a,
+        "skip_reports": skip_reports,
         "skip_odoo_push": skip_odoo_push,
         "odoo_push_limit": odoo_push_limit,
     }

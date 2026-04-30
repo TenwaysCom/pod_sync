@@ -181,6 +181,27 @@ class JobStore:
                 )
         return payload
 
+    def _extract_report_from_log(self, job_id: str) -> dict | None:
+        path = self._log_path(job_id)
+        if not path.exists():
+            return None
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+            # Find the last non-empty line
+            for line in reversed(content.strip().splitlines()):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    parsed = json.loads(line)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except json.JSONDecodeError:
+                    continue
+        except Exception:
+            pass
+        return None
+
     def _attach_phase1a_artifacts(self, payload):
         metadata = dict(payload.get("metadata") or {})
         config_path = metadata.get("phase1a_config_path")
@@ -227,6 +248,12 @@ class JobStore:
             current["finished_at"] = utc_now()
             current["pid"] = None
             current = self._attach_phase1a_artifacts(current)
+
+            # Try to parse pipeline report from the last non-empty line of log
+            report = self._extract_report_from_log(job_id)
+            if report:
+                current["report"] = report
+
             with self._lock:
                 self._write_job(current)
         except Exception:

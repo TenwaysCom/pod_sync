@@ -432,6 +432,124 @@ def push_payload(
     return {"ok": True, **results}
 
 
+def push_single_item(
+    *,
+    config_path: str,
+    match_key: str,
+    match_key_type: str,
+    file_url: str,
+    local_path: str | None = None,
+    source_name: str = "unknown",
+    dry_run: bool = False,
+):
+    """Push a single POD link to Odoo stock.tracking (or create via stock.picking fallback)."""
+    full_cfg = load_config(config_path)
+    odoo_cfg = get_odoo_cfg(full_cfg)
+    if not odoo_cfg.get("enabled", False):
+        return {"ok": False, "error": "Odoo push is disabled in config"}
+
+    required_keys = ("url", "db", "uid", "api_key")
+    missing = [k for k in required_keys if not odoo_cfg.get(k)]
+    if missing:
+        return {"ok": False, "error": f"Missing Odoo config keys: {missing}"}
+
+    # Prefer local file URL
+    local_file_url = get_local_file_url(full_cfg, local_path) if local_path else None
+    final_url = local_file_url if local_file_url else file_url
+
+    common, models = connect_odoo(odoo_cfg)
+    try:
+        version = common.version()
+    except Exception as exc:
+        return {"ok": False, "error": f"Odoo connection failed: {exc}"}
+
+    key_type = match_key_type
+    key_value = match_key
+    pod_time = _utc_now_str()
+
+    result = {
+        "ok": True,
+        "match_key": key_value,
+        "match_key_type": key_type,
+        "file_url": final_url,
+        "status": "pending",
+        "target_model": None,
+        "target_id": None,
+        "target_name": None,
+        "error": None,
+        "server_version": version.get("server_version", "unknown"),
+    }
+
+    # PRIMARY: Try stock.tracking by tracking_number
+    if key_type == "tracking_number" or key_value:
+        search_tn = key_value if key_type == "tracking_number" else key_value
+        try:
+            tracking_records = search_stock_tracking(models, odoo_cfg, search_tn)
+        except Exception as exc:
+            result["status"] = "failed"
+            result["error"] = f"stock.tracking search error: {exc}"
+            return result
+
+        if tracking_records:
+            track = tracking_records[0]
+            tracking_id = track.get("id")
+            current_pod_link = track.get("pod_link")
+            result["target_model"] = "stock.tracking"
+            result["target_id"] = tracking_id
+            result["target_name"] = track.get("tracking_number")
+
+            if current_pod_link and str(current_pod_link) == final_url:
+                result["status"] = "skipped_same"
+                return result
+
+            if dry_run:
+                result["status"] = "dry_run_tracking"
+                return result
+
+            try:
+                write_tracking_pod(models, odoo_cfg, tracking_id, final_url, pod_time)
+                result["status"] = "pushed_tracking"
+            except Exception as exc:
+                result["status"] = "failed"
+                result["error"] = f"write tracking error: {exc}"
+            return result
+
+    # FALLBACK: find stock.picking, then create stock.tracking
+    try:
+        pickings = search_picking(models, odoo_cfg, key_type, key_value)
+    except Exception as exc:
+        result["status"] = "failed"
+        result["error"] = f"stock.picking search error: {exc}"
+        return result
+
+    if not pickings:
+        result["status"] = "not_found"
+        result["error"] = "No matching stock.tracking or stock.picking found"
+        return result
+
+    pick = pickings[0]
+    picking_id = pick.get("id")
+    result["target_model"] = "stock.tracking"
+    result["target_id"] = picking_id
+    result["target_name"] = pick.get("name")
+
+    if dry_run:
+        result["status"] = "dry_run_create_tracking"
+        return result
+
+    try:
+        new_tracking_id = create_stock_tracking(
+            models, odoo_cfg, picking_id, key_value, final_url, pod_time
+        )
+        result["status"] = "created_tracking"
+        result["target_id"] = new_tracking_id
+    except Exception as exc:
+        result["status"] = "failed"
+        result["error"] = f"create tracking error: {exc}"
+
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description="Push POD links to Odoo")
     parser.add_argument("--config", default="config.local.json", help="Path to sync config JSON")

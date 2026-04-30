@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -32,12 +33,24 @@ from .actions import (
 from .file_browser import build_storage_listing, resolve_storage_file
 from .jobs import JobStore
 from .odoo_missing_report import (
-    DEFAULT_TOTAL_DETAIL_URL as ODOO_MISSING_DETAIL_URL,
     build_odoo_missing_listing,
     load_odoo_missing_snapshot,
     refresh_odoo_missing_snapshot,
     resolve_odoo_missing_artifact,
 )
+
+
+def _get_odoo_missing_detail_url() -> str:
+    """Read QueryDeluxe detail URL from config."""
+    cfg_path = PROJECT_ROOT / "config.local.json"
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"Config file not found: {cfg_path}")
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    odoo_url = cfg.get("odoo", {}).get("url", "").rstrip("/")
+    query_id = cfg.get("querydeluxe", {}).get("missing_tracking_query_id", 64)
+    if not odoo_url:
+        raise ValueError("Odoo URL not configured in config.local.json")
+    return f"{odoo_url}/api/querydeluxe/{query_id}/data"
 from .odoo_push_history import list_push_runs, get_log_content
 from .odoo_pull import fetch_and_save_index, load_saved_index
 from .odoo_pod_compare import (
@@ -382,7 +395,7 @@ async def report_page(request: Request):
         "report.html",
         page_id="report",
         **report_context,
-        odoo_missing_detail_url=ODOO_MISSING_DETAIL_URL,
+        odoo_missing_detail_url=_get_odoo_missing_detail_url(),
         odoo_missing_artifact_labels=ODOO_MISSING_ARTIFACT_LABELS,
         pod_compare_artifact_labels=POD_COMPARE_ARTIFACT_LABELS,
     )
@@ -511,7 +524,7 @@ async def odoo_missing_page(request: Request):
         "odoo_missing.html",
         page_id="odoo_missing",
         snapshot=snapshot,
-        odoo_missing_detail_url=ODOO_MISSING_DETAIL_URL,
+        odoo_missing_detail_url=_get_odoo_missing_detail_url(),
         odoo_missing_artifact_labels=ODOO_MISSING_ARTIFACT_LABELS,
     )
 
@@ -730,6 +743,39 @@ async def api_reconcile_pod_to_odoo(
     if payload is None:
         raise HTTPException(status_code=404, detail="还没有可用的对账数据。")
     return JSONResponse(payload, headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"})
+
+
+@app.post("/api/reconcile/push-to-odoo")
+async def api_reconcile_push_to_odoo(
+    request: Request,
+    match_key: str = Form(""),
+    match_key_type: str = Form(""),
+    file_url: str = Form(""),
+    local_path: str = Form(""),
+    source_name: str = Form(""),
+):
+    if not match_key or not match_key_type or not file_url:
+        raise HTTPException(status_code=400, detail="缺少必要参数：match_key, match_key_type, file_url")
+
+    from .odoo_push import push_single_item
+    from .actions import resolve_storage_dir
+
+    # local_path from reconcile is a relative path; resolve to absolute
+    absolute_local_path = None
+    if local_path:
+        storage = resolve_storage_dir()
+        absolute_local_path = str(storage / local_path)
+
+    result = push_single_item(
+        config_path="config.local.json",
+        match_key=match_key,
+        match_key_type=match_key_type,
+        file_url=file_url,
+        local_path=absolute_local_path,
+        source_name=source_name or "unknown",
+        dry_run=False,
+    )
+    return JSONResponse(result)
 
 
 @app.get("/jobs", response_class=HTMLResponse)
@@ -1011,7 +1057,7 @@ async def action_refresh_remote_counts(config_path: str = Form(DEFAULT_SYNC_CONF
 
 @app.post("/actions/refresh-odoo-missing")
 async def action_refresh_odoo_missing(
-    detail_url: str = Form(ODOO_MISSING_DETAIL_URL),
+    detail_url: str = Form(_get_odoo_missing_detail_url()),
 ):
     try:
         refresh_odoo_missing_snapshot(detail_url=detail_url)
@@ -1031,7 +1077,7 @@ async def action_refresh_compare():
 
 @app.post("/actions/refresh-report")
 async def action_refresh_report(
-    detail_url: str = Form(ODOO_MISSING_DETAIL_URL),
+    detail_url: str = Form(_get_odoo_missing_detail_url()),
 ):
     try:
         refresh_odoo_missing_snapshot(detail_url=detail_url)
@@ -1081,10 +1127,22 @@ async def action_update_scheduler(
     pipeline_emtc_limit: int = Form(0),
     pipeline_cmc_workers: int = Form(3),
     pipeline_emtc_workers: int = Form(3),
+    step_cmc_sync: bool = Form(False),
+    step_emtc_sync: bool = Form(False),
+    step_phase1a: bool = Form(False),
+    step_refresh_reports: bool = Form(False),
+    step_odoo_push: bool = Form(False),
 ):
     patch = {
         "enabled": enabled in ("1", "on", "true", "yes"),
         "interval_hours": max(1, min(168, interval_hours)),
+        "steps": {
+            "cmc_sync": step_cmc_sync,
+            "emtc_sync": step_emtc_sync,
+            "phase1a": step_phase1a,
+            "refresh_reports": step_refresh_reports,
+            "odoo_push": step_odoo_push,
+        },
         "pipeline_options": {
             "config_path": pipeline_config_path,
             "phase1a_config_path": pipeline_phase1a_config_path,

@@ -18,7 +18,15 @@ TOTAL_DETAIL_CSV_PATH = RUNTIME_DIR / "odoo_tracking_total_detail.csv"
 MISSING_DETAIL_CSV_PATH = RUNTIME_DIR / "odoo_missing_tracking_detail.csv"
 REPORT_MD_PATH = RUNTIME_DIR / "odoo_missing_tracking_report.md"
 
-DEFAULT_TOTAL_DETAIL_URL = "https://tenways.odoo.com/api/querydeluxe/64/data"
+def _get_default_detail_url(config_path: str = "config.local.json") -> str:
+    from webapp.actions import resolve_project_path
+    cfg_path = resolve_project_path(config_path, "config.local.json")
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    odoo_url = cfg.get("odoo", {}).get("url", "").rstrip("/")
+    query_id = cfg.get("querydeluxe", {}).get("missing_tracking_query_id", 64)
+    if not odoo_url:
+        raise ValueError("Odoo URL not configured in config")
+    return f"{odoo_url}/api/querydeluxe/{query_id}/data"
 
 SUMMARY_FIELDS = [
     "carrier_id",
@@ -275,10 +283,12 @@ def save_odoo_missing_snapshot(snapshot):
 
 def refresh_odoo_missing_snapshot(
     *,
-    detail_url: str = DEFAULT_TOTAL_DETAIL_URL,
+    detail_url: str | None = None,
     timeout: int = 30,
     session: requests.Session | None = None,
 ):
+    if detail_url is None:
+        detail_url = _get_default_detail_url()
     detail_payload = _fetch_querydeluxe_rows(detail_url, timeout=timeout, session=session)
     snapshot = build_odoo_missing_snapshot(total_detail_rows=detail_payload["rows"], detail_url=detail_url)
     save_odoo_missing_snapshot(snapshot)

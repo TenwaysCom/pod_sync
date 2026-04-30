@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fetch existing POD data from Odoo via QueryDeluxe API.
 
-API endpoint: {ODOO_URL}/api/querydeluxe/65/data
+API endpoint: {ODOO_URL}/api/querydeluxe/{query_id}/data
 """
 from __future__ import annotations
 
@@ -125,7 +125,8 @@ def fetch_and_save_index(config_path: str = "config.local.json") -> ExistingPodI
     full_cfg = load_config(config_path)
     odoo_cfg = get_odoo_cfg(full_cfg)
     url = odoo_cfg.get("url", "").rstrip("/")
-    api_url = f"{url}/api/querydeluxe/65/data"
+    query_id = full_cfg.get("querydeluxe", {}).get("existing_pod_query_id", 65)
+    api_url = f"{url}/api/querydeluxe/{query_id}/data"
 
     print(f"[odoo_pull] Fetching from QueryDeluxe API: {api_url}")
     resp = requests.get(api_url, timeout=60)

@@ -67,6 +67,16 @@
           </label>
           <label>执行间隔（小时）<input type="number" name="interval_hours" value="{{ scheduler_status.interval_hours }}" min="1" max="168"></label>
           <hr style="border: none; border-top: 1px solid var(--border-color); margin: 8px 0;">
+          <p class="label" style="margin-bottom: 8px;">执行步骤（按顺序）</p>
+          <div class="step-checkboxes">
+            {% for step in scheduler_status.step_definitions %}
+            <label class="step-checkbox">
+              <input type="checkbox" name="step_{{ step.key }}" value="on" {% if scheduler_status.steps.get(step.key, step.default) %}checked{% endif %}>
+              <span>{{ step.label }}</span>
+            </label>
+            {% endfor %}
+          </div>
+          <hr style="border: none; border-top: 1px solid var(--border-color); margin: 8px 0;">
           <label>同步配置文件<input name="pipeline_config_path" value="{{ scheduler_status.pipeline_options.config_path or 'config.local.json' }}"></label>
           <label>Phase 1A 配置文件<input name="pipeline_phase1a_config_path" value="{{ scheduler_status.pipeline_options.phase1a_config_path or 'phase1a/examples/phase1a_from_sync.example.json' }}"></label>
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">

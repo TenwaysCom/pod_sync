@@ -49,6 +49,201 @@
     </div>
   </section>
 
+  {% if job.report %}
+  <section class="section">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">执行报告</p>
+        <h2>任务执行成果摘要</h2>
+      </div>
+    </div>
+    <div class="card">
+      <div class="grid grid-cards" style="margin-bottom: 16px;">
+        <article class="card stat-card stat-card-inline">
+          <p class="label">总体状态</p>
+          <h2 style="color: {% if job.report.ok %}var(--success){% else %}var(--danger){% endif %}">
+            {{ "成功" if job.report.ok else "失败" }}
+          </h2>
+          <p class="muted">{{ job.report.elapsed_seconds or 0 }} 秒</p>
+        </article>
+        {% if job.report.failed_step %}
+        <article class="card stat-card stat-card-inline stat-card-alert">
+          <p class="label">失败步骤</p>
+          <h2>{{ job.report.failed_step }}</h2>
+          <p class="muted">{{ job.report.error or "" }}</p>
+        </article>
+        {% endif %}
+      </div>
+
+      {# Data Report #}
+      {% if job.report.data_report %}
+      <p class="label" style="margin-bottom: 10px;">数据成果</p>
+      <div class="list-stack" style="margin-bottom: 20px;">
+
+        {# CMC Sync Report #}
+        {% if job.report.data_report.cmc_sync %}
+        <div style="margin-bottom: 16px;">
+          <p style="font-weight: 600; margin-bottom: 6px;">📁 CMC OneDrive 同步</p>
+          <div class="grid grid-cards">
+            <article class="card stat-card stat-card-inline">
+              <p class="label">下载文件</p>
+              <h2>{{ job.report.data_report.cmc_sync.downloaded_files or 0 }}</h2>
+            </article>
+            <article class="card stat-card stat-card-inline">
+              <p class="label">跳过文件</p>
+              <h2>{{ job.report.data_report.cmc_sync.skipped_files or 0 }}</h2>
+            </article>
+            <article class="card stat-card stat-card-inline">
+              <p class="label">失败文件</p>
+              <h2>{{ job.report.data_report.cmc_sync.failed_files or 0 }}</h2>
+            </article>
+          </div>
+        </div>
+        {% endif %}
+
+        {# EMTC Sync Report #}
+        {% if job.report.data_report.emtc_sync %}
+        <div style="margin-bottom: 16px;">
+          <p style="font-weight: 600; margin-bottom: 6px;">📁 EMTC Google Drive 同步</p>
+          <div class="grid grid-cards">
+            <article class="card stat-card stat-card-inline">
+              <p class="label">下载文件</p>
+              <h2>{{ job.report.data_report.emtc_sync.downloaded_files or 0 }}</h2>
+            </article>
+            <article class="card stat-card stat-card-inline">
+              <p class="label">跳过文件</p>
+              <h2>{{ job.report.data_report.emtc_sync.skipped_files or 0 }}</h2>
+            </article>
+            <article class="card stat-card stat-card-inline">
+              <p class="label">失败文件</p>
+              <h2>{{ job.report.data_report.emtc_sync.failed_files or 0 }}</h2>
+            </article>
+          </div>
+        </div>
+        {% endif %}
+
+        {# Phase 1A Report #}
+        {% if job.report.data_report.phase1a %}
+        <div style="margin-bottom: 16px;">
+          <p style="font-weight: 600; margin-bottom: 6px;">🔍 Phase 1A 识别（批次：{{ job.report.data_report.phase1a.run_name or "-" }}）</p>
+          <div class="grid grid-cards">
+            <article class="card stat-card stat-card-inline">
+              <p class="label">文档总数</p>
+              <h2>{{ job.report.data_report.phase1a.document_count or 0 }}</h2>
+            </article>
+            <article class="card stat-card stat-card-inline">
+              <p class="label">就绪文档</p>
+              <h2 style="color: var(--success)">{{ job.report.data_report.phase1a.ready_document_count or 0 }}</h2>
+            </article>
+            <article class="card stat-card stat-card-inline">
+              <p class="label">待审核</p>
+              <h2 style="color: var(--warn)">{{ job.report.data_report.phase1a.review_document_count or 0 }}</h2>
+            </article>
+            <article class="card stat-card stat-card-inline">
+              <p class="label">Payload 条目</p>
+              <h2>{{ job.report.data_report.phase1a.payload_item_count or 0 }}</h2>
+            </article>
+          </div>
+        </div>
+        {% endif %}
+
+        {# Odoo Push Report #}
+        {% if job.report.data_report.odoo_push %}
+        <div style="margin-bottom: 16px;">
+          <p style="font-weight: 600; margin-bottom: 6px;">🚀 Odoo 推送</p>
+          <div class="grid grid-cards">
+            <article class="card stat-card stat-card-inline">
+              <p class="label">处理总数</p>
+              <h2>{{ job.report.data_report.odoo_push.total or 0 }}</h2>
+            </article>
+            <article class="card stat-card stat-card-inline">
+              <p class="label">成功推送</p>
+              <h2 style="color: var(--success)">{{ job.report.data_report.odoo_push.tracking_pushed or 0 }}</h2>
+            </article>
+            <article class="card stat-card stat-card-inline">
+              <p class="label">已有跳过</p>
+              <h2>{{ job.report.data_report.odoo_push.skipped_existing or 0 }}</h2>
+            </article>
+            <article class="card stat-card stat-card-inline stat-card-alert">
+              <p class="label">未找到</p>
+              <h2>{{ job.report.data_report.odoo_push.tracking_not_found or 0 }}</h2>
+            </article>
+            <article class="card stat-card stat-card-inline stat-card-alert">
+              <p class="label">失败</p>
+              <h2>{{ job.report.data_report.odoo_push.failed or 0 }}</h2>
+            </article>
+          </div>
+          {% if job.report.data_report.odoo_push.by_source %}
+          <p style="font-weight: 600; margin: 12px 0 6px;">按来源分布</p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>来源</th>
+                <th>推送</th>
+                <th>未找到</th>
+                <th>失败</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for source, stats in job.report.data_report.odoo_push.by_source.items() %}
+              <tr>
+                <td>{{ source }}</td>
+                <td>{{ stats.tracking_pushed or 0 }}</td>
+                <td>{{ stats.not_found or 0 }}</td>
+                <td>{{ stats.failed or 0 }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% endif %}
+        </div>
+        {% endif %}
+
+      </div>
+      {% endif %}
+
+      {% if job.report.steps %}
+      <p class="label" style="margin-bottom: 10px;">各步骤详情</p>
+      <div class="list-stack">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>步骤</th>
+              <th>状态</th>
+              <th>详情</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for step in job.report.steps %}
+            <tr>
+              <td>
+                {% if step.step == "cmc_sync" %}CMC OneDrive 同步
+                {% elif step.step == "emtc_sync" %}EMTC Google Drive 同步
+                {% elif step.step == "phase1a" %}Phase 1A 识别
+                {% elif step.step == "refresh_odoo_missing" %}刷新 Odoo 缺失报告
+                {% elif step.step == "refresh_pod_compare" %}刷新 POD 对比报告
+                {% elif step.step == "refresh_reports" %}刷新统一报告
+                {% elif step.step == "odoo_push" %}推送 POD 到 Odoo
+                {% else %}{{ step.step }}{% endif %}
+              </td>
+              <td>
+                {% if step.ok %}
+                  <span style="color: var(--success); font-weight: 600;">✓ 成功</span>
+                {% else %}
+                  <span style="color: var(--danger); font-weight: 600;">✗ 失败</span>
+                {% endif %}
+              </td>
+              <td class="mono">{{ step.detail or "-" }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+    </div>
+  </section>
+  {% endif %}
+
   <section class="section">
     <div class="section-head">
       <div>

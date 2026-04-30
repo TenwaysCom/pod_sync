@@ -287,10 +287,11 @@
                   <th>Odoo 命中</th>
                   <th>源路径</th>
                   <th>链接</th>
+                  <th>操作</th>
                 </tr>
               </thead>
               <tbody id="podToOdooBody">
-                <tr class="file-row"><td colspan="5" class="empty-cell">展开后加载明细。</td></tr>
+                <tr class="file-row"><td colspan="6" class="empty-cell">展开后加载明细。</td></tr>
               </tbody>
             </table>
           </div>
@@ -472,6 +473,40 @@
         },
       });
 
+      async function pushToOdoo(item, btn) {
+        btn.disabled = true;
+        btn.textContent = "推送中...";
+        try {
+          const form = new FormData();
+          form.append("match_key", item.match_key || "");
+          form.append("match_key_type", "{{ selected_source.match_key_type }}");
+          form.append("file_url", item.sample_document?.file_url || "");
+          form.append("local_path", item.sample_document?.local_relative_path || "");
+          form.append("source_name", "{{ selected_source.source_name }}");
+
+          const resp = await fetch("{{ request.url_for('api_reconcile_push_to_odoo') }}", {
+            method: "POST",
+            body: form,
+          });
+          const data = await resp.json();
+          if (data.ok && (data.status === "pushed_tracking" || data.status === "created_tracking")) {
+            btn.textContent = "已推送";
+            btn.style.color = "var(--ok-color)";
+          } else if (data.status === "skipped_same") {
+            btn.textContent = "已有";
+            btn.style.color = "var(--ok-color)";
+          } else {
+            btn.textContent = data.status || "失败";
+            btn.style.color = "var(--error-color)";
+            btn.title = data.error || "";
+          }
+        } catch (err) {
+          btn.textContent = "失败";
+          btn.style.color = "var(--error-color)";
+          btn.title = String(err);
+        }
+      }
+
       createPager({
         details: document.getElementById("podToOdooDetails"),
         endpoint: "{{ request.url_for('api_reconcile_pod_to_odoo') }}",
@@ -487,13 +522,18 @@
         indicator: document.getElementById("podToOdooIndicator"),
         meta: document.getElementById("podToOdooMeta"),
         body: document.getElementById("podToOdooBody"),
-        colspan: 5,
+        colspan: 6,
         renderRows(items) {
           if (!items.length) {
-            this.body.innerHTML = '<tr class="file-row"><td colspan="5" class="empty-cell">当前筛选下没有明细。</td></tr>';
+            this.body.innerHTML = '<tr class="file-row"><td colspan="6" class="empty-cell">当前筛选下没有明细。</td></tr>';
             return;
           }
-          this.body.innerHTML = items.map((item) => `
+          this.body.innerHTML = items.map((item, idx) => {
+            const canPush = item.compare_status === "found_in_odoo";
+            const btnHtml = canPush
+              ? `<button type="button" class="secondary-button push-to-odoo-btn" style="padding: 4px 10px; font-size: 12px;" data-idx="${idx}">推送</button>`
+              : `<span class="muted" style="font-size: 12px;">-</span>`;
+            return `
             <tr class="file-row">
               <td>
                 <div class="file-primary">
@@ -523,8 +563,15 @@
                   return links.join(" · ") || "-";
                 })() : '-'}
               </td>
+              <td>${btnHtml}</td>
             </tr>
-          `).join("");
+          `}).join("");
+
+          // Attach click handlers
+          this.body.querySelectorAll(".push-to-odoo-btn").forEach((btn) => {
+            const idx = Number(btn.dataset.idx);
+            btn.addEventListener("click", () => pushToOdoo(items[idx], btn));
+          });
         },
       });
     </script>

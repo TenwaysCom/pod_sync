@@ -32,16 +32,57 @@ from webapp.actions import (
 )
 
 
-def _run_step(label: str, command: list[str]) -> int:
+def _run_step(label: str, command: list[str]) -> tuple[int, str]:
     print(f"\n{'=' * 60}")
     print(f"STEP: {label}")
     print(f"{'=' * 60}")
     print(f"$ {' '.join(command)}\n")
     start = time.time()
-    rc = subprocess.call(command, cwd=str(ACTIONS_PROJECT_ROOT))
+    process = subprocess.Popen(
+        command,
+        cwd=str(ACTIONS_PROJECT_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    output_lines = []
+    for line in process.stdout:
+        output_lines.append(line)
+        sys.stdout.write(line)
+        sys.stdout.flush()
+    rc = process.wait()
     elapsed = time.time() - start
+    output = "".join(output_lines)
     print(f"\n[STEP DONE] {label} -> exit_code={rc}, elapsed={elapsed:.1f}s")
-    return rc
+    return rc, output
+
+
+def _parse_sync_summary(output: str) -> dict | None:
+    """Parse sync_summary JSON from probe.py output."""
+    for line in reversed(output.strip().splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+            if data.get("event") == "sync_summary":
+                return data
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _get_latest_phase1a_summary() -> dict | None:
+    summary_paths = sorted(
+        (PROJECT_ROOT / "phase1a" / "out").glob("*/phase1a_summary.json"),
+        reverse=True,
+    )
+    if not summary_paths:
+        return None
+    try:
+        return json.loads(summary_paths[0].read_text(encoding="utf-8"))
+    except Exception:
+        return None
 
 
 def run_pipeline(
@@ -68,6 +109,7 @@ def run_pipeline(
     )
 
     steps: list[dict] = []
+    data_report: dict[str, dict] = {}
     overall_start = time.time()
 
     def record(step: str, ok: bool, detail: str = ""):
@@ -87,10 +129,18 @@ def run_pipeline(
         cmd.extend(["--limit", str(cmc_limit)])
         if cmc_workers != 1:
             cmd.extend(["--workers", str(cmc_workers)])
-        rc = _run_step("CMC OneDrive 同步", cmd)
+        rc, output = _run_step("CMC OneDrive 同步", cmd)
+        summary = _parse_sync_summary(output)
+        if summary:
+            data_report["cmc_sync"] = {
+                "downloaded_files": summary.get("downloaded_files", 0),
+                "skipped_files": summary.get("skipped_files", 0),
+                "failed_files": summary.get("failed_files", 0),
+                "downloaded_bytes": summary.get("downloaded_bytes", 0),
+            }
         record("cmc_sync", rc == 0, f"exit_code={rc}")
         if rc != 0:
-            return {"ok": False, "failed_step": "cmc_sync", "steps": steps, "elapsed_seconds": round(time.time() - overall_start, 1)}
+            return {"ok": False, "failed_step": "cmc_sync", "steps": steps, "data_report": data_report, "elapsed_seconds": round(time.time() - overall_start, 1)}
 
     # Step 2: EMTC Google Drive sync
     if not skip_emtc:
@@ -106,10 +156,18 @@ def run_pipeline(
         cmd.extend(["--limit", str(emtc_limit)])
         if emtc_workers != 1:
             cmd.extend(["--workers", str(emtc_workers)])
-        rc = _run_step("EMTC Google Drive 同步", cmd)
+        rc, output = _run_step("EMTC Google Drive 同步", cmd)
+        summary = _parse_sync_summary(output)
+        if summary:
+            data_report["emtc_sync"] = {
+                "downloaded_files": summary.get("downloaded_files", 0),
+                "skipped_files": summary.get("skipped_files", 0),
+                "failed_files": summary.get("failed_files", 0),
+                "downloaded_bytes": summary.get("downloaded_bytes", 0),
+            }
         record("emtc_sync", rc == 0, f"exit_code={rc}")
         if rc != 0:
-            return {"ok": False, "failed_step": "emtc_sync", "steps": steps, "elapsed_seconds": round(time.time() - overall_start, 1)}
+            return {"ok": False, "failed_step": "emtc_sync", "steps": steps, "data_report": data_report, "elapsed_seconds": round(time.time() - overall_start, 1)}
 
     # Step 3: Phase 1A
     if not skip_phase1a:
@@ -118,10 +176,21 @@ def run_pipeline(
             str(PROJECT_ROOT / "phase1a" / "run_phase1a.py"),
             "--config", str(resolved_phase1a_config),
         ]
-        rc = _run_step("Phase 1A 识别", cmd)
+        rc, _ = _run_step("Phase 1A 识别", cmd)
+        phase1a_summary = _get_latest_phase1a_summary()
+        if phase1a_summary:
+            data_report["phase1a"] = {
+                "document_count": phase1a_summary.get("document_count", 0),
+                "ready_document_count": phase1a_summary.get("ready_document_count", 0),
+                "review_document_count": phase1a_summary.get("review_document_count", 0),
+                "payload_item_count": phase1a_summary.get("payload_item_count", 0),
+                "matched_document_count": phase1a_summary.get("matched_document_count", 0),
+                "unmatched_document_count": phase1a_summary.get("unmatched_document_count", 0),
+                "run_name": phase1a_summary.get("run_name", ""),
+            }
         record("phase1a", rc == 0, f"exit_code={rc}")
         if rc != 0:
-            return {"ok": False, "failed_step": "phase1a", "steps": steps, "elapsed_seconds": round(time.time() - overall_start, 1)}
+            return {"ok": False, "failed_step": "phase1a", "steps": steps, "data_report": data_report, "elapsed_seconds": round(time.time() - overall_start, 1)}
 
     # Step 4: Refresh unified reports
     if not skip_reports:
@@ -147,6 +216,7 @@ def run_pipeline(
                 "failed_step": "refresh_reports",
                 "error": str(exc),
                 "steps": steps,
+                "data_report": data_report,
                 "elapsed_seconds": round(time.time() - overall_start, 1),
             }
 
@@ -155,12 +225,12 @@ def run_pipeline(
         print("\n" + "=" * 60)
         print("STEP: 推送 POD 链接到 Odoo")
         print("=" * 60)
-        # Find the latest odoo_backfill_payload.json
         payload_dir = PROJECT_ROOT / "phase1a" / "out"
         payload_files = sorted(payload_dir.glob("*/odoo_backfill_payload.json"), reverse=True)
         if not payload_files:
             print("[SKIP] 未找到 odoo_backfill_payload.json，跳过推送")
             record("odoo_push", True, "no_payload_found")
+            data_report["odoo_push"] = {"status": "skipped", "reason": "no_payload_found"}
         else:
             latest_payload = str(payload_files[0])
             print(f"Using payload: {latest_payload}")
@@ -173,12 +243,21 @@ def run_pipeline(
                     limit=odoo_push_limit,
                 )
                 if result.get("ok"):
-                    pushed = result.get("pushed", 0)
-                    skipped = result.get("skipped_already_has_link", 0)
-                    not_found = result.get("not_found", 0)
-                    failed = result.get("failed", 0)
-                    print(f"[OK] 推送完成: pushed={pushed}, skipped={skipped}, not_found={not_found}, failed={failed}")
-                    record("odoo_push", True, f"pushed={pushed},skipped={skipped},not_found={not_found},failed={failed}")
+                    data_report["odoo_push"] = {
+                        "total": result.get("total", 0),
+                        "tracking_pushed": result.get("tracking_pushed", 0),
+                        "tracking_skipped_same": result.get("tracking_skipped_same", 0),
+                        "tracking_not_found": result.get("tracking_not_found", 0),
+                        "picking_pushed": result.get("picking_pushed", 0),
+                        "picking_skipped_same": result.get("picking_skipped_same", 0),
+                        "picking_not_found": result.get("picking_not_found", 0),
+                        "skipped_existing": result.get("skipped_existing", 0),
+                        "failed": result.get("failed", 0),
+                        "by_source": result.get("by_source", {}),
+                    }
+                    detail = f"total={result.get('total',0)}, pushed={result.get('tracking_pushed',0)+result.get('picking_pushed',0)}, skipped={result.get('skipped_existing',0)+result.get('tracking_skipped_same',0)+result.get('picking_skipped_same',0)}, not_found={result.get('tracking_not_found',0)+result.get('picking_not_found',0)}, failed={result.get('failed',0)}"
+                    print(f"[OK] 推送完成: {detail}")
+                    record("odoo_push", True, detail)
                 else:
                     err = result.get("error", "unknown")
                     print(f"[FAILED] 推送失败: {err}")
@@ -188,6 +267,7 @@ def run_pipeline(
                         "failed_step": "odoo_push",
                         "error": err,
                         "steps": steps,
+                        "data_report": data_report,
                         "elapsed_seconds": round(time.time() - overall_start, 1),
                     }
             except Exception as exc:
@@ -198,6 +278,7 @@ def run_pipeline(
                     "failed_step": "odoo_push",
                     "error": str(exc),
                     "steps": steps,
+                    "data_report": data_report,
                     "elapsed_seconds": round(time.time() - overall_start, 1),
                 }
 
@@ -205,7 +286,7 @@ def run_pipeline(
     print(f"\n{'=' * 60}")
     print(f"PIPELINE FINISHED: {len(steps)} steps, {elapsed}s")
     print(f"{'=' * 60}")
-    return {"ok": True, "steps": steps, "elapsed_seconds": elapsed}
+    return {"ok": True, "steps": steps, "data_report": data_report, "elapsed_seconds": elapsed}
 
 
 def main():
