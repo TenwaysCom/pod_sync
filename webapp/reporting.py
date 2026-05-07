@@ -1,13 +1,41 @@
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 
 from .odoo_missing_report import load_odoo_missing_snapshot
 from .odoo_pod_compare import load_pod_odoo_compare_snapshot
 
 
 POD_SOURCE_CARRIER_IDS = {24, 25}
+
+STOCK_TRACKING_POD_IDS_PATH = Path(__file__).resolve().parents[1] / "runtime" / "stock_tracking_pod_picking_ids.json"
+
+
+def _load_stock_tracking_pod_picking_ids() -> set[int]:
+    """Load picking IDs that have a POD in stock.tracking (via pod_link)."""
+    if not STOCK_TRACKING_POD_IDS_PATH.exists():
+        return set()
+    try:
+        data = json.loads(STOCK_TRACKING_POD_IDS_PATH.read_text(encoding="utf-8"))
+        return set(data.get("picking_ids", []))
+    except (json.JSONDecodeError, OSError):
+        return set()
+
+
+def _row_has_pod(row: dict, stock_tracking_ids: set[int]) -> bool:
+    if row.get("x_studio_pod_link"):
+        return True
+    picking_id = row.get("odoo_picking_id")
+    if picking_id is not None:
+        try:
+            if int(picking_id) in stock_tracking_ids:
+                return True
+        except (ValueError, TypeError):
+            pass
+    return False
 
 
 def _parse_datetime(value: str | None):
@@ -484,11 +512,88 @@ def build_compare_analysis_context(compare_snapshot: dict | None):
     }
 
 
+def build_monthly_pod_coverage_rows(odoo_snapshot: dict | None):
+    """Monthly POD coverage from Odoo perspective (CMC + EMTC only).
+
+    Counts a row as "with POD" if either:
+      - stock.picking.x_studio_pod_link is set, OR
+      - a stock.tracking record exists for this picking with pod_link set.
+    """
+    if not odoo_snapshot:
+        return []
+
+    target_carriers = {24: "EMTC", 25: "CMC"}
+    stock_tracking_ids = _load_stock_tracking_pod_picking_ids()
+    grouped = defaultdict(lambda: {"total_orders": 0, "with_pod": 0, "without_pod": 0})
+
+    for row in odoo_snapshot.get("total_detail_rows") or []:
+        cid = row.get("carrier_id")
+        if cid not in target_carriers:
+            continue
+        dt = _parse_datetime(row.get("business_datetime"))
+        if not dt:
+            continue
+        month_key = dt.strftime("%Y-%m")
+        key = (month_key, cid, target_carriers[cid])
+        grouped[key]["total_orders"] += 1
+        if _row_has_pod(row, stock_tracking_ids):
+            grouped[key]["with_pod"] += 1
+        else:
+            grouped[key]["without_pod"] += 1
+
+    rows = []
+    for (month_key, carrier_id, carrier_name), counts in grouped.items():
+        rows.append(
+            {
+                "month_key": month_key,
+                "carrier_id": carrier_id,
+                "carrier_name": carrier_name,
+                "total_orders": counts["total_orders"],
+                "with_pod": counts["with_pod"],
+                "without_pod": counts["without_pod"],
+                "pod_coverage_rate": _float_percent(counts["with_pod"], counts["total_orders"]),
+            }
+        )
+    rows.sort(key=lambda item: (item["month_key"], item.get("carrier_id") or 0), reverse=True)
+    return rows
+
+
+def build_monthly_pod_coverage_overview(monthly_pod_rows: list[dict] | None, *, limit: int = 6):
+    """Aggregate monthly POD coverage across all carriers."""
+    if not monthly_pod_rows:
+        return []
+
+    grouped = defaultdict(lambda: {"total_orders": 0, "with_pod": 0, "without_pod": 0})
+    for row in monthly_pod_rows:
+        month_key = row.get("month_key")
+        if not month_key:
+            continue
+        grouped[month_key]["total_orders"] += row.get("total_orders", 0)
+        grouped[month_key]["with_pod"] += row.get("with_pod", 0)
+        grouped[month_key]["without_pod"] += row.get("without_pod", 0)
+
+    overview_rows = []
+    for month_key, counts in grouped.items():
+        overview_rows.append(
+            {
+                "month_key": month_key,
+                "total_orders": counts["total_orders"],
+                "with_pod": counts["with_pod"],
+                "without_pod": counts["without_pod"],
+                "pod_coverage_rate": _float_percent(counts["with_pod"], counts["total_orders"]),
+            }
+        )
+    overview_rows.sort(key=lambda item: item["month_key"], reverse=True)
+    return overview_rows[:limit]
+
+
 def build_report_context():
     odoo_snapshot = load_odoo_missing_snapshot()
     compare_snapshot = load_pod_odoo_compare_snapshot()
     monthly_rows = build_monthly_tracking_rows(odoo_snapshot)
     monthly_overview_rows = build_monthly_tracking_overview(monthly_rows)
+    monthly_pod_rows = build_monthly_pod_coverage_rows(odoo_snapshot)
+    monthly_pod_overview_rows = build_monthly_pod_coverage_overview(monthly_pod_rows)
     odoo_analysis = build_odoo_analysis_context(odoo_snapshot)
     pod_scope_analysis = build_pod_scope_context(odoo_snapshot)
     all_time_analysis = build_all_time_tracking_context(odoo_snapshot)
@@ -498,6 +603,8 @@ def build_report_context():
         "compare_snapshot": compare_snapshot,
         "monthly_rows": monthly_rows,
         "monthly_overview_rows": monthly_overview_rows,
+        "monthly_pod_rows": monthly_pod_rows,
+        "monthly_pod_overview_rows": monthly_pod_overview_rows,
         "odoo_analysis": odoo_analysis,
         "pod_scope_analysis": pod_scope_analysis,
         "all_time_analysis": all_time_analysis,

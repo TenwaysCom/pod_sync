@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Push POD links from Phase 1A payload back to Odoo via XML-RPC.
 
-Correct target model: stock.tracking (from tw_stock_tracking module)
-- Primary: update stock.tracking via tracking_number match
-- Fallback: update stock.picking.x_studio_pod_link directly
+All POD data is written to stock.tracking (from tw_stock_tracking module).
+The stock.picking.x_studio_pod_link field is no longer used as the POD target.
 
 Usage:
     python webapp/odoo_push.py --config config.local.json --payload phase1a/out/.../odoo_backfill_payload.json --dry-run
@@ -170,8 +169,37 @@ def search_picking(models, odoo_cfg: dict, key_type: str, key_value: str):
         [],
         {
             "domain": domain,
-            "specification": {"id": {}, "name": {}, field: {}, "x_studio_pod_link": {}},
+            "specification": {"id": {}, "name": {}, field: {}},
             "limit": 5,
+            "order": "id DESC",
+            "context": {"lang": "en_US", "tz": "Asia/Shanghai"},
+        },
+    )
+    records = res.get("records", []) if isinstance(res, dict) else []
+    return records
+
+
+def search_stock_tracking_by_picking_id(models, odoo_cfg: dict, picking_id: int):
+    """Search stock.tracking records linked to a given stock.picking."""
+    db = odoo_cfg["db"]
+    uid = odoo_cfg["uid"]
+    password = odoo_cfg["api_key"]
+
+    res = models.execute_kw(
+        db, uid, password,
+        "stock.tracking", "web_search_read",
+        [],
+        {
+            "domain": [("picking_id", "=", picking_id)],
+            "specification": {
+                "id": {},
+                "tracking_number": {},
+                "picking_id": {},
+                "pod_link": {},
+                "pod_state": {},
+                "api_state": {},
+            },
+            "limit": 50,
             "order": "id DESC",
             "context": {"lang": "en_US", "tz": "Asia/Shanghai"},
         },
@@ -193,15 +221,6 @@ def write_tracking_pod(models, odoo_cfg: dict, tracking_id: int, file_url: str, 
     if pod_time:
         vals["pod_time"] = pod_time
     return models.execute_kw(db, uid, password, "stock.tracking", "write", [[tracking_id], vals])
-
-
-def write_picking_pod_field(models, odoo_cfg: dict, picking_id: int, file_url: str):
-    """Fallback: write x_studio_pod_link directly on stock.picking."""
-    db = odoo_cfg["db"]
-    uid = odoo_cfg["uid"]
-    password = odoo_cfg["api_key"]
-    field = odoo_cfg.get("push_field", "x_studio_pod_link")
-    return models.execute_kw(db, uid, password, "stock.picking", "write", [[picking_id], {field: file_url}])
 
 
 def create_stock_tracking(models, odoo_cfg: dict, picking_id: int, tracking_number: str, file_url: str, pod_time: str | None):
@@ -425,7 +444,7 @@ def push_payload(
                 continue
 
         # ---------------------------------------------------------
-        # FALLBACK: find stock.picking, then create stock.tracking
+        # FALLBACK: find stock.picking, then update/create stock.tracking
         # ---------------------------------------------------------
         try:
             pickings = search_picking(models, odoo_cfg, key_type, key_value)
@@ -449,11 +468,62 @@ def push_payload(
         picking_id = pick.get("id")
         picking_name = pick.get("name")
         detail["target_model"] = "stock.tracking"
-        detail["target_id"] = picking_id
         detail["target_name"] = picking_name
+
+        # Check for existing stock.tracking records linked to this picking
+        try:
+            picking_trackings = search_stock_tracking_by_picking_id(models, odoo_cfg, picking_id)
+        except Exception as exc:
+            detail["status"] = "failed"
+            detail["error"] = f"search tracking by picking error: {exc}"
+            results["failed"] += 1
+            results["by_source"][source]["failed"] += 1
+            results["details"].append(detail)
+            continue
+
+        if picking_trackings:
+            if dry_run:
+                detail["status"] = "dry_run_tracking"
+                detail["target_id"] = picking_trackings[0].get("id")
+                results["tracking_pushed"] += 1
+                results["by_source"][source]["tracking_pushed"] += 1
+                results["details"].append(detail)
+                continue
+
+            written_count = 0
+            for track in picking_trackings:
+                tracking_id = track.get("id")
+                current_pod_link = track.get("pod_link")
+                if current_pod_link and str(current_pod_link) == file_url:
+                    continue
+                try:
+                    write_tracking_pod(models, odoo_cfg, tracking_id, file_url, pod_time)
+                    written_count += 1
+                except Exception as exc:
+                    detail_err = dict(detail)
+                    detail_err["status"] = "failed"
+                    detail_err["error"] = f"write tracking {tracking_id} error: {exc}"
+                    detail_err["target_id"] = tracking_id
+                    results["failed"] += 1
+                    results["by_source"][source]["failed"] += 1
+                    results["details"].append(detail_err)
+
+            if written_count > 0:
+                detail["status"] = "pushed_tracking"
+                detail["target_id"] = picking_trackings[0].get("id")
+                results["tracking_pushed"] += written_count
+                results["by_source"][source]["tracking_pushed"] += written_count
+            else:
+                detail["status"] = "skipped_same"
+                detail["target_id"] = picking_trackings[0].get("id")
+                results["tracking_skipped_same"] += 1
+
+            results["details"].append(detail)
+            continue
 
         if dry_run:
             detail["status"] = "dry_run_create_tracking"
+            detail["target_id"] = picking_id
             results["tracking_pushed"] += 1
             results["by_source"][source]["tracking_pushed"] += 1
             results["details"].append(detail)
@@ -562,7 +632,7 @@ def push_single_item(
                 result["error"] = f"write tracking error: {exc}"
             return result
 
-    # FALLBACK: find stock.picking, then create stock.tracking
+    # FALLBACK: find stock.picking, then update/create stock.tracking
     try:
         pickings = search_picking(models, odoo_cfg, key_type, key_value)
     except Exception as exc:
@@ -578,9 +648,49 @@ def push_single_item(
     pick = pickings[0]
     picking_id = pick.get("id")
     result["target_model"] = "stock.tracking"
-    result["target_id"] = picking_id
     result["target_name"] = pick.get("name")
 
+    # Check for existing stock.tracking records linked to this picking
+    try:
+        picking_trackings = search_stock_tracking_by_picking_id(models, odoo_cfg, picking_id)
+    except Exception as exc:
+        result["status"] = "failed"
+        result["error"] = f"search tracking by picking error: {exc}"
+        return result
+
+    if picking_trackings:
+        primary_track = picking_trackings[0]
+        result["target_id"] = primary_track.get("id")
+        result["target_name"] = primary_track.get("tracking_number")
+
+        if dry_run:
+            result["status"] = "dry_run_tracking"
+            return result
+
+        first_error = None
+        written = 0
+        for track in picking_trackings:
+            tracking_id = track.get("id")
+            current_pod_link = track.get("pod_link")
+            if current_pod_link and str(current_pod_link) == final_url:
+                continue
+            try:
+                write_tracking_pod(models, odoo_cfg, tracking_id, final_url, pod_time)
+                written += 1
+            except Exception as exc:
+                if first_error is None:
+                    first_error = f"write tracking {tracking_id} error: {exc}"
+
+        if written > 0:
+            result["status"] = "pushed_tracking"
+        elif first_error:
+            result["status"] = "failed"
+            result["error"] = first_error
+        else:
+            result["status"] = "skipped_same"
+        return result
+
+    result["target_id"] = picking_id
     if dry_run:
         result["status"] = "dry_run_create_tracking"
         return result

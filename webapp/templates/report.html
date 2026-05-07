@@ -317,6 +317,47 @@
     <div class="card">
       <div class="section-head section-head-tight">
         <div>
+          <p class="eyebrow">月度 POD 覆盖率（Odoo 视角）</p>
+          <h2>按月份 + 承运商看已有 POD 链接的比例</h2>
+        </div>
+      </div>
+      {% if monthly_pod_rows %}
+        <div class="files-table-wrap">
+          <table class="files-table pod-coverage-table">
+            <thead>
+              <tr>
+                <th>月份</th>
+                <th>承运商</th>
+                <th>出库单总数</th>
+                <th>已有 POD</th>
+                <th>缺失 POD</th>
+                <th>POD 覆盖率</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in monthly_pod_rows %}
+                <tr class="file-row">
+                  <td><strong>{{ row.month_key }}</strong></td>
+                  <td>{{ row.carrier_name }}</td>
+                  <td>{{ row.total_orders }}</td>
+                  <td style="color: var(--ok-color)">{{ row.with_pod }}</td>
+                  <td style="color: var(--warn-color)">{{ row.without_pod }}</td>
+                  <td><strong>{{ row.pod_coverage_rate }}%</strong></td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="empty">还没有可用的月度 POD 覆盖率数据。</p>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
           <p class="eyebrow">对比判断</p>
           <h2>把最新 POD 识别结果拆成可行动的几类</h2>
         </div>

@@ -101,12 +101,14 @@ SESSION_MAX_AGE = 86400 * 7  # 7 days
 
 # Read admin password: env var > config.local.json > default
 ADMIN_PASSWORD = os.environ.get("POD_SYNC_ADMIN_PASSWORD", "")
+ENABLE_PASSWORD_LOGIN = True
 if not ADMIN_PASSWORD:
     try:
         _cfg_path = PROJECT_ROOT / "config.local.json"
         if _cfg_path.exists():
             _cfg = _json_lib.loads(_cfg_path.read_text(encoding="utf-8"))
             ADMIN_PASSWORD = _cfg.get("admin_password", "")
+            ENABLE_PASSWORD_LOGIN = _cfg.get("enable_password_login", True)
     except Exception:
         pass
 if not ADMIN_PASSWORD:
@@ -319,6 +321,8 @@ def normalize_redirect_target(target: str | None, fallback: str):
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
+    if not ENABLE_PASSWORD_LOGIN:
+        return await call_next(request)
     path = request.url.path
     public_paths = {"/login", "/logout", "/static", "/favicon.ico", "/api/odoo-status", "/storage/files"}
     if any(path.startswith(p) for p in public_paths):
@@ -330,6 +334,8 @@ async def auth_middleware(request: Request, call_next):
 
 @app.get("/login", response_class=HTMLResponse, name="login")
 async def login_page(request: Request, next: str = "/", error: str = ""):
+    if not ENABLE_PASSWORD_LOGIN:
+        return RedirectResponse(url=next or "/", status_code=303)
     if _is_authenticated(request):
         return RedirectResponse(url=next, status_code=303)
     return templates.TemplateResponse(
@@ -341,6 +347,8 @@ async def login_page(request: Request, next: str = "/", error: str = ""):
 
 @app.post("/login", name="login_post")
 async def login_post(request: Request, password: str = Form(""), next: str = Form("/")):
+    if not ENABLE_PASSWORD_LOGIN:
+        return RedirectResponse(url=next or "/", status_code=303)
     if password == ADMIN_PASSWORD:
         session = {"role": "admin", "exp": time.time() + SESSION_MAX_AGE}
         response = RedirectResponse(url=next, status_code=303)

@@ -158,7 +158,65 @@ def fetch_and_save_index(config_path: str = "config.local.json") -> ExistingPodI
 
     save_index(index)
     print(f"[odoo_pull] Saved index: {index.summary()}")
+
+    # Also fetch stock.tracking picking IDs with pod_link for coverage reporting
+    _fetch_and_save_stock_tracking_pod_ids(odoo_cfg)
+
     return index
+
+
+def _fetch_and_save_stock_tracking_pod_ids(odoo_cfg: dict):
+    """Query Odoo for all stock.tracking records with pod_link and save picking IDs."""
+    import json
+    import xmlrpc.client
+    from pathlib import Path
+
+    db, uid, password = odoo_cfg["db"], odoo_cfg["uid"], odoo_cfg["api_key"]
+    url = odoo_cfg.get("url", "").rstrip("/")
+    if not url:
+        print("[odoo_pull] Warning: Odoo URL not configured, skipping stock.tracking POD fetch")
+        return
+
+    try:
+        models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object", allow_none=True)
+    except Exception as exc:
+        print(f"[odoo_pull] Warning: failed to create XML-RPC proxy: {exc}")
+        return
+
+    try:
+        ids = models.execute_kw(
+            db, uid, password, "stock.tracking", "search",
+            [[("pod_link", "!=", False)]],
+            {"limit": 30000},
+        )
+        if not ids:
+            print("[odoo_pull] No stock.tracking records with pod_link found.")
+            return
+
+        picking_ids = set()
+        batch_size = 2000
+        for i in range(0, len(ids), batch_size):
+            batch_ids = ids[i:i + batch_size]
+            records = models.execute_kw(
+                db, uid, password, "stock.tracking", "read",
+                [batch_ids], {"fields": ["picking_id"]},
+            )
+            for r in records:
+                pid = r.get("picking_id")
+                if isinstance(pid, list) and len(pid) > 0:
+                    picking_ids.add(pid[0])
+                elif isinstance(pid, int) and pid:
+                    picking_ids.add(pid)
+
+        out_path = Path(__file__).resolve().parents[1] / "runtime" / "stock_tracking_pod_picking_ids.json"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
+            json.dumps({"picking_ids": sorted(picking_ids), "count": len(picking_ids)}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        print(f"[odoo_pull] Saved {len(picking_ids)} stock.tracking picking IDs with POD.")
+    except Exception as exc:
+        print(f"[odoo_pull] Warning: failed to fetch stock.tracking POD IDs: {exc}")
 
 
 def get_index(config_path: str = "config.local.json") -> ExistingPodIndex:
