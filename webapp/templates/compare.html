@@ -13,19 +13,14 @@
       <p class="muted">按来源 + 键类型 + 键值去重</p>
     </article>
     <article class="card stat-card">
-      <p class="label">匹配率</p>
-      <h2>{% if snapshot %}{{ snapshot.totals.match_rate_percent }}%{% else %}0%{% endif %}</h2>
-      <p class="muted">done 和 cancel 都计入命中</p>
+      <p class="label">匹配成功</p>
+      <h2>{% if snapshot %}{{ snapshot.totals.matched_count }}{% else %}0{% endif %}</h2>
+      <p class="muted">POD 能找到 Odoo 中的对应单据</p>
     </article>
     <article class="card stat-card">
       <p class="label">命中已取消单</p>
       <h2>{% if snapshot %}{{ snapshot.totals.matched_cancelled_count }}{% else %}0{% endif %}</h2>
       <p class="muted">POD 找到对应 Odoo，但单据状态是 cancel</p>
-    </article>
-    <article class="card stat-card">
-      <p class="label">命中其他承运商</p>
-      <h2>{% if snapshot %}{{ snapshot.totals.matched_other_carrier_count }}{% else %}0{% endif %}</h2>
-      <p class="muted">Odoo 里有单，但 carrier 已不是当前 POD 来源</p>
     </article>
     <article class="card stat-card">
       <p class="label">按匹配键未命中 Odoo</p>
@@ -96,10 +91,10 @@
                 <th>唯一匹配键数</th>
                 <th>匹配成功</th>
                 <th>命中已取消单</th>
-                <th>命中其他承运商</th>
                 <th>按匹配键未命中 Odoo</th>
                 <th>Odoo 命中多条</th>
                 <th>匹配率</th>
+                <th>已推送 POD</th>
               </tr>
             </thead>
             <tbody>
@@ -114,10 +109,10 @@
                   <td>{{ row.unique_identifier_count }}</td>
                   <td>{{ row.matched_count }}</td>
                   <td>{{ row.matched_cancelled_count }}</td>
-                  <td>{{ row.matched_other_carrier_count }}</td>
                   <td>{{ row.not_found_count }}</td>
                   <td>{{ row.ambiguous_count }}</td>
                   <td>{{ row.match_rate_percent }}%</td>
+                  <td>{{ row.stock_tracking_pod_count }}</td>
                 </tr>
               {% endfor %}
             </tbody>
@@ -208,7 +203,6 @@
       const statusLabels = {
         matched: "匹配成功",
         matched_cancelled: "匹配到已取消单",
-        matched_other_carrier: "命中其他承运商",
         odoo_not_found: "按匹配键未命中 Odoo",
         multiple_odoo_matches: "Odoo 命中多条",
       };

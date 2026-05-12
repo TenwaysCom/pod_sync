@@ -24,11 +24,6 @@
       <h2>{% if compare_snapshot %}{{ compare_snapshot.totals.matched_cancelled_count }}{% else %}0{% endif %}</h2>
       <p class="muted">POD 能找到 Odoo，但单据状态是 cancel</p>
     </a>
-    <a class="card stat-card stat-card-link" href="{{ request.url_for('compare_page') }}?status=matched_other_carrier">
-      <p class="label">命中其他承运商</p>
-      <h2>{% if compare_snapshot %}{{ compare_snapshot.totals.matched_other_carrier_count }}{% else %}0{% endif %}</h2>
-      <p class="muted">Odoo 里有单，但当前 carrier 已不是 CMC / EMTC</p>
-    </a>
     <a class="card stat-card stat-card-link" href="{{ request.url_for('compare_page') }}?status=odoo_not_found">
       <p class="label">按匹配键未命中 Odoo</p>
       <h2>{% if compare_snapshot %}{{ compare_snapshot.totals.not_found_count }}{% else %}0{% endif %}</h2>
@@ -410,10 +405,10 @@
                 <th>POD唯一匹配键数</th>
                 <th>匹配成功</th>
                 <th>命中已取消单</th>
-                <th>命中其他承运商</th>
                 <th>按匹配键未命中 Odoo</th>
                 <th>Odoo 命中多条</th>
                 <th>匹配率</th>
+                <th>已推送 POD</th>
               </tr>
             </thead>
             <tbody>
@@ -428,10 +423,10 @@
                   <td>{{ row.unique_identifier_count }}</td>
                   <td>{{ row.matched_count }}</td>
                   <td>{{ row.matched_cancelled_count }}</td>
-                  <td>{{ row.matched_other_carrier_count }}</td>
                   <td>{{ row.not_found_count }}</td>
                   <td>{{ row.ambiguous_count }}</td>
                   <td>{{ row.match_rate_percent }}%</td>
+                  <td>{{ row.stock_tracking_pod_count }}</td>
                 </tr>
               {% endfor %}
             </tbody>
@@ -439,42 +434,6 @@
         </div>
       {% else %}
         <p class="empty">还没有 POD 对比快照。</p>
-      {% endif %}
-    </div>
-  </section>
-
-  <section class="section">
-    <div class="card">
-      <div class="section-head section-head-tight">
-        <div>
-          <p class="eyebrow">其他承运商分布</p>
-          <h2>命中其他承运商时，实际落在哪些 Odoo carrier</h2>
-        </div>
-        <a class="text-link" href="{{ request.url_for('compare_page') }}?status=matched_other_carrier">打开明细页</a>
-      </div>
-      {% if compare_analysis and compare_analysis.other_carrier_rows %}
-        <div class="files-table-wrap">
-          <table class="files-table analysis-state-table">
-            <thead>
-              <tr>
-                <th>Odoo 承运商</th>
-                <th>命中数</th>
-                <th>样本出库单</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for row in compare_analysis.other_carrier_rows %}
-                <tr class="file-row">
-                  <td><strong>{{ row.carrier_name }}</strong></td>
-                  <td>{{ row.count }}</td>
-                  <td class="file-path-cell mono wrap-anywhere">{{ row.sample_picking_names }}</td>
-                </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
-      {% else %}
-        <p class="empty">当前还没有命中其他承运商的记录。</p>
       {% endif %}
     </div>
   </section>

@@ -238,7 +238,6 @@ POD_COMPARE_ARTIFACT_LABELS = {
     # "summary_csv": "来源汇总 CSV",
     "matched_csv": "匹配成功 CSV",
     "matched_cancelled_csv": "匹配到已取消单 CSV",
-    "matched_other_carrier_csv": "命中其他承运商 CSV",
     "not_found_csv": "按匹配键未命中 Odoo CSV",
     "ambiguous_csv": "Odoo 命中多条 CSV",
     # "snapshot_json": "快照 JSON",

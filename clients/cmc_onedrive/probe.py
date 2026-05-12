@@ -333,7 +333,11 @@ def build_share_content_url(shared_url, shared_access=None):
 def iter_collection(session, url, headers, timeout):
     next_url = url
     while next_url:
-        response = session.get(next_url, headers=headers, timeout=timeout)
+        parsed = urlparse(next_url)
+        query_params = parse_qs(parsed.query, keep_blank_values=True)
+        params = {k: v[0] if isinstance(v, list) else v for k, v in query_params.items()}
+        base_url = urlunparse(parsed._replace(query=""))
+        response = session.get(base_url, params=params, headers=headers, timeout=timeout)
         response.raise_for_status()
         payload = response.json()
         for item in payload.get("value", []):
