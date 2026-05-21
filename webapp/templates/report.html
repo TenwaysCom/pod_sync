@@ -403,8 +403,9 @@
               <tr>
                 <th>来源</th>
                 <th>POD唯一匹配键数</th>
-                <th>匹配成功</th>
+                <th>同承运商命中</th>
                 <th>命中已取消单</th>
+                <th>命中其他承运商</th>
                 <th>按匹配键未命中 Odoo</th>
                 <th>Odoo 命中多条</th>
                 <th>匹配率</th>
@@ -423,6 +424,7 @@
                   <td>{{ row.unique_identifier_count }}</td>
                   <td>{{ row.matched_count }}</td>
                   <td>{{ row.matched_cancelled_count }}</td>
+                  <td>{{ row.matched_other_carrier_count or 0 }}</td>
                   <td>{{ row.not_found_count }}</td>
                   <td>{{ row.ambiguous_count }}</td>
                   <td>{{ row.match_rate_percent }}%</td>

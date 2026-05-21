@@ -105,6 +105,8 @@ Phase 1A 文档入口：
 安装依赖后可以直接启动 FastAPI 管理界面：
 
 ```bash
+export POD_SYNC_ADMIN_PASSWORD='CHANGE_ME'
+export POD_SYNC_SECRET_KEY='CHANGE_ME_RANDOM_32_BYTES'
 python3 -m uvicorn webapp.app:app --host 0.0.0.0 --port 8080
 ```
 
@@ -115,6 +117,22 @@ python3 -m uvicorn webapp.app:app --host 0.0.0.0 --port 8080
 - 触发 `Phase 1A`
 - 查看任务日志
 - 直接在网页内打开最新 `Phase 1A dashboard`
+
+安全注意：
+
+- 不再提供默认后台密码；必须设置 `POD_SYNC_ADMIN_PASSWORD`，或在 `config.local.json` 设置 `admin_password`。
+- 生产环境建议同时设置稳定的 `POD_SYNC_SECRET_KEY`，并通过 HTTPS 反向代理访问。
+- 登录默认每个来源 IP 在 10 分钟内最多失败 5 次；可用 `POD_SYNC_LOGIN_RATE_LIMIT_MAX` 和 `POD_SYNC_LOGIN_RATE_LIMIT_WINDOW` 调整。
+- `config.local.json` 包含 token/API key，建议权限为 `600`。
+- 如果需要把本地 POD 文件链接写回 Odoo，请在 `pod_sync.file_url_secret` 配置随机密钥；系统会生成带签名的 `/storage/files/...` 链接。
+- 默认单文件下载上限是 200MB，可用 `POD_SYNC_MAX_DOWNLOAD_BYTES` 调整，设为 `0` 表示关闭限制。
+- 后台任务默认最多并发 2 个、单任务最长 6 小时；可用 `POD_SYNC_MAX_CONCURRENT_JOBS` 和 `POD_SYNC_JOB_TIMEOUT_SECONDS` 调整。
+
+复现部署时可以使用 `requirements.lock` 固定当前已验证的完整依赖版本。依赖漏洞扫描建议在装有 `pip-audit` 的环境中执行：
+
+```bash
+python3 -m pip_audit -r requirements.lock
+```
 
 Phase 1A 的主要产物：
 

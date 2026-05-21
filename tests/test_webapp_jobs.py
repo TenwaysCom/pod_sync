@@ -37,6 +37,61 @@ class WebAppJobTests(unittest.TestCase):
             self.assertEqual(current["exit_code"], 0)
             self.assertIn("job runner ok", store.read_log(job["job_id"]))
 
+    def test_read_log_redacts_sensitive_urls_and_tails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = JobStore(Path(tmpdir) / "jobs")
+            job_id = "job-log-redact"
+            log_path = store.root_dir / f"{job_id}.log"
+            log_path.write_text(
+                "prefix\n"
+                "https://my.microsoftpersonalcontent.com/file.pdf?tempauth=secret-token\n"
+                "https://api.example.test/file?access_token=secret-access\n"
+                "tail\n",
+                encoding="utf-8",
+            )
+
+            content = store.read_log(job_id, max_chars=500)
+
+            self.assertIn("[REDACTED_MICROSOFT_DOWNLOAD_URL]", content)
+            self.assertIn("access_token=[REDACTED]", content)
+            self.assertNotIn("secret-token", content)
+            self.assertNotIn("secret-access", content)
+
+    def test_job_timeout_kills_child_process_group(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            marker = tmp_path / "child-survived.txt"
+            store = JobStore(tmp_path / "jobs")
+            store._job_timeout_seconds = 1
+            child_code = (
+                "import pathlib, time; "
+                "time.sleep(3); "
+                f"pathlib.Path({str(marker)!r}).write_text('alive', encoding='utf-8')"
+            )
+            parent_code = (
+                "import subprocess, sys, time; "
+                f"subprocess.Popen([sys.executable, '-c', {child_code!r}]); "
+                "time.sleep(30)"
+            )
+            job = store.start_job(
+                action="test",
+                label="Timeout child",
+                command=[sys.executable, "-c", parent_code],
+            )
+
+            for _ in range(80):
+                current = store.get_job(job["job_id"])
+                if current["status"] == "failed" and current["exit_code"] == -9:
+                    break
+                time.sleep(0.1)
+            else:
+                self.fail("Job did not time out in time.")
+
+            time.sleep(3.5)
+            self.assertEqual(current["status"], "failed")
+            self.assertEqual(current["exit_code"], -9)
+            self.assertFalse(marker.exists())
+
     def test_delete_job_removes_finished_job_and_log(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = JobStore(Path(tmpdir) / "jobs")

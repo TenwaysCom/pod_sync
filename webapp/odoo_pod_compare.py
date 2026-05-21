@@ -53,6 +53,7 @@ PREFERRED_KEY_TYPE_LABELS = {
 COMPARE_STATUS_LABELS = {
     "matched": "匹配成功",
     "matched_cancelled": "匹配到已取消单",
+    "matched_other_carrier": "命中其他承运商",
     "odoo_not_found": "按匹配键未命中 Odoo",
     "multiple_odoo_matches": "Odoo 命中多条",
 }
@@ -60,9 +61,22 @@ COMPARE_STATUS_LABELS = {
 COMPARE_STATUS_EXPLANATION_TEMPLATES = {
     "matched": "POD 已识别出{key_type}，在 Odoo 中命中 1 条 done 单据。",
     "matched_cancelled": "POD 已识别出{key_type}，在当前来源对应的 Odoo carrier 范围内命中 1 条单据，但状态是 cancel。",
+    "matched_other_carrier": "POD 已识别出{key_type}，但只在其他 Odoo carrier 范围内命中 1 条 done 单据。",
     "odoo_not_found": "POD 已识别出{key_type}，但在 Odoo 中没有命中。",
     "multiple_odoo_matches": "POD 已识别出{key_type}，但在 Odoo 中命中了多条记录，暂时无法自动确定唯一单据。",
 }
+
+COMPARE_STATUS_OPTIONS = [
+    {"value": "", "label": "全部状态"},
+    {"value": "odoo_not_found", "label": COMPARE_STATUS_LABELS["odoo_not_found"]},
+    {"value": "matched_any", "label": "全部命中"},
+    {"value": "matched", "label": COMPARE_STATUS_LABELS["matched"]},
+    {"value": "matched_cancelled", "label": COMPARE_STATUS_LABELS["matched_cancelled"]},
+    {"value": "matched_other_carrier", "label": COMPARE_STATUS_LABELS["matched_other_carrier"]},
+    {"value": "multiple_odoo_matches", "label": COMPARE_STATUS_LABELS["multiple_odoo_matches"]},
+]
+
+MATCHED_ANY_STATUSES = {"matched", "matched_cancelled", "matched_other_carrier"}
 
 SUMMARY_FIELDS = [
     "source_name",
@@ -71,6 +85,7 @@ SUMMARY_FIELDS = [
     "unique_identifier_count",
     "matched_count",
     "matched_cancelled_count",
+    "matched_other_carrier_count",
     "not_found_count",
     "ambiguous_count",
     "match_rate_percent",
@@ -307,7 +322,7 @@ def _parse_matched_picking_ids(matched_odoo_picking_ids_str):
     if not matched_odoo_picking_ids_str:
         return []
     ids = []
-    for pid in str(matched_odoo_picking_ids_str).split("|"):
+    for pid in re.split(r"[|,]", str(matched_odoo_picking_ids_str)):
         pid = pid.strip()
         if pid.isdigit():
             ids.append(int(pid))
@@ -501,6 +516,7 @@ def build_pod_odoo_compare_snapshot():
             "unique_identifier_count": 0,
             "matched_count": 0,
             "matched_cancelled_count": 0,
+            "matched_other_carrier_count": 0,
             "not_found_count": 0,
             "ambiguous_count": 0,
         }
@@ -541,9 +557,9 @@ def build_pod_odoo_compare_snapshot():
             matched_odoo_ids.add(same_carrier_done[0].get("odoo_picking_id"))
         elif len(other_carrier_done) == 1:
             detail_row = _build_detail_row(item, other_carrier_done)
-            _decorate_detail_row(detail_row, "matched")
-            matched_rows.append(detail_row)
-            per_source[source_key]["matched_count"] += 1
+            _decorate_detail_row(detail_row, "matched_other_carrier")
+            matched_other_carrier_rows.append(detail_row)
+            per_source[source_key]["matched_other_carrier_count"] += 1
             matched_odoo_ids.add(other_carrier_done[0].get("odoo_picking_id"))
         elif len(same_carrier_done) == 0 and len(same_carrier_cancel) == 1:
             detail_row = _build_detail_row(item, same_carrier_cancel)
@@ -562,15 +578,20 @@ def build_pod_odoo_compare_snapshot():
             ambiguous_rows.append(detail_row)
             per_source[source_key]["ambiguous_count"] += 1
 
-    for row in matched_rows:
+    for row in matched_rows + matched_other_carrier_rows:
         odoo_picking_ids = _parse_matched_picking_ids(row.get("matched_odoo_picking_ids", ""))
         row["has_stock_tracking_pod"] = any(pid in stock_tracking_ids for pid in odoo_picking_ids)
 
     summary_rows = []
     for (source_name, carrier_id, carrier_name), counts in sorted(per_source.items(), key=lambda item: (item[0][1] or 0, item[0][0] or "")):
         tracking_pod = sum(
-            1 for row in matched_rows
+            1 for row in matched_rows + matched_other_carrier_rows
             if row.get("source_name") == source_name and row.get("has_stock_tracking_pod")
+        )
+        matched_any_count = (
+            counts["matched_count"]
+            + counts["matched_cancelled_count"]
+            + counts["matched_other_carrier_count"]
         )
         summary_rows.append(
             {
@@ -580,10 +601,11 @@ def build_pod_odoo_compare_snapshot():
                 "unique_identifier_count": counts["unique_identifier_count"],
                 "matched_count": counts["matched_count"],
                 "matched_cancelled_count": counts["matched_cancelled_count"],
+                "matched_other_carrier_count": counts["matched_other_carrier_count"],
                 "not_found_count": counts["not_found_count"],
                 "ambiguous_count": counts["ambiguous_count"],
                 "match_rate_percent": _float_percent(
-                    counts["matched_count"] + counts["matched_cancelled_count"],
+                    matched_any_count,
                     counts["unique_identifier_count"],
                 ),
                 "stock_tracking_pod_count": tracking_pod,
@@ -593,9 +615,11 @@ def build_pod_odoo_compare_snapshot():
     unique_identifier_count = len(aggregated)
     matched_count = len(matched_rows)
     matched_cancelled_count = len(matched_cancelled_rows)
+    matched_other_carrier_count = len(matched_other_carrier_rows)
     not_found_count = len(not_found_rows)
     ambiguous_count = len(ambiguous_rows)
-    tracking_pod_total = sum(1 for row in matched_rows if row.get("has_stock_tracking_pod"))
+    tracking_pod_total = sum(1 for row in matched_rows + matched_other_carrier_rows if row.get("has_stock_tracking_pod"))
+    matched_any_count = matched_count + matched_cancelled_count + matched_other_carrier_count
 
     summary = run["summary"]
     snapshot = {
@@ -615,10 +639,11 @@ def build_pod_odoo_compare_snapshot():
             "unique_identifier_count": unique_identifier_count,
             "matched_count": matched_count,
             "matched_cancelled_count": matched_cancelled_count,
+            "matched_other_carrier_count": matched_other_carrier_count,
             "not_found_count": not_found_count,
             "ambiguous_count": ambiguous_count,
             "match_rate_percent": _float_percent(
-                matched_count + matched_cancelled_count,
+                matched_any_count,
                 unique_identifier_count,
             ),
             "review_document_count": summary.get("review_document_count", summary.get("unmatched_document_count", 0)),
@@ -654,8 +679,9 @@ def render_pod_odoo_compare_markdown(snapshot):
         "## 总览",
         "",
         f"- POD 唯一匹配键数：{totals.get('unique_identifier_count', 0)}",
-        f"- 匹配到 Odoo：{totals.get('matched_count', 0)}",
+        f"- 同承运商命中：{totals.get('matched_count', 0)}",
         f"- 匹配到已取消单：{totals.get('matched_cancelled_count', 0)}",
+        f"- 命中其他承运商：{totals.get('matched_other_carrier_count', 0)}",
         f"- 按匹配键未命中 Odoo：{totals.get('not_found_count', 0)}",
         f"- Odoo 命中多条：{totals.get('ambiguous_count', 0)}",
         f"- 匹配率：{totals.get('match_rate_percent', 0)}%",
@@ -664,13 +690,25 @@ def render_pod_odoo_compare_markdown(snapshot):
         "",
         "## 来源汇总",
         "",
-        "| 来源 | carrier_id | 唯一匹配键数 | 匹配到 Odoo | 匹配到已取消单 | 按匹配键未命中 Odoo | Odoo 命中多条 | 匹配率 | 已推送 POD |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| 来源 | carrier_id | 唯一匹配键数 | 同承运商命中 | 命中已取消单 | 命中其他承运商 | 按匹配键未命中 Odoo | Odoo 命中多条 | 匹配率 | 已推送 POD |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in snapshot.get("summary_rows") or []:
         lines.append(
-            "| {source_name} | {carrier_id} | {unique_identifier_count} | {matched_count} | {matched_cancelled_count} | "
-            "{not_found_count} | {ambiguous_count} | {match_rate_percent}% | {stock_tracking_pod_count} |".format(**row)
+            "| {source_name} | {carrier_id} | {unique_identifier_count} | {matched_count} | "
+            "{matched_cancelled_count} | {matched_other_carrier_count} | {not_found_count} | "
+            "{ambiguous_count} | {match_rate_percent}% | {stock_tracking_pod_count} |".format(
+                source_name=row.get("source_name", ""),
+                carrier_id=row.get("carrier_id", ""),
+                unique_identifier_count=row.get("unique_identifier_count", 0),
+                matched_count=row.get("matched_count", 0),
+                matched_cancelled_count=row.get("matched_cancelled_count", 0),
+                matched_other_carrier_count=row.get("matched_other_carrier_count", 0),
+                not_found_count=row.get("not_found_count", 0),
+                ambiguous_count=row.get("ambiguous_count", 0),
+                match_rate_percent=row.get("match_rate_percent", 0),
+                stock_tracking_pod_count=row.get("stock_tracking_pod_count", 0),
+            )
         )
     lines.extend(
         [
@@ -680,6 +718,7 @@ def render_pod_odoo_compare_markdown(snapshot):
             "- `pod_vs_odoo_summary.csv`",
             "- `pod_vs_odoo_matched.csv`",
             "- `pod_vs_odoo_matched_cancelled.csv`",
+            "- `pod_vs_odoo_matched_other_carrier.csv`",
             "- `pod_vs_odoo_not_found.csv`",
             "- `pod_vs_odoo_ambiguous.csv`",
             "- `pod_ready_for_odoo.xlsx`",
@@ -705,6 +744,7 @@ def save_pod_odoo_compare_snapshot(snapshot):
         "summary_csv": SUMMARY_CSV_PATH,
         "matched_csv": MATCHED_CSV_PATH,
         "matched_cancelled_csv": MATCHED_CANCELLED_CSV_PATH,
+        "matched_other_carrier_csv": MATCHED_OTHER_CARRIER_CSV_PATH,
         "not_found_csv": NOT_FOUND_CSV_PATH,
         "ambiguous_csv": AMBIGUOUS_CSV_PATH,
         "report_md": REPORT_MD_PATH,
@@ -764,7 +804,7 @@ def build_pod_odoo_compare_listing(
         return None
 
     rows = []
-    for key in ("matched_rows", "matched_cancelled_rows", "not_found_rows", "ambiguous_rows"):
+    for key in ("matched_rows", "matched_cancelled_rows", "matched_other_carrier_rows", "not_found_rows", "ambiguous_rows"):
         rows.extend(snapshot.get(key) or [])
 
     query_text = (query or "").strip().lower()
@@ -792,7 +832,7 @@ def build_pod_odoo_compare_listing(
         if source and source_key != source:
             continue
         if status == "matched_any":
-            if row.get("compare_status") not in {"matched", "matched_cancelled"}:
+            if row.get("compare_status") not in MATCHED_ANY_STATUSES:
                 continue
         elif status and row.get("compare_status") != status:
             continue
@@ -819,12 +859,5 @@ def build_pod_odoo_compare_listing(
         "filters": {"query": query, "source": source, "status": status},
         "source_options": [{"value": "", "label": "全部来源"}]
         + [{"value": value, "label": value} for value in sorted(source_options)],
-        "status_options": [
-            {"value": "", "label": "全部状态"},
-            {"value": "odoo_not_found", "label": "按匹配键未命中 Odoo"},
-            {"value": "matched_any", "label": "全部命中"},
-            {"value": "matched", "label": "匹配成功"},
-            {"value": "matched_cancelled", "label": "匹配到已取消单"},
-            {"value": "multiple_odoo_matches", "label": "Odoo 命中多条"},
-        ],
+        "status_options": COMPARE_STATUS_OPTIONS,
     }

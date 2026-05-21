@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
+
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+VENV_DIR="${VENV_DIR:-$ROOT/venv}"
+HOST="${HOST:-127.0.0.1}"
+PORT="${PORT:-8123}"
+REQUIREMENTS_FILE="$ROOT/requirements.lock"
+
+if [[ ! -f "$REQUIREMENTS_FILE" ]]; then
+  REQUIREMENTS_FILE="$ROOT/requirements.txt"
+fi
+
+if [[ ! -d "$VENV_DIR" ]]; then
+  echo "[start] Creating virtualenv: $VENV_DIR"
+  "$PYTHON_BIN" -m venv "$VENV_DIR"
+fi
+
+VENV_PYTHON="$VENV_DIR/bin/python"
+VENV_PIP="$VENV_DIR/bin/pip"
+STAMP_FILE="$VENV_DIR/.pod_sync_requirements_stamp"
+
+if [[ "${SKIP_INSTALL:-0}" != "1" ]]; then
+  if [[ ! -f "$STAMP_FILE" || "$REQUIREMENTS_FILE" -nt "$STAMP_FILE" ]]; then
+    echo "[start] Installing dependencies from $(basename "$REQUIREMENTS_FILE")"
+    "$VENV_PIP" install -r "$REQUIREMENTS_FILE"
+    touch "$STAMP_FILE"
+  fi
+fi
+
+if [[ ! -f "$ROOT/config.local.json" ]]; then
+  if [[ -f "$ROOT/config.example.json" ]]; then
+    echo "[start] config.local.json not found; copying config.example.json"
+    cp "$ROOT/config.example.json" "$ROOT/config.local.json"
+    chmod 600 "$ROOT/config.local.json"
+  else
+    echo "[start] Missing config.local.json and config.example.json" >&2
+    exit 1
+  fi
+else
+  chmod 600 "$ROOT/config.local.json" 2>/dev/null || true
+fi
+
+mkdir -p "$ROOT/runtime"
+SECRET_FILE="$ROOT/runtime/webapp_secret"
+if [[ -z "${POD_SYNC_SECRET_KEY:-}" ]]; then
+  if [[ ! -f "$SECRET_FILE" ]]; then
+    umask 077
+    "$PYTHON_BIN" -c 'import secrets; print(secrets.token_urlsafe(48))' > "$SECRET_FILE"
+  fi
+  export POD_SYNC_SECRET_KEY="$(<"$SECRET_FILE")"
+fi
+
+CONFIG_HAS_ADMIN="$("$VENV_PYTHON" - <<'PY'
+import json
+from pathlib import Path
+
+path = Path("config.local.json")
+try:
+    cfg = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    print("0")
+else:
+    print("1" if cfg.get("admin_password") else "0")
+PY
+)"
+
+if [[ -z "${POD_SYNC_ADMIN_PASSWORD:-}" && "$CONFIG_HAS_ADMIN" != "1" ]]; then
+  if [[ -t 0 ]]; then
+    read -r -s -p "Set admin password for this run: " POD_SYNC_ADMIN_PASSWORD
+    echo
+    if [[ -z "$POD_SYNC_ADMIN_PASSWORD" ]]; then
+      echo "[start] Admin password cannot be empty." >&2
+      exit 1
+    fi
+    export POD_SYNC_ADMIN_PASSWORD
+  else
+    echo "[start] Missing admin password. Set POD_SYNC_ADMIN_PASSWORD or config.local.json admin_password." >&2
+    exit 1
+  fi
+fi
+
+FILE_URL_SECRET_STATUS="$("$VENV_PYTHON" - <<'PY'
+import json
+from pathlib import Path
+
+try:
+    cfg = json.loads(Path("config.local.json").read_text(encoding="utf-8"))
+except Exception:
+    print("unknown")
+else:
+    pod_sync = cfg.get("pod_sync") or {}
+    base_url = str(pod_sync.get("base_url") or "").strip()
+    secret = str(pod_sync.get("file_url_secret") or "").strip()
+    insecure_prefixes = ("CHANGE_ME", "PASTE_", "TODO", "EXAMPLE", "REPLACE_ME")
+    if base_url and not secret:
+        print("missing")
+    elif base_url and secret.upper().startswith(insecure_prefixes):
+        print("placeholder")
+    elif base_url and len(secret) < 32:
+        print("too_short")
+    else:
+        print("ok")
+PY
+)"
+
+if [[ "$FILE_URL_SECRET_STATUS" == "missing" ]]; then
+  echo "[start] Warning: pod_sync.base_url is set but pod_sync.file_url_secret is missing; Odoo local POD links will not be signed."
+elif [[ "$FILE_URL_SECRET_STATUS" == "placeholder" || "$FILE_URL_SECRET_STATUS" == "too_short" ]]; then
+  echo "[start] Invalid pod_sync.file_url_secret ($FILE_URL_SECRET_STATUS). Use a random secret of at least 32 characters." >&2
+  exit 1
+fi
+
+UVICORN_ARGS=(webapp.app:app --host "$HOST" --port "$PORT")
+if [[ "${RELOAD:-0}" == "1" ]]; then
+  UVICORN_ARGS+=(--reload)
+fi
+UVICORN_ARGS+=("$@")
+
+echo "[start] Starting POD Sync Web Console at http://$HOST:$PORT"
+exec "$VENV_PYTHON" -m uvicorn "${UVICORN_ARGS[@]}"

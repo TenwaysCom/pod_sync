@@ -2,6 +2,7 @@
 import argparse
 import concurrent.futures
 import json
+import os
 import sys
 import threading
 from pathlib import Path, PurePosixPath
@@ -48,7 +49,12 @@ def load_config(path):
 
 
 def write_updated_config(config_path, full_cfg):
-    Path(config_path).write_text(json.dumps(full_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path = Path(config_path)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(full_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.chmod(tmp_path, 0o600)
+    tmp_path.replace(path)
+    os.chmod(path, 0o600)
 
 
 def has_refresh_flow(cfg):

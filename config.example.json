@@ -1,4 +1,8 @@
 {
+  "pod_sync": {
+    "base_url": "",
+    "file_url_secret": ""
+  },
   "download": {
     "base_dir": "./storage/pod"
   },
@@ -37,6 +41,7 @@
     "http_method": "GET",
     "tracking_param_name": "tracking_number",
     "download_url_field": "data.download_url",
+    "allowed_download_hosts": ["example.com"],
     "file_name_field": "data.file_name",
     "base64_content_field": "",
     "warehouse": "Westerman",

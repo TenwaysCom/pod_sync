@@ -214,6 +214,121 @@ class EmtcReconcileTests(unittest.TestCase):
             self.assertEqual(dataset["pod_summary"]["parseable_count"], 1)
             self.assertEqual(dataset["pod_summary"]["found_in_odoo_count"], 1)
 
+    def test_cmc_pod_to_odoo_uses_pod_index_and_other_carriers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            parsed_path = tmp / "parsed_documents.json"
+            pod_index_path = tmp / "odoo_pod_index.json"
+            parsed_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "document_uid": "direct",
+                            "source_name": "CMC",
+                            "file_name": "direct.pdf",
+                            "source_path": "CMC/direct.pdf",
+                            "file_url": "https://example.test/cmc/direct.pdf",
+                            "local_path": str((tmp / "storage" / "CMC" / "direct.pdf").resolve()),
+                            "source_modified_at": "2026-04-27T02:00:00Z",
+                            "preferred_key_type": "picking_name",
+                            "preferred_key": "WCB2BOUT111",
+                            "primary_picking_name": "WCB2BOUT111",
+                        },
+                        {
+                            "document_uid": "index",
+                            "source_name": "CMC",
+                            "file_name": "index.pdf",
+                            "source_path": "CMC/index.pdf",
+                            "file_url": "https://example.test/cmc/index.pdf",
+                            "local_path": str((tmp / "storage" / "CMC" / "index.pdf").resolve()),
+                            "source_modified_at": "2026-04-27T03:00:00Z",
+                            "preferred_key_type": "picking_name",
+                            "preferred_key": "WCB2COUT333",
+                            "primary_picking_name": "WCB2COUT333",
+                        },
+                        {
+                            "document_uid": "other",
+                            "source_name": "CMC",
+                            "file_name": "other.pdf",
+                            "source_path": "CMC/other.pdf",
+                            "file_url": "https://example.test/cmc/other.pdf",
+                            "local_path": str((tmp / "storage" / "CMC" / "other.pdf").resolve()),
+                            "source_modified_at": "2026-04-27T04:00:00Z",
+                            "preferred_key_type": "picking_name",
+                            "preferred_key": "WCB2COUT222",
+                            "primary_picking_name": "WCB2COUT222",
+                        },
+                        {
+                            "document_uid": "missing",
+                            "source_name": "CMC",
+                            "file_name": "missing.pdf",
+                            "source_path": "CMC/missing.pdf",
+                            "file_url": "https://example.test/cmc/missing.pdf",
+                            "local_path": str((tmp / "storage" / "CMC" / "missing.pdf").resolve()),
+                            "source_modified_at": "2026-04-27T05:00:00Z",
+                            "preferred_key_type": "picking_name",
+                            "preferred_key": "WCB2COUT444",
+                            "primary_picking_name": "WCB2COUT444",
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            pod_index_path.write_text(
+                json.dumps(
+                    {
+                        "fetched_at": "2026-04-28T02:00:00Z",
+                        "by_picking_name": {
+                            "WCB2C/OUT/333": {
+                                "tracking_number": "WCB2C/OUT/333",
+                                "pod_link": "https://pod.example/WCB2COUT333.pdf",
+                                "source_model": "querydeluxe",
+                            }
+                        },
+                        "by_tracking_number": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            run = {"run_name": "202604280001", "summary": {"generated_at": "2026-04-28T01:00:00Z"}}
+            odoo_snapshot = {
+                "generated_at": "2026-04-28T02:00:00Z",
+                "total_detail_rows": [
+                    {
+                        "carrier_id": 25,
+                        "carrier_name": "CMC",
+                        "odoo_picking_id": 201,
+                        "picking_name": "WCB2B/OUT/111",
+                        "state": "done",
+                        "business_datetime": "2026-04-20 13:00:00",
+                    },
+                    {
+                        "carrier_id": 15,
+                        "carrier_name": "DHL",
+                        "odoo_picking_id": 301,
+                        "picking_name": "WCB2C/OUT/222",
+                        "state": "done",
+                        "business_datetime": "2026-04-20 14:00:00",
+                    },
+                ],
+            }
+
+            with mock.patch.object(emtc_reconcile, "get_latest_phase1a_run", return_value=run), \
+                mock.patch.object(emtc_reconcile, "resolve_artifact_path", return_value=parsed_path), \
+                mock.patch.object(emtc_reconcile, "load_odoo_missing_snapshot", return_value=odoo_snapshot), \
+                mock.patch.object(emtc_reconcile, "resolve_storage_dir", return_value=(tmp / "storage")), \
+                mock.patch.object(emtc_reconcile, "POD_INDEX_PATH", pod_index_path):
+                dataset = emtc_reconcile.load_reconcile_dataset("cmc")
+
+            rows = {row["document_uid"]: row for row in dataset["pod_to_odoo_rows"]}
+            self.assertEqual(rows["direct"]["compare_status"], "found_in_odoo")
+            self.assertEqual(rows["index"]["compare_status"], "found_in_odoo_pod_index")
+            self.assertEqual(rows["index"]["odoo_pod_index_count"], 1)
+            self.assertEqual(rows["other"]["compare_status"], "found_other_carrier")
+            self.assertEqual(rows["missing"]["compare_status"], "not_found_in_odoo")
+            self.assertEqual(dataset["pod_summary"]["found_in_odoo_count"], 3)
+            self.assertEqual(dataset["pod_summary"]["not_found_in_odoo_count"], 1)
+
     def test_build_listings_filter_status(self):
         dataset = {
             "generated_at": "2026-04-28T02:00:00Z",

@@ -38,6 +38,24 @@ def _row_has_pod(row: dict, stock_tracking_ids: set[int]) -> bool:
     return False
 
 
+def _build_other_carrier_rows(rows: list[dict]):
+    grouped = defaultdict(lambda: {"carrier_name": "", "count": 0, "sample_picking_names": []})
+    for row in rows:
+        carrier_name = row.get("matched_odoo_carrier_names") or "-"
+        item = grouped[carrier_name]
+        item["carrier_name"] = carrier_name
+        item["count"] += 1
+        picking_names = [
+            name.strip()
+            for name in str(row.get("matched_odoo_picking_names") or "").split("|")
+            if name.strip()
+        ]
+        for picking_name in picking_names:
+            if picking_name not in item["sample_picking_names"] and len(item["sample_picking_names"]) < 5:
+                item["sample_picking_names"].append(picking_name)
+    return sorted(grouped.values(), key=lambda item: (-item["count"], item["carrier_name"]))
+
+
 def _parse_datetime(value: str | None):
     if not value:
         return None
@@ -459,6 +477,13 @@ def build_compare_analysis_context(compare_snapshot: dict | None):
             "action": "通常不应自动推送，需要业务确认。",
         },
         {
+            "status": "matched_other_carrier",
+            "label": "命中其他承运商",
+            "count": totals.get("matched_other_carrier_count", 0),
+            "description": "POD 匹配键没有命中当前来源对应的承运商，但在其他 Odoo carrier 下命中 done 单据。",
+            "action": "先核对承运商归属或来源分类，不建议直接自动推送。",
+        },
+        {
             "status": "odoo_not_found",
             "label": "按匹配键未命中 Odoo",
             "count": totals.get("not_found_count", 0),
@@ -478,11 +503,16 @@ def build_compare_analysis_context(compare_snapshot: dict | None):
         "overview": {
             "unique_identifier_count": totals.get("unique_identifier_count", 0),
             "match_rate_percent": totals.get("match_rate_percent", 0),
-            "matched_any_count": totals.get("matched_count", 0) + totals.get("matched_cancelled_count", 0),
+            "matched_any_count": (
+                totals.get("matched_count", 0)
+                + totals.get("matched_cancelled_count", 0)
+                + totals.get("matched_other_carrier_count", 0)
+            ),
             "review_document_count": totals.get("review_document_count", 0),
             "stock_tracking_pod_count": totals.get("stock_tracking_pod_count", 0),
         },
         "status_rows": status_rows,
+        "other_carrier_rows": _build_other_carrier_rows(compare_snapshot.get("matched_other_carrier_rows") or []),
     }
 
 

@@ -23,6 +23,32 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from webapp.actions import resolve_project_path
+from webapp.signed_urls import build_signed_storage_url, is_valid_file_url_secret
+
+
+POD_INDEX_SUCCESS_STATUSES = {"pushed_tracking", "created_tracking", "skipped_same"}
+
+
+class TimeoutTransport(xmlrpc.client.Transport):
+    def __init__(self, timeout: int):
+        super().__init__()
+        self.timeout = timeout
+
+    def make_connection(self, host):
+        connection = super().make_connection(host)
+        connection.timeout = self.timeout
+        return connection
+
+
+class TimeoutSafeTransport(xmlrpc.client.SafeTransport):
+    def __init__(self, timeout: int):
+        super().__init__()
+        self.timeout = timeout
+
+    def make_connection(self, host):
+        connection = super().make_connection(host)
+        connection.timeout = self.timeout
+        return connection
 
 
 def load_config(config_path: str) -> dict:
@@ -46,6 +72,9 @@ def get_local_file_url(full_cfg: dict, local_path: str) -> str | None:
     base_url = pod_sync_cfg.get("base_url", "").rstrip("/")
     if not base_url:
         return None
+    file_url_secret = pod_sync_cfg.get("file_url_secret", "")
+    if not is_valid_file_url_secret(file_url_secret):
+        return None
 
     download_cfg = full_cfg.get("download", {})
     base_dir = download_cfg.get("base_dir", "")
@@ -56,10 +85,7 @@ def get_local_file_url(full_cfg: dict, local_path: str) -> str | None:
         local = Path(local_path).resolve()
         base = Path(base_dir).resolve()
         rel = local.relative_to(base)
-        # URL-encode path segments
-        from urllib.parse import quote
-        encoded = "/".join(quote(str(part), safe="") for part in rel.parts)
-        return f"{base_url}/storage/files/{encoded}"
+        return build_signed_storage_url(base_url, rel.as_posix(), file_url_secret)
     except (ValueError, TypeError):
         return None
 
@@ -68,14 +94,64 @@ def connect_odoo(odoo_cfg: dict):
     url = odoo_cfg.get("url", "").rstrip("/")
     if not url:
         raise ValueError("Odoo URL not configured")
-    common_proxy = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common", allow_none=True)
-    models_proxy = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object", allow_none=True)
+    timeout = int(odoo_cfg.get("timeout_seconds", 30))
+    transport_cls = TimeoutSafeTransport if url.startswith("https://") else TimeoutTransport
+    common_proxy = xmlrpc.client.ServerProxy(
+        f"{url}/xmlrpc/2/common",
+        allow_none=True,
+        transport=transport_cls(timeout),
+    )
+    models_proxy = xmlrpc.client.ServerProxy(
+        f"{url}/xmlrpc/2/object",
+        allow_none=True,
+        transport=transport_cls(timeout),
+    )
     return common_proxy, models_proxy
 
 
 def _utc_now_str() -> str:
     """Return current UTC time in Odoo Datetime format."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _record_successful_single_push_in_index(
+    *,
+    result: dict,
+    match_key: str,
+    match_key_type: str,
+    file_url: str,
+):
+    if result.get("status") not in POD_INDEX_SUCCESS_STATUSES or not file_url:
+        return
+    try:
+        try:
+            from .odoo_pull import ExistingPodIndex, load_saved_index, save_index
+        except ImportError:
+            from webapp.odoo_pull import ExistingPodIndex, load_saved_index, save_index
+
+        index = load_saved_index() or ExistingPodIndex()
+        tracking_number = match_key if match_key_type == "tracking_number" else None
+        picking_name = match_key if match_key_type == "picking_name" else None
+        target_name = result.get("target_name")
+        if target_name and match_key_type == "picking_name":
+            tracking_number = target_name
+        elif target_name and match_key_type == "tracking_number":
+            tracking_number = tracking_number or target_name
+
+        index.add_row(
+            tracking_number=tracking_number,
+            picking_name=picking_name,
+            pod_link=file_url,
+            source_model="local_push",
+        )
+        index.updated_at = _utc_now_iso()
+        save_index(index)
+    except Exception as exc:
+        result["index_update_error"] = str(exc)
 
 
 def _iso_to_odoo_datetime(iso_str: str | None) -> str | None:
@@ -142,6 +218,16 @@ def _display_picking_name_for_search(value: str | None) -> str | None:
     if normalized.startswith("WHOUT"):
         return f"WH/OUT/{normalized[len('WHOUT'):]}"
     return value
+
+
+def _payload_lookup_key(item: dict) -> tuple[str, str]:
+    key_type = item.get("preferred_key_type", "")
+    key_value = item.get("preferred_key", "")
+    if key_type == "picking_name":
+        display_key = _display_picking_name_for_search(key_value)
+        if display_key:
+            key_value = display_key
+    return key_type, key_value
 
 
 def search_picking(models, odoo_cfg: dict, key_type: str, key_value: str):
@@ -275,14 +361,9 @@ def push_payload(
             existing_index = get_index(config_path)
             filtered_items = []
             for item in items:
-                key_value = item.get("preferred_key", "")
-                key_type = item.get("preferred_key_type", "")
+                key_type, key_value = _payload_lookup_key(item)
                 lookup_tracking = key_value if key_type == "tracking_number" else None
                 lookup_picking = key_value if key_type == "picking_name" else None
-                if lookup_picking:
-                    display_picking = _display_picking_name_for_search(lookup_picking)
-                    if display_picking:
-                        lookup_picking = display_picking
                 if not existing_index.has_pod(
                     tracking_number=lookup_tracking,
                     picking_name=lookup_picking,
@@ -329,20 +410,24 @@ def push_payload(
         "picking_pushed": 0,
         "picking_skipped_same": 0,
         "picking_not_found": 0,
+        "ambiguous": 0,
+        "needs_review": 0,
         "failed": 0,
-        "by_source": defaultdict(lambda: {"tracking_pushed": 0, "picking_pushed": 0, "not_found": 0, "failed": 0}),
+        "by_source": defaultdict(
+            lambda: {
+                "tracking_pushed": 0,
+                "picking_pushed": 0,
+                "not_found": 0,
+                "ambiguous": 0,
+                "needs_review": 0,
+                "failed": 0,
+            }
+        ),
         "details": [],
     }
 
     for item in items:
-        key_type = item.get("preferred_key_type", "")
-        key_value = item.get("preferred_key", "")
-        # For picking_name keys, convert canonical format (e.g. WCB2BOUT33271)
-        # back to display format (e.g. WCB2B/OUT/33271) so Odoo search works
-        if key_type == "picking_name":
-            display_key = _display_picking_name_for_search(key_value)
-            if display_key:
-                key_value = display_key
+        key_type, key_value = _payload_lookup_key(item)
         source_file_url = item.get("file_url", "")
         local_path = item.get("local_path", "")
         source = item.get("source_name", "unknown")
@@ -394,11 +479,9 @@ def push_payload(
         # ---------------------------------------------------------
         # PRIMARY: Try stock.tracking by tracking_number
         # ---------------------------------------------------------
-        if key_type == "tracking_number" or key_value:
-            # Prefer tracking_number search on stock.tracking
-            search_tn = key_value if key_type == "tracking_number" else key_value
+        if key_type == "tracking_number":
             try:
-                tracking_records = search_stock_tracking(models, odoo_cfg, search_tn)
+                tracking_records = search_stock_tracking(models, odoo_cfg, key_value)
             except Exception as exc:
                 detail["status"] = "failed"
                 detail["error"] = f"stock.tracking search error: {exc}"
@@ -408,6 +491,15 @@ def push_payload(
                 continue
 
             if tracking_records:
+                if len(tracking_records) > 1:
+                    detail["status"] = "multiple_tracking_matches"
+                    detail["error"] = f"tracking_number matched {len(tracking_records)} stock.tracking records"
+                    detail["target_model"] = "stock.tracking"
+                    detail["target_id"] = [record.get("id") for record in tracking_records]
+                    results["ambiguous"] += 1
+                    results["by_source"][source]["ambiguous"] += 1
+                    results["details"].append(detail)
+                    continue
                 track = tracking_records[0]
                 tracking_id = track.get("id")
                 current_pod_link = track.get("pod_link")
@@ -464,6 +556,16 @@ def push_payload(
             results["details"].append(detail)
             continue
 
+        if len(pickings) > 1:
+            detail["status"] = "multiple_picking_matches"
+            detail["error"] = f"match key found {len(pickings)} stock.picking records"
+            detail["target_model"] = odoo_cfg.get("push_model", "stock.picking")
+            detail["target_id"] = [record.get("id") for record in pickings]
+            results["ambiguous"] += 1
+            results["by_source"][source]["ambiguous"] += 1
+            results["details"].append(detail)
+            continue
+
         pick = pickings[0]
         picking_id = pick.get("id")
         picking_name = pick.get("name")
@@ -482,42 +584,53 @@ def push_payload(
             continue
 
         if picking_trackings:
+            if len(picking_trackings) > 1:
+                detail["status"] = "multiple_tracking_records"
+                detail["error"] = f"picking has {len(picking_trackings)} stock.tracking records; skip automatic POD write"
+                detail["target_id"] = [track.get("id") for track in picking_trackings]
+                results["ambiguous"] += 1
+                results["by_source"][source]["ambiguous"] += 1
+                results["details"].append(detail)
+                continue
+
+            track = picking_trackings[0]
+            tracking_id = track.get("id")
+            current_pod_link = track.get("pod_link")
+            detail["target_id"] = tracking_id
+
             if dry_run:
                 detail["status"] = "dry_run_tracking"
-                detail["target_id"] = picking_trackings[0].get("id")
                 results["tracking_pushed"] += 1
                 results["by_source"][source]["tracking_pushed"] += 1
                 results["details"].append(detail)
                 continue
 
-            written_count = 0
-            for track in picking_trackings:
-                tracking_id = track.get("id")
-                current_pod_link = track.get("pod_link")
-                if current_pod_link and str(current_pod_link) == file_url:
-                    continue
-                try:
-                    write_tracking_pod(models, odoo_cfg, tracking_id, file_url, pod_time)
-                    written_count += 1
-                except Exception as exc:
-                    detail_err = dict(detail)
-                    detail_err["status"] = "failed"
-                    detail_err["error"] = f"write tracking {tracking_id} error: {exc}"
-                    detail_err["target_id"] = tracking_id
-                    results["failed"] += 1
-                    results["by_source"][source]["failed"] += 1
-                    results["details"].append(detail_err)
-
-            if written_count > 0:
-                detail["status"] = "pushed_tracking"
-                detail["target_id"] = picking_trackings[0].get("id")
-                results["tracking_pushed"] += written_count
-                results["by_source"][source]["tracking_pushed"] += written_count
-            else:
+            if current_pod_link and str(current_pod_link) == file_url:
                 detail["status"] = "skipped_same"
-                detail["target_id"] = picking_trackings[0].get("id")
                 results["tracking_skipped_same"] += 1
+                results["details"].append(detail)
+                continue
 
+            try:
+                write_tracking_pod(models, odoo_cfg, tracking_id, file_url, pod_time)
+                detail["status"] = "pushed_tracking"
+                results["tracking_pushed"] += 1
+                results["by_source"][source]["tracking_pushed"] += 1
+            except Exception as exc:
+                detail["status"] = "failed"
+                detail["error"] = f"write tracking {tracking_id} error: {exc}"
+                results["failed"] += 1
+                results["by_source"][source]["failed"] += 1
+
+            results["details"].append(detail)
+            continue
+
+        if key_type != "tracking_number":
+            detail["status"] = "needs_review"
+            detail["error"] = "picking matched but no stock.tracking exists; tracking_number is required before creating stock.tracking"
+            detail["target_id"] = picking_id
+            results["needs_review"] += 1
+            results["by_source"][source]["needs_review"] += 1
             results["details"].append(detail)
             continue
 
@@ -598,17 +711,31 @@ def push_single_item(
         "server_version": version.get("server_version", "unknown"),
     }
 
+    def finish():
+        _record_successful_single_push_in_index(
+            result=result,
+            match_key=key_value,
+            match_key_type=key_type,
+            file_url=final_url,
+        )
+        return result
+
     # PRIMARY: Try stock.tracking by tracking_number
-    if key_type == "tracking_number" or key_value:
-        search_tn = key_value if key_type == "tracking_number" else key_value
+    if key_type == "tracking_number":
         try:
-            tracking_records = search_stock_tracking(models, odoo_cfg, search_tn)
+            tracking_records = search_stock_tracking(models, odoo_cfg, key_value)
         except Exception as exc:
             result["status"] = "failed"
             result["error"] = f"stock.tracking search error: {exc}"
-            return result
+            return finish()
 
         if tracking_records:
+            if len(tracking_records) > 1:
+                result["status"] = "multiple_tracking_matches"
+                result["target_model"] = "stock.tracking"
+                result["target_id"] = [record.get("id") for record in tracking_records]
+                result["error"] = f"tracking_number matched {len(tracking_records)} stock.tracking records"
+                return finish()
             track = tracking_records[0]
             tracking_id = track.get("id")
             current_pod_link = track.get("pod_link")
@@ -618,11 +745,11 @@ def push_single_item(
 
             if current_pod_link and str(current_pod_link) == final_url:
                 result["status"] = "skipped_same"
-                return result
+                return finish()
 
             if dry_run:
                 result["status"] = "dry_run_tracking"
-                return result
+                return finish()
 
             try:
                 write_tracking_pod(models, odoo_cfg, tracking_id, final_url, pod_time)
@@ -630,7 +757,7 @@ def push_single_item(
             except Exception as exc:
                 result["status"] = "failed"
                 result["error"] = f"write tracking error: {exc}"
-            return result
+            return finish()
 
     # FALLBACK: find stock.picking, then update/create stock.tracking
     try:
@@ -638,12 +765,19 @@ def push_single_item(
     except Exception as exc:
         result["status"] = "failed"
         result["error"] = f"stock.picking search error: {exc}"
-        return result
+        return finish()
 
     if not pickings:
         result["status"] = "not_found"
         result["error"] = "No matching stock.tracking or stock.picking found"
-        return result
+        return finish()
+
+    if len(pickings) > 1:
+        result["status"] = "multiple_picking_matches"
+        result["target_model"] = odoo_cfg.get("push_model", "stock.picking")
+        result["target_id"] = [record.get("id") for record in pickings]
+        result["error"] = f"match key found {len(pickings)} stock.picking records"
+        return finish()
 
     pick = pickings[0]
     picking_id = pick.get("id")
@@ -656,44 +790,45 @@ def push_single_item(
     except Exception as exc:
         result["status"] = "failed"
         result["error"] = f"search tracking by picking error: {exc}"
-        return result
+        return finish()
 
     if picking_trackings:
+        if len(picking_trackings) > 1:
+            result["status"] = "multiple_tracking_records"
+            result["target_id"] = [track.get("id") for track in picking_trackings]
+            result["error"] = f"picking has {len(picking_trackings)} stock.tracking records; skip automatic POD write"
+            return finish()
+
         primary_track = picking_trackings[0]
         result["target_id"] = primary_track.get("id")
         result["target_name"] = primary_track.get("tracking_number")
 
         if dry_run:
             result["status"] = "dry_run_tracking"
-            return result
+            return finish()
 
-        first_error = None
-        written = 0
-        for track in picking_trackings:
-            tracking_id = track.get("id")
-            current_pod_link = track.get("pod_link")
-            if current_pod_link and str(current_pod_link) == final_url:
-                continue
-            try:
-                write_tracking_pod(models, odoo_cfg, tracking_id, final_url, pod_time)
-                written += 1
-            except Exception as exc:
-                if first_error is None:
-                    first_error = f"write tracking {tracking_id} error: {exc}"
-
-        if written > 0:
-            result["status"] = "pushed_tracking"
-        elif first_error:
-            result["status"] = "failed"
-            result["error"] = first_error
-        else:
+        current_pod_link = primary_track.get("pod_link")
+        if current_pod_link and str(current_pod_link) == final_url:
             result["status"] = "skipped_same"
-        return result
+            return finish()
+
+        try:
+            write_tracking_pod(models, odoo_cfg, primary_track.get("id"), final_url, pod_time)
+            result["status"] = "pushed_tracking"
+        except Exception as exc:
+            result["status"] = "failed"
+            result["error"] = f"write tracking {primary_track.get('id')} error: {exc}"
+        return finish()
 
     result["target_id"] = picking_id
+    if key_type != "tracking_number":
+        result["status"] = "needs_review"
+        result["error"] = "picking matched but no stock.tracking exists; tracking_number is required before creating stock.tracking"
+        return finish()
+
     if dry_run:
         result["status"] = "dry_run_create_tracking"
-        return result
+        return finish()
 
     try:
         new_tracking_id = create_stock_tracking(
@@ -705,7 +840,7 @@ def push_single_item(
         result["status"] = "failed"
         result["error"] = f"create tracking error: {exc}"
 
-    return result
+    return finish()
 
 
 def preflight_payload(
@@ -747,13 +882,15 @@ def preflight_payload(
             except ImportError:
                 from webapp.odoo_pull import get_index
             existing_index = get_index(config_path)
-            items = [
-                item for item in items
+            filtered_items = []
+            for item in items:
+                key_type, key_value = _payload_lookup_key(item)
                 if not existing_index.has_pod(
-                    tracking_number=item.get("preferred_key") if item.get("preferred_key_type") == "tracking_number" else None,
-                    picking_name=item.get("preferred_key") if item.get("preferred_key_type") == "picking_name" else None,
-                )
-            ]
+                    tracking_number=key_value if key_type == "tracking_number" else None,
+                    picking_name=key_value if key_type == "picking_name" else None,
+                ):
+                    filtered_items.append(item)
+            items = filtered_items
         except Exception as exc:
             print(f"[MISSING_ONLY] Warning: failed to filter: {exc}")
 
@@ -783,8 +920,7 @@ def preflight_payload(
     invalid = []
 
     for item in items:
-        key_type = item.get("preferred_key_type", "")
-        key_value = item.get("preferred_key", "")
+        key_type, key_value = _payload_lookup_key(item)
         source = item.get("source_name", "unknown")
         payload_item_id = item.get("payload_item_id", "")
 
@@ -812,10 +948,9 @@ def preflight_payload(
 
         # Check Odoo existence
         found = False
-        if key_type == "tracking_number" or key_value:
-            search_tn = key_value if key_type == "tracking_number" else key_value
+        if key_type == "tracking_number" and key_value:
             try:
-                tracking_records = search_stock_tracking(models, odoo_cfg, search_tn)
+                tracking_records = search_stock_tracking(models, odoo_cfg, key_value)
                 if tracking_records:
                     found = True
             except Exception:

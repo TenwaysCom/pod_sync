@@ -5,7 +5,8 @@ Executes the full chain:
   1. CMC OneDrive sync (incremental or full)
   2. EMTC Google Drive sync (incremental or full)
   3. Phase 1A parsing / matching
-  4. Refresh unified reports (Odoo missing + POD vs Odoo compare)
+  4. Push POD links to Odoo
+  5. Refresh Odoo POD index and unified reports
 
 Usage:
     python webapp/pipeline_runner.py --config config.local.json
@@ -192,35 +193,7 @@ def run_pipeline(
         if rc != 0:
             return {"ok": False, "failed_step": "phase1a", "steps": steps, "data_report": data_report, "elapsed_seconds": round(time.time() - overall_start, 1)}
 
-    # Step 4: Refresh unified reports
-    if not skip_reports:
-        print("\n" + "=" * 60)
-        print("STEP: 刷新统一报告")
-        print("=" * 60)
-        try:
-            from webapp.odoo_missing_report import refresh_odoo_missing_snapshot
-            from webapp.odoo_pod_compare import refresh_pod_odoo_compare_snapshot
-
-            refresh_odoo_missing_snapshot()
-            print("[OK] Odoo 缺失追踪报告已刷新")
-            record("refresh_odoo_missing", True)
-
-            refresh_pod_odoo_compare_snapshot()
-            print("[OK] POD vs Odoo 对比报告已刷新")
-            record("refresh_pod_compare", True)
-        except Exception as exc:
-            print(f"[FAILED] 刷新报告失败: {exc}")
-            record("refresh_reports", False, str(exc))
-            return {
-                "ok": False,
-                "failed_step": "refresh_reports",
-                "error": str(exc),
-                "steps": steps,
-                "data_report": data_report,
-                "elapsed_seconds": round(time.time() - overall_start, 1),
-            }
-
-    # Step 5: Push POD links to Odoo
+    # Step 4: Push POD links to Odoo
     if not skip_odoo_push:
         print("\n" + "=" * 60)
         print("STEP: 推送 POD 链接到 Odoo")
@@ -281,6 +254,46 @@ def run_pipeline(
                     "data_report": data_report,
                     "elapsed_seconds": round(time.time() - overall_start, 1),
                 }
+
+    # Step 5: Refresh reports after any Odoo write, so reconcile pages do not show stale POD state.
+    if not skip_reports:
+        print("\n" + "=" * 60)
+        print("STEP: 刷新 Odoo POD 索引和统一报告")
+        print("=" * 60)
+        try:
+            from webapp.odoo_missing_report import refresh_odoo_missing_snapshot
+            from webapp.odoo_pod_compare import refresh_pod_odoo_compare_snapshot
+
+            should_refresh_pod_index = (
+                not skip_odoo_push
+                and data_report.get("odoo_push", {}).get("status") != "skipped"
+            )
+            if should_refresh_pod_index:
+                from webapp.odoo_pull import fetch_and_save_index
+
+                index = fetch_and_save_index(config_path)
+                data_report["odoo_pod_index"] = index.summary()
+                print("[OK] Odoo POD 索引已刷新")
+                record("refresh_odoo_pod_index", True)
+
+            refresh_odoo_missing_snapshot()
+            print("[OK] Odoo 缺失追踪报告已刷新")
+            record("refresh_odoo_missing", True)
+
+            refresh_pod_odoo_compare_snapshot()
+            print("[OK] POD vs Odoo 对比报告已刷新")
+            record("refresh_pod_compare", True)
+        except Exception as exc:
+            print(f"[FAILED] 刷新报告失败: {exc}")
+            record("refresh_reports", False, str(exc))
+            return {
+                "ok": False,
+                "failed_step": "refresh_reports",
+                "error": str(exc),
+                "steps": steps,
+                "data_report": data_report,
+                "elapsed_seconds": round(time.time() - overall_start, 1),
+            }
 
     elapsed = round(time.time() - overall_start, 1)
     print(f"\n{'=' * 60}")

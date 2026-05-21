@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}POD 同步控制台{% endblock %}</title>
+  <meta name="csrf-token" content="{{ csrf_token or '' }}">
   <link rel="icon" href="{{ request.url_for('static', path='favicon.svg') }}" type="image/svg+xml">
   <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}">
 </head>
@@ -57,6 +58,29 @@
 
   <script>
     (() => {
+      const csrfToken = document.querySelector("meta[name='csrf-token']")?.getAttribute("content") || "";
+      if (csrfToken) {
+        document.querySelectorAll("form[method='post'], form[method='POST']").forEach((form) => {
+          if (form.querySelector("input[name='csrf_token']")) return;
+          const input = document.createElement("input");
+          input.type = "hidden";
+          input.name = "csrf_token";
+          input.value = csrfToken;
+          form.appendChild(input);
+        });
+
+        const nativeFetch = window.fetch.bind(window);
+        window.fetch = (input, init = {}) => {
+          const nextInit = { ...init };
+          const headers = new Headers(nextInit.headers || {});
+          if (!headers.has("x-csrf-token")) {
+            headers.set("x-csrf-token", csrfToken);
+          }
+          nextInit.headers = headers;
+          return nativeFetch(input, nextInit);
+        };
+      }
+
       const flashStack = document.getElementById("flashStack");
 
       function dismissFlash(node) {

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 
 DEFAULT_PROJECT_STORAGE = Path("storage") / "pod"
+DEFAULT_MAX_DOWNLOAD_BYTES = int(os.environ.get("POD_SYNC_MAX_DOWNLOAD_BYTES", str(200 * 1024 * 1024)))
 
 
 def sanitize_path_component(name, default):
@@ -34,23 +36,41 @@ def compute_sha256(path, chunk_size=1024 * 256):
     return digest.hexdigest()
 
 
-def save_stream_to_file(response, destination, chunk_size=1024 * 256):
+def _check_max_download_size(size: int, max_bytes: int | None = None):
+    limit = DEFAULT_MAX_DOWNLOAD_BYTES if max_bytes is None else max_bytes
+    if limit and limit > 0 and size > limit:
+        raise ValueError(f"download size {size} exceeds limit {limit} bytes")
+
+
+def save_stream_to_file(response, destination, chunk_size=1024 * 256, max_bytes: int | None = None):
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    remote_size = normalize_size(getattr(response, "headers", {}).get("Content-Length"))
+    if remote_size is not None:
+        _check_max_download_size(remote_size, max_bytes=max_bytes)
     digest = hashlib.sha256()
     total = 0
-    with destination.open("wb") as fh:
-        for chunk in response.iter_content(chunk_size=chunk_size):
-            if chunk:
-                fh.write(chunk)
-                digest.update(chunk)
-                total += len(chunk)
+    try:
+        with destination.open("wb") as fh:
+            for chunk in response.iter_content(chunk_size=chunk_size):
+                if chunk:
+                    total += len(chunk)
+                    _check_max_download_size(total, max_bytes=max_bytes)
+                    fh.write(chunk)
+                    digest.update(chunk)
+    except Exception:
+        try:
+            destination.unlink()
+        except OSError:
+            pass
+        raise
     return {"local_size": total, "sha256": digest.hexdigest()}
 
 
-def save_bytes_to_file(content, destination):
+def save_bytes_to_file(content, destination, max_bytes: int | None = None):
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    _check_max_download_size(len(content), max_bytes=max_bytes)
     digest = hashlib.sha256()
     digest.update(content)
     destination.write_bytes(content)

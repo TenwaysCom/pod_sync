@@ -3,6 +3,7 @@ import argparse
 import base64
 import concurrent.futures
 import json
+import os
 import sys
 import time
 from pathlib import Path, PurePosixPath
@@ -29,6 +30,8 @@ PUBLIC_VROOM_ENDPOINT = "https://api.onedrive.com/v1.0"
 PUBLIC_MPC_ENDPOINT = "https://my.microsoftpersonalcontent.com/_api/v2.1"
 CONFIG_SECTION_KEY = "cmc_onedrive"
 LEGACY_CONFIG_SECTION_KEY = "onedrive"
+GRAPH_COLLECTION_RETRY_STATUSES = {408, 409, 429, 500, 502, 503, 504}
+GRAPH_COLLECTION_MAX_RETRIES = 5
 
 
 def get_onedrive_config_section(full_cfg):
@@ -58,7 +61,12 @@ def build_token_url(cfg):
 
 
 def write_updated_config(config_path, full_cfg):
-    Path(config_path).write_text(json.dumps(full_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path = Path(config_path)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(full_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.chmod(tmp_path, 0o600)
+    tmp_path.replace(path)
+    os.chmod(path, 0o600)
 
 
 def extract_query_param(url, name):
@@ -330,15 +338,53 @@ def build_share_content_url(shared_url, shared_access=None):
     return append_shared_access(f"{build_share_item_path(shared_url, shared_access=shared_access)}/content", shared_access)
 
 
+def _has_graph_skiptoken(url: str) -> bool:
+    return "$skiptoken=" in url or "%24skiptoken=" in url.lower()
+
+
+def _retry_after_seconds(response, attempt: int) -> float:
+    raw_value = response.headers.get("Retry-After", "")
+    try:
+        return max(0.0, float(raw_value))
+    except (TypeError, ValueError):
+        return min(30.0, float(2 ** attempt))
+
+
+def _is_retryable_collection_response(response, url: str) -> bool:
+    if response.status_code in GRAPH_COLLECTION_RETRY_STATUSES:
+        return True
+    # Microsoft Graph personal-drive continuation tokens occasionally return
+    # transient 400 responses even though the nextLink was produced by Graph.
+    return response.status_code == 400 and _has_graph_skiptoken(url)
+
+
+def _get_collection_page(session, url, headers, timeout):
+    attempt = 0
+    while True:
+        try:
+            response = session.get(url, headers=headers, timeout=timeout)
+        except requests.RequestException:
+            if attempt >= GRAPH_COLLECTION_MAX_RETRIES:
+                raise
+            time.sleep(min(30.0, float(2 ** attempt)))
+            attempt += 1
+            continue
+
+        if not _is_retryable_collection_response(response, url):
+            response.raise_for_status()
+            return response
+        if attempt >= GRAPH_COLLECTION_MAX_RETRIES:
+            response.raise_for_status()
+            return response
+
+        time.sleep(_retry_after_seconds(response, attempt))
+        attempt += 1
+
+
 def iter_collection(session, url, headers, timeout):
     next_url = url
     while next_url:
-        parsed = urlparse(next_url)
-        query_params = parse_qs(parsed.query, keep_blank_values=True)
-        params = {k: v[0] if isinstance(v, list) else v for k, v in query_params.items()}
-        base_url = urlunparse(parsed._replace(query=""))
-        response = session.get(base_url, params=params, headers=headers, timeout=timeout)
-        response.raise_for_status()
+        response = _get_collection_page(session, next_url, headers, timeout)
         payload = response.json()
         for item in payload.get("value", []):
             yield item
@@ -380,9 +426,15 @@ def serialize_item(item, full_path=None, share_root=False):
     }
 
 
+def public_item_output(item):
+    output = dict(item)
+    output.pop("download_url", None)
+    return output
+
+
 def emit_item(item, full_path=None, share_root=False):
     output = serialize_item(item, full_path=full_path, share_root=share_root)
-    print(json.dumps(output, ensure_ascii=False))
+    print(json.dumps(public_item_output(output), ensure_ascii=False))
     return output
 
 
@@ -517,7 +569,7 @@ def iter_root_items(session, drive_id, headers, timeout, root_path, recursive, m
             full_path = str(PurePosixPath(current_path) / item["name"])
             output = serialize_item(item, full_path=full_path)
             if emit:
-                print(json.dumps(output, ensure_ascii=False))
+                print(json.dumps(public_item_output(output), ensure_ascii=False))
             yield output
             seen += 1
             if limit_reached(seen, max_items):
@@ -540,7 +592,7 @@ def iter_root_item_children(session, drive_id, item_id, headers, timeout, recurs
     if "folder" not in root_item:
         output = serialize_item(root_item, full_path=root_path)
         if emit:
-            print(json.dumps(output, ensure_ascii=False))
+            print(json.dumps(public_item_output(output), ensure_ascii=False))
         yield output
         return
 
@@ -552,7 +604,7 @@ def iter_root_item_children(session, drive_id, item_id, headers, timeout, recurs
             full_path = str(PurePosixPath(current_path) / item["name"])
             output = serialize_item(item, full_path=full_path)
             if emit:
-                print(json.dumps(output, ensure_ascii=False))
+                print(json.dumps(public_item_output(output), ensure_ascii=False))
             yield output
             seen += 1
             if limit_reached(seen, max_items):
@@ -575,7 +627,7 @@ def iter_shared_items(session, shared_url, headers, timeout, recursive, max_item
     if "folder" not in root_item:
         output = serialize_item(root_item, full_path=shared_root_path, share_root=True)
         if emit:
-            print(json.dumps(output, ensure_ascii=False))
+            print(json.dumps(public_item_output(output), ensure_ascii=False))
         yield output
         return
 
@@ -587,7 +639,7 @@ def iter_shared_items(session, shared_url, headers, timeout, recursive, max_item
             full_path = str(PurePosixPath(current_path) / item["name"])
             output = serialize_item(item, full_path=full_path)
             if emit:
-                print(json.dumps(output, ensure_ascii=False))
+                print(json.dumps(public_item_output(output), ensure_ascii=False))
             yield output
             seen += 1
             if limit_reached(seen, max_items):

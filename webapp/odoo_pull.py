@@ -14,6 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from webapp.actions import resolve_project_path
+from webapp.odoo_push import TimeoutSafeTransport, TimeoutTransport
 
 INDEX_FILE = PROJECT_ROOT / "runtime" / "odoo_push" / "odoo_pod_index.json"
 
@@ -35,6 +36,7 @@ class ExistingPodIndex:
         self.by_picking_name: dict[str, dict] = {}
         self.total_loaded: int = 0
         self.fetched_at: str = ""
+        self.updated_at: str = ""
 
     def add_row(self, tracking_number: str | None, picking_name: str | None, pod_link: str, source_model: str = "api"):
         if not pod_link:
@@ -80,6 +82,7 @@ class ExistingPodIndex:
             "by_picking_name_count": len(self.by_picking_name),
             "total_loaded": self.total_loaded,
             "fetched_at": self.fetched_at,
+            "updated_at": self.updated_at,
         }
 
     def to_dict(self) -> dict:
@@ -88,6 +91,7 @@ class ExistingPodIndex:
             "by_picking_name": self.by_picking_name,
             "total_loaded": self.total_loaded,
             "fetched_at": self.fetched_at,
+            "updated_at": self.updated_at,
         }
 
     @classmethod
@@ -97,6 +101,7 @@ class ExistingPodIndex:
         idx.by_picking_name = data.get("by_picking_name", {})
         idx.total_loaded = data.get("total_loaded", 0)
         idx.fetched_at = data.get("fetched_at", "")
+        idx.updated_at = data.get("updated_at", "")
         return idx
 
 
@@ -178,7 +183,13 @@ def _fetch_and_save_stock_tracking_pod_ids(odoo_cfg: dict):
         return
 
     try:
-        models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object", allow_none=True)
+        timeout = int(odoo_cfg.get("timeout_seconds", 30))
+        transport_cls = TimeoutSafeTransport if url.startswith("https://") else TimeoutTransport
+        models = xmlrpc.client.ServerProxy(
+            f"{url}/xmlrpc/2/object",
+            allow_none=True,
+            transport=transport_cls(timeout),
+        )
     except Exception as exc:
         print(f"[odoo_pull] Warning: failed to create XML-RPC proxy: {exc}")
         return

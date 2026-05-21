@@ -122,6 +122,57 @@ class DriveDownloadTests(unittest.TestCase):
         expected_url = "https://1drv.ms/f/c/3bb1cc2a6ad39e4c/IgBMntNqKsyxIIA7eQwCAAAAAbFmrd5XIhiFKZ1AapCcRtQ?e=5%3A6crK3r"
         self.assertEqual(probe_onedrive.sanitize_shared_url(noisy_url), expected_url)
 
+    def test_onedrive_retries_transient_skiptoken_400_and_keeps_nextlink_intact(self):
+        next_link = "https://graph.microsoft.com/v1.0/drives/drive/items/folder/children?%24skiptoken=abc%2Bdef"
+        fake_session = FakeSession(
+            [
+                FakeResponse(
+                    json_data={
+                        "value": [{"id": "file-1", "name": "one.pdf"}],
+                        "@odata.nextLink": next_link,
+                    }
+                ),
+                FakeResponse(status_code=400, text='{"error":{"code":"BadRequest"}}'),
+                FakeResponse(json_data={"value": [{"id": "file-2", "name": "two.pdf"}]}),
+            ]
+        )
+
+        with mock.patch.object(probe_onedrive.time, "sleep") as sleep_mock:
+            items = list(
+                probe_onedrive.iter_collection(
+                    fake_session,
+                    "https://graph.microsoft.com/v1.0/drives/drive/items/folder/children",
+                    {"Authorization": "Bearer token"},
+                    10,
+                )
+            )
+
+        self.assertEqual([item["id"] for item in items], ["file-1", "file-2"])
+        self.assertEqual(fake_session.calls[1]["url"], next_link)
+        self.assertIsNone(fake_session.calls[1]["params"])
+        self.assertEqual(fake_session.calls[2]["url"], next_link)
+        sleep_mock.assert_called_once()
+
+    def test_onedrive_emit_redacts_temporary_download_url_from_stdout(self):
+        download_url = "https://my.microsoftpersonalcontent.com/file.pdf?tempauth=secret-token"
+        item = {
+            "id": "file-1",
+            "name": "proof.pdf",
+            "file": {"mimeType": "application/pdf"},
+            "size": 10,
+            "parentReference": {"path": "/drive/root:/CMC"},
+            "@microsoft.graph.downloadUrl": download_url,
+        }
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            output = probe_onedrive.emit_item(item, full_path="/CMC/proof.pdf")
+
+        printed = json.loads(stdout.getvalue())
+        self.assertEqual(output["download_url"], download_url)
+        self.assertNotIn("download_url", printed)
+        self.assertNotIn("tempauth", stdout.getvalue())
+
     def test_onedrive_lists_public_authkey_share_without_bearer_token(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)

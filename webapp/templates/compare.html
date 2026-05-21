@@ -13,9 +13,14 @@
       <p class="muted">按来源 + 键类型 + 键值去重</p>
     </article>
     <article class="card stat-card">
-      <p class="label">匹配成功</p>
+      <p class="label">同承运商命中</p>
       <h2>{% if snapshot %}{{ snapshot.totals.matched_count }}{% else %}0{% endif %}</h2>
-      <p class="muted">POD 能找到 Odoo 中的对应单据</p>
+      <p class="muted">POD 能在当前来源承运商下找到 Odoo done 单据</p>
+    </article>
+    <article class="card stat-card">
+      <p class="label">命中其他承运商</p>
+      <h2>{% if snapshot %}{{ snapshot.totals.matched_other_carrier_count or 0 }}{% else %}0{% endif %}</h2>
+      <p class="muted">键值存在，但落在其他 Odoo carrier 范围内</p>
     </article>
     <article class="card stat-card">
       <p class="label">命中已取消单</p>
@@ -89,8 +94,9 @@
               <tr>
                 <th>来源</th>
                 <th>唯一匹配键数</th>
-                <th>匹配成功</th>
+                <th>同承运商命中</th>
                 <th>命中已取消单</th>
+                <th>命中其他承运商</th>
                 <th>按匹配键未命中 Odoo</th>
                 <th>Odoo 命中多条</th>
                 <th>匹配率</th>
@@ -109,6 +115,7 @@
                   <td>{{ row.unique_identifier_count }}</td>
                   <td>{{ row.matched_count }}</td>
                   <td>{{ row.matched_cancelled_count }}</td>
+                  <td>{{ row.matched_other_carrier_count or 0 }}</td>
                   <td>{{ row.not_found_count }}</td>
                   <td>{{ row.ambiguous_count }}</td>
                   <td>{{ row.match_rate_percent }}%</td>
@@ -203,6 +210,7 @@
       const statusLabels = {
         matched: "匹配成功",
         matched_cancelled: "匹配到已取消单",
+        matched_other_carrier: "命中其他承运商",
         odoo_not_found: "按匹配键未命中 Odoo",
         multiple_odoo_matches: "Odoo 命中多条",
       };

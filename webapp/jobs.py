@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import signal
 import shlex
 import subprocess
 import threading
@@ -12,6 +14,21 @@ from pathlib import Path
 
 from .actions import PROJECT_ROOT
 from .phase1a_runs import resolve_phase1a_summary_path
+
+
+DEFAULT_MAX_CONCURRENT_JOBS = int(os.environ.get("POD_SYNC_MAX_CONCURRENT_JOBS", "2"))
+DEFAULT_JOB_TIMEOUT_SECONDS = int(os.environ.get("POD_SYNC_JOB_TIMEOUT_SECONDS", str(6 * 60 * 60)))
+DEFAULT_MAX_LOG_READ_CHARS = int(os.environ.get("POD_SYNC_MAX_LOG_READ_CHARS", "200000"))
+
+MICROSOFT_TEMP_URL_RE = re.compile(
+    r"https?://[^\s\"'<>]*(?:my\.microsoftpersonalcontent\.com|onedrive\.live\.com|1drv\.ms)"
+    r"[^\s\"'<>]*(?:tempauth|authkey)=[^\s\"'<>]+",
+    re.IGNORECASE,
+)
+SENSITIVE_QUERY_PARAM_RE = re.compile(
+    r"(?i)([?&](?:tempauth|authkey|access_token|refresh_token|id_token|client_secret|sig|signature|token)=)"
+    r"[^&\s\"'<>]+"
+)
 
 
 def utc_now():
@@ -43,11 +60,55 @@ def process_exists(pid):
     return True
 
 
+def redact_log_text(text: str) -> str:
+    text = MICROSOFT_TEMP_URL_RE.sub("[REDACTED_MICROSOFT_DOWNLOAD_URL]", text)
+    return SENSITIVE_QUERY_PARAM_RE.sub(r"\1[REDACTED]", text)
+
+
+def read_text_tail(path: Path, max_chars: int | None) -> str:
+    if max_chars is not None and max_chars <= 0:
+        return ""
+    if max_chars is None:
+        return path.read_text(encoding="utf-8", errors="replace")
+
+    # Read enough bytes to cover max_chars for UTF-8 text without loading huge logs.
+    max_bytes = max(4096, max_chars * 4)
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        if size > max_bytes:
+            handle.seek(size - max_bytes)
+        content = handle.read()
+    text = content.decode("utf-8", errors="replace")
+    if len(text) > max_chars:
+        return text[-max_chars:]
+    return text
+
+
+def terminate_process_tree(process: subprocess.Popen, *, force: bool = False):
+    if os.name != "nt":
+        sig = signal.SIGKILL if force else signal.SIGTERM
+        try:
+            os.killpg(process.pid, sig)
+            return
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            pass
+
+    if force:
+        process.kill()
+    else:
+        process.terminate()
+
+
 class JobStore:
     def __init__(self, root_dir: Path):
         self.root_dir = Path(root_dir)
         self.root_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._job_timeout_seconds = max(0, DEFAULT_JOB_TIMEOUT_SECONDS)
+        self._max_log_read_chars = max(0, DEFAULT_MAX_LOG_READ_CHARS)
+        self._semaphore = threading.Semaphore(max(1, DEFAULT_MAX_CONCURRENT_JOBS))
 
     def _job_path(self, job_id: str):
         return self.root_dir / f"{job_id}.json"
@@ -88,10 +149,9 @@ class JobStore:
         path = self._log_path(job_id)
         if not path.exists():
             return ""
-        content = path.read_text(encoding="utf-8", errors="replace")
-        if max_chars is not None and len(content) > max_chars:
-            return content[-max_chars:]
-        return content
+        if max_chars is None and self._max_log_read_chars:
+            max_chars = self._max_log_read_chars
+        return redact_log_text(read_text_tail(path, max_chars))
 
     def delete_job(self, job_id: str):
         with self._lock:
@@ -186,7 +246,7 @@ class JobStore:
         if not path.exists():
             return None
         try:
-            content = path.read_text(encoding="utf-8", errors="replace")
+            content = read_text_tail(path, self._max_log_read_chars or DEFAULT_MAX_LOG_READ_CHARS)
             # Find the last non-empty line
             for line in reversed(content.strip().splitlines()):
                 line = line.strip()
@@ -227,7 +287,10 @@ class JobStore:
         command = payload["command"]
         env = os.environ.copy()
         log_path = self._log_path(job_id)
+        acquired = False
         try:
+            self._semaphore.acquire()
+            acquired = True
             with log_path.open("a", encoding="utf-8") as log_handle:
                 log_handle.write(f"$ {payload['command_display']}\n\n")
                 process = subprocess.Popen(
@@ -237,9 +300,26 @@ class JobStore:
                     stderr=subprocess.STDOUT,
                     text=True,
                     env=env,
+                    start_new_session=(os.name != "nt"),
                 )
                 self._update_job(job_id, status="running", started_at=utc_now(), pid=process.pid)
-                exit_code = process.wait()
+                try:
+                    if self._job_timeout_seconds:
+                        exit_code = process.wait(timeout=self._job_timeout_seconds)
+                    else:
+                        exit_code = process.wait()
+                except subprocess.TimeoutExpired:
+                    log_handle.write(
+                        f"\n\n--- JOB TIMEOUT ---\n任务超过 {self._job_timeout_seconds} 秒，正在终止。\n"
+                    )
+                    self._update_job(job_id, pid=None, status_note="任务超时，正在终止。")
+                    terminate_process_tree(process)
+                    try:
+                        process.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        terminate_process_tree(process, force=True)
+                        process.wait()
+                    exit_code = -9
 
             current = self._read_job_raw(job_id) or payload
             status = "success" if exit_code == 0 else "failed"
@@ -266,3 +346,6 @@ class JobStore:
                 exit_code=-1,
                 pid=None,
             )
+        finally:
+            if acquired:
+                self._semaphore.release()

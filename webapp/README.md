@@ -15,6 +15,8 @@
 ## 启动
 
 ```bash
+export POD_SYNC_ADMIN_PASSWORD='CHANGE_ME'
+export POD_SYNC_SECRET_KEY='CHANGE_ME_RANDOM_32_BYTES'
 python3 -m uvicorn webapp.app:app --host 0.0.0.0 --port 8080
 ```
 
@@ -28,3 +30,5 @@ python3 -m uvicorn webapp.app:app --host 0.0.0.0 --port 8080
 - 任务状态存文件，位置在 `runtime/jobs/`
 - 不引入数据库
 - 不改写现有同步核心逻辑，仍然复用现有 CLI 入口
+- 后台 POST 操作要求登录和 CSRF 校验
+- `/storage/files/...` 只允许登录态访问，或使用 `pod_sync.file_url_secret` 生成的签名链接访问

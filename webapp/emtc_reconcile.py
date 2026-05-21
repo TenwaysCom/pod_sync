@@ -15,6 +15,9 @@ from .phase1a_runs import get_latest_phase1a_run, resolve_artifact_path
 from .xlsx_utils import build_xlsx_workbook
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+POD_INDEX_PATH = PROJECT_ROOT / "runtime" / "odoo_push" / "odoo_pod_index.json"
+
 RECONCILE_SOURCE_CONFIGS = {
     "emtc": {
         "slug": "emtc",
@@ -36,9 +39,9 @@ RECONCILE_SOURCE_CONFIGS = {
         "pod_parseable_label": "POD 可解析 tracking number",
         "pod_parseable_hint": "已经能从文件名里稳定提取出 tracking number",
         "pod_found_label": "POD 可在 Odoo 找到",
-        "pod_found_hint": "同 tracking number 已存在于 EMTC Odoo 单池",
+        "pod_found_hint": "同 tracking number 已存在于 EMTC Odoo 单池、Odoo POD 索引，或 Odoo 其他承运商单据中",
         "pod_missing_label": "POD 未命中 Odoo",
-        "pod_missing_hint": "tracking number 已解析，但在 EMTC Odoo 单池里没找到",
+        "pod_missing_hint": "tracking number 已解析，但在 Odoo 总明细和 POD 索引里都没找到",
         "pod_unparseable_label": "POD 解析不了匹配键",
         "pod_unparseable_hint": "文件存在，但当前规则还没法稳定提取匹配键。",
         "odoo_heading": "EMTC 出库单和 tracking number，能不能在 POD 里找到",
@@ -66,9 +69,9 @@ RECONCILE_SOURCE_CONFIGS = {
         "pod_parseable_label": "POD 可解析出库单号",
         "pod_parseable_hint": "已经能从文件名里稳定提取出出库单号",
         "pod_found_label": "POD 可在 Odoo 找到",
-        "pod_found_hint": "同出库单号已存在于 CMC Odoo 单池",
+        "pod_found_hint": "同出库单号已存在于 CMC Odoo 单池、Odoo POD 索引，或 Odoo 其他承运商单据中",
         "pod_missing_label": "POD 未命中 Odoo",
-        "pod_missing_hint": "出库单号已解析，但在 CMC Odoo 单池里没找到",
+        "pod_missing_hint": "出库单号已解析，但在 Odoo 总明细和 POD 索引里都没找到",
         "pod_unparseable_label": "POD 解析不了匹配键",
         "pod_unparseable_hint": "文件存在，但当前规则还没法稳定提取匹配键。",
         "odoo_heading": "CMC 出库单和出库单号，能不能在 POD 里找到",
@@ -88,8 +91,16 @@ ODOO_TO_POD_STATUS_ORDER = {
 
 POD_TO_ODOO_STATUS_ORDER = {
     "found_in_odoo": 0,
-    "not_found_in_odoo": 1,
-    "no_match_key": 2,
+    "found_in_odoo_pod_index": 1,
+    "found_other_carrier": 2,
+    "not_found_in_odoo": 3,
+    "no_match_key": 4,
+}
+
+POD_FOUND_IN_ODOO_STATUSES = {
+    "found_in_odoo",
+    "found_in_odoo_pod_index",
+    "found_other_carrier",
 }
 
 
@@ -115,6 +126,79 @@ def _normalize_match_key(value, match_key_type: str):
 
 def _read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _pod_index_key_sources(config):
+    if config["match_key_type"] == "tracking_number":
+        return ("by_tracking_number",)
+    return ("by_picking_name", "by_tracking_number")
+
+
+def _dedupe_pod_index_entries(entries):
+    seen = set()
+    deduped = []
+    for entry in entries:
+        identity = (
+            entry.get("picking_name") or "",
+            entry.get("tracking_number") or "",
+            entry.get("pod_link") or "",
+            entry.get("index_key") or "",
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        deduped.append(entry)
+    return deduped
+
+
+def _load_pod_index_by_key(config):
+    if not POD_INDEX_PATH.exists():
+        return {}, {}
+    try:
+        index = _read_json(POD_INDEX_PATH) or {}
+    except (json.JSONDecodeError, OSError):
+        return {}, {}
+
+    entries_by_key = defaultdict(list)
+    for source_key in _pod_index_key_sources(config):
+        for raw_key, raw_entry in (index.get(source_key) or {}).items():
+            normalized_key = _normalize_match_key(raw_key, config["match_key_type"])
+            if not normalized_key:
+                continue
+            entry = dict(raw_entry) if isinstance(raw_entry, dict) else {}
+            entry["index_key"] = raw_key
+            entry["index_source"] = source_key
+            if source_key == "by_picking_name" and not entry.get("picking_name"):
+                entry["picking_name"] = raw_key
+            if source_key == "by_tracking_number" and not entry.get("tracking_number"):
+                entry["tracking_number"] = raw_key
+            entries_by_key[normalized_key].append(entry)
+
+    return (
+        {key: _dedupe_pod_index_entries(entries) for key, entries in entries_by_key.items()},
+        {
+            "fetched_at": index.get("fetched_at"),
+            "updated_at": index.get("updated_at"),
+            "total_loaded": index.get("total_loaded"),
+        },
+    )
+
+
+def _join_index_values(entries, *field_names):
+    values = []
+    seen = set()
+    for entry in entries:
+        for field_name in field_names:
+            value = entry.get(field_name)
+            if value in (None, ""):
+                continue
+            text = str(value)
+            if text in seen:
+                continue
+            seen.add(text)
+            values.append(text)
+            break
+    return " | ".join(values)
 
 
 def _file_signature(path: Path | None):
@@ -161,6 +245,8 @@ def _status_labels(config):
         },
         "pod_to_odoo": {
             "found_in_odoo": "在 Odoo 中找到",
+            "found_in_odoo_pod_index": "已回传 Odoo POD",
+            "found_other_carrier": "命中其他承运商",
             "not_found_in_odoo": "在 Odoo 中未找到",
             "no_match_key": f"无法解析{key_label}",
         },
@@ -300,7 +386,7 @@ def _rebuild_summary(filtered_dataset):
     }
     pod_total = len(pod_rows)
     pod_parseable = sum(1 for row in pod_rows if row.get("compare_status") != "no_match_key")
-    pod_found = sum(1 for row in pod_rows if row.get("compare_status") == "found_in_odoo")
+    pod_found = sum(1 for row in pod_rows if row.get("compare_status") in POD_FOUND_IN_ODOO_STATUSES)
     pod_not_found = sum(1 for row in pod_rows if row.get("compare_status") == "not_found_in_odoo")
     pod_unparseable = sum(1 for row in pod_rows if row.get("compare_status") == "no_match_key")
     filtered_dataset["pod_summary"] = {
@@ -328,7 +414,18 @@ def _collect_start_month_options(dataset):
     return [{"value": value, "label": _month_label(value)} for value in ordered]
 
 
-def _build_dataset_view(config, odoo_rows, pod_docs, *, generated_at: str | None, run_name: str, phase1a_generated_at: str | None):
+def _build_dataset_view(
+    config,
+    odoo_rows,
+    pod_docs,
+    *,
+    generated_at: str | None,
+    run_name: str,
+    phase1a_generated_at: str | None,
+    all_odoo_rows=None,
+    pod_index_by_key=None,
+    pod_index_meta=None,
+):
     labels = _status_labels(config)
     pod_docs_by_key = defaultdict(list)
     for row in pod_docs:
@@ -383,15 +480,52 @@ def _build_dataset_view(config, odoo_rows, pod_docs, *, generated_at: str | None
         if normalized_key:
             filtered_odoo_by_key[normalized_key].append(row)
 
+    all_odoo_by_key = defaultdict(list)
+    for row in all_odoo_rows or odoo_rows:
+        normalized_key = row.get("normalized_match_key")
+        if normalized_key:
+            all_odoo_by_key[normalized_key].append(row)
+
+    pod_index_by_key = pod_index_by_key or {}
     pod_to_odoo_rows = []
     for row in pod_docs:
         normalized_key = row.get("normalized_match_key")
         matches = filtered_odoo_by_key.get(normalized_key, []) if normalized_key else []
-        status = (
-            "found_in_odoo"
-            if normalized_key and matches
-            else ("not_found_in_odoo" if normalized_key else "no_match_key")
+        all_matches = all_odoo_by_key.get(normalized_key, []) if normalized_key else []
+        other_carrier_matches = [
+            match for match in all_matches
+            if match.get("carrier_id") != config["carrier_id"]
+        ]
+        pod_index_matches = pod_index_by_key.get(normalized_key, []) if normalized_key else []
+        if not normalized_key:
+            status = "no_match_key"
+        elif matches:
+            status = "found_in_odoo"
+        elif pod_index_matches:
+            status = "found_in_odoo_pod_index"
+        elif other_carrier_matches:
+            status = "found_other_carrier"
+        else:
+            status = "not_found_in_odoo"
+
+        display_matches = matches or other_carrier_matches
+        matched_count = len(display_matches)
+        if not matched_count and pod_index_matches:
+            matched_count = len(pod_index_matches)
+        matched_names = " | ".join(
+            str(match.get("picking_name") or "")
+            for match in display_matches[:10]
+            if match.get("picking_name")
         )
+        matched_states = " | ".join(
+            str(match.get("state") or "")
+            for match in display_matches[:10]
+            if match.get("state")
+        )
+        if not matched_names and pod_index_matches:
+            matched_names = _join_index_values(pod_index_matches[:10], "picking_name", "index_key", "tracking_number")
+        if not matched_states and pod_index_matches:
+            matched_states = _join_index_values(pod_index_matches[:10], "source_model") or "stock.tracking"
         pod_to_odoo_rows.append(
             {
                 "document_uid": row.get("document_uid"),
@@ -402,17 +536,11 @@ def _build_dataset_view(config, odoo_rows, pod_docs, *, generated_at: str | None
                 "normalized_match_key": normalized_key,
                 "compare_status": status,
                 "compare_status_label": labels["pod_to_odoo"][status],
-                "matched_odoo_count": len(matches),
-                "matched_odoo_picking_names": " | ".join(
-                    str(match.get("picking_name") or "")
-                    for match in matches[:10]
-                    if match.get("picking_name")
-                ),
-                "matched_odoo_states": " | ".join(
-                    str(match.get("state") or "")
-                    for match in matches[:10]
-                    if match.get("state")
-                ),
+                "matched_odoo_count": matched_count,
+                "matched_odoo_picking_names": matched_names,
+                "matched_odoo_states": matched_states,
+                "odoo_pod_index_count": len(pod_index_matches),
+                "odoo_pod_index_links": _join_index_values(pod_index_matches[:10], "pod_link"),
                 "sample_document": row.get("sample_document"),
                 "reason_code": row.get("reason_code"),
                 "search_blob": " ".join(
@@ -421,8 +549,10 @@ def _build_dataset_view(config, odoo_rows, pod_docs, *, generated_at: str | None
                         row.get("file_name"),
                         row.get("source_path"),
                         row.get("match_key"),
-                        " ".join(str(match.get("picking_name") or "") for match in matches[:10]),
-                        " ".join(str(match.get("state") or "") for match in matches[:10]),
+                        " ".join(str(match.get("picking_name") or "") for match in display_matches[:10]),
+                        " ".join(str(match.get("state") or "") for match in display_matches[:10]),
+                        " ".join(str(entry.get("pod_link") or "") for entry in pod_index_matches[:10]),
+                        " ".join(str(entry.get("index_key") or "") for entry in pod_index_matches[:10]),
                     )
                 ).lower(),
             }
@@ -431,7 +561,10 @@ def _build_dataset_view(config, odoo_rows, pod_docs, *, generated_at: str | None
     odoo_with_key_count = sum(1 for row in odoo_rows if row.get("normalized_match_key"))
     odoo_matched_pod_count = sum(1 for row in odoo_to_pod_rows if row.get("compare_status") == "matched_pod")
     pod_parseable_count = sum(1 for row in pod_docs if row.get("normalized_match_key"))
-    pod_found_in_odoo_count = sum(1 for row in pod_to_odoo_rows if row.get("compare_status") == "found_in_odoo")
+    pod_found_in_odoo_count = sum(
+        1 for row in pod_to_odoo_rows
+        if row.get("compare_status") in POD_FOUND_IN_ODOO_STATUSES
+    )
     odoo_total = len(odoo_rows)
     pod_total = len(pod_docs)
 
@@ -456,7 +589,12 @@ def _build_dataset_view(config, odoo_rows, pod_docs, *, generated_at: str | None
         "phase1a_generated_at": phase1a_generated_at,
         "source_config": config,
         "_odoo_rows": odoo_rows,
+        "_all_odoo_rows": list(all_odoo_rows or odoo_rows),
         "_pod_docs": pod_docs,
+        "_pod_index_by_key": pod_index_by_key,
+        "_pod_index_meta": pod_index_meta or {},
+        "odoo_pod_index_fetched_at": (pod_index_meta or {}).get("fetched_at"),
+        "odoo_pod_index_updated_at": (pod_index_meta or {}).get("updated_at"),
         "odoo_summary": {
             "total_count": odoo_total,
             "total_share_text": _share_text(odoo_total, odoo_total, "当前 Odoo 单池"),
@@ -489,10 +627,15 @@ def _build_dataset_view(config, odoo_rows, pod_docs, *, generated_at: str | None
 def _apply_start_month_filter(dataset, start_month: str | None):
     normalized_start = _normalize_start_month(start_month)
     odoo_rows = dataset.get("_odoo_rows", [])
+    all_odoo_rows = dataset.get("_all_odoo_rows", odoo_rows)
     pod_docs = dataset.get("_pod_docs", [])
     if normalized_start:
         odoo_rows = [
             row for row in odoo_rows
+            if _row_on_or_after_month(row.get("business_datetime"), normalized_start)
+        ]
+        all_odoo_rows = [
+            row for row in all_odoo_rows
             if _row_on_or_after_month(row.get("business_datetime"), normalized_start)
         ]
     filtered = _build_dataset_view(
@@ -502,6 +645,9 @@ def _apply_start_month_filter(dataset, start_month: str | None):
         generated_at=dataset.get("generated_at"),
         run_name=dataset.get("phase1a_run_name"),
         phase1a_generated_at=dataset.get("phase1a_generated_at"),
+        all_odoo_rows=all_odoo_rows,
+        pod_index_by_key=dataset.get("_pod_index_by_key"),
+        pod_index_meta=dataset.get("_pod_index_meta"),
     )
     filtered["selected_start_month"] = normalized_start
     filtered["start_month_options"] = _collect_start_month_options(dataset)
@@ -514,6 +660,7 @@ def _load_reconcile_dataset_cached(
     run_name: str,
     parsed_signature: tuple[int, int],
     odoo_signature: tuple[int, int],
+    pod_index_signature: tuple[int, int],
     storage_root: str,
 ):
     config = _resolve_reconcile_source(source_slug)
@@ -531,19 +678,21 @@ def _load_reconcile_dataset_cached(
 
     parsed_rows = list(_read_json(parsed_path) or [])
     storage_dir = Path(storage_root)
+    pod_index_by_key, pod_index_meta = _load_pod_index_by_key(config)
     labels = _status_labels(config)
     odoo_rows = []
+    all_odoo_rows = []
     odoo_by_key = defaultdict(list)
     for row in odoo_snapshot.get("total_detail_rows") or []:
-        if row.get("carrier_id") != config["carrier_id"]:
-            continue
         raw_key, normalized_key = _extract_odoo_match_key(row, config)
         normalized_row = dict(row)
         normalized_row["match_key"] = raw_key
         normalized_row["normalized_match_key"] = normalized_key
-        odoo_rows.append(normalized_row)
-        if normalized_key:
-            odoo_by_key[normalized_key].append(normalized_row)
+        all_odoo_rows.append(normalized_row)
+        if row.get("carrier_id") == config["carrier_id"]:
+            odoo_rows.append(normalized_row)
+            if normalized_key:
+                odoo_by_key[normalized_key].append(normalized_row)
 
     pod_docs = []
     for row in parsed_rows:
@@ -598,6 +747,9 @@ def _load_reconcile_dataset_cached(
         generated_at=odoo_snapshot.get("generated_at"),
         run_name=run_name,
         phase1a_generated_at=run.get("summary", {}).get("generated_at"),
+        all_odoo_rows=all_odoo_rows,
+        pod_index_by_key=pod_index_by_key,
+        pod_index_meta=pod_index_meta,
     )
 
 
@@ -614,6 +766,7 @@ def load_reconcile_dataset(kind: str = DEFAULT_RECONCILE_KIND):
         run["run_name"],
         _file_signature(parsed_path),
         _file_signature(ODOO_SNAPSHOT_PATH),
+        _file_signature(POD_INDEX_PATH),
         str(resolve_storage_dir()),
     )
 
@@ -713,6 +866,8 @@ def build_reconcile_pod_to_odoo_listing(
             "status_options": [
                 {"value": "", "label": "全部状态"},
                 {"value": "found_in_odoo", "label": "在 Odoo 中找到"},
+                {"value": "found_in_odoo_pod_index", "label": "已回传 Odoo POD"},
+                {"value": "found_other_carrier", "label": "命中其他承运商"},
                 {"value": "not_found_in_odoo", "label": "在 Odoo 中未找到"},
                 {"value": "no_match_key", "label": f"无法解析{config['match_key_label']}"},
             ],
@@ -750,9 +905,12 @@ def _export_sheet_rows(dataset):
         "source_path",
         "source_modified_at",
         config["match_key_label"],
+        "compare_status_label",
         "matched_odoo_count",
         "matched_odoo_picking_names",
         "matched_odoo_states",
+        "odoo_pod_index_count",
+        "odoo_pod_index_links",
         "source_file_url",
         "local_file_url",
         "reason_code",
@@ -780,9 +938,14 @@ def _export_sheet_rows(dataset):
         return rows
 
     def pod_rows(compare_status):
+        compare_statuses = (
+            set(compare_status)
+            if isinstance(compare_status, (set, tuple, list))
+            else {compare_status}
+        )
         rows = [pod_headers]
         for row in dataset["pod_to_odoo_rows"]:
-            if row.get("compare_status") != compare_status:
+            if row.get("compare_status") not in compare_statuses:
                 continue
             sample_document = row.get("sample_document") or {}
             rows.append(
@@ -792,9 +955,12 @@ def _export_sheet_rows(dataset):
                     row.get("source_path"),
                     row.get("source_modified_at"),
                     row.get("match_key"),
+                    row.get("compare_status_label"),
                     row.get("matched_odoo_count"),
                     row.get("matched_odoo_picking_names"),
                     row.get("matched_odoo_states"),
+                    row.get("odoo_pod_index_count"),
+                    row.get("odoo_pod_index_links"),
                     sample_document.get("file_url"),
                     sample_document.get("local_file_href"),
                     row.get("reason_code"),
@@ -806,7 +972,7 @@ def _export_sheet_rows(dataset):
         {"name": config["odoo_match_label"], "rows": odoo_rows("matched_pod")},
         {"name": config["odoo_missing_label"], "rows": odoo_rows("pod_not_found")},
         {"name": config["odoo_without_key_label"], "rows": odoo_rows("no_match_key")},
-        {"name": config["pod_found_label"], "rows": pod_rows("found_in_odoo")},
+        {"name": config["pod_found_label"], "rows": pod_rows(POD_FOUND_IN_ODOO_STATUSES)},
         {"name": config["pod_missing_label"], "rows": pod_rows("not_found_in_odoo")},
         {"name": config["pod_unparseable_label"], "rows": pod_rows("no_match_key")},
     ]
@@ -844,9 +1010,12 @@ def _pod_export_headers(config):
         "source_path",
         "source_modified_at",
         config["match_key_label"],
+        "compare_status_label",
         "matched_odoo_count",
         "matched_odoo_picking_names",
         "matched_odoo_states",
+        "odoo_pod_index_count",
+        "odoo_pod_index_links",
         "source_file_url",
         "local_file_url",
         "reason_code",
@@ -884,9 +1053,12 @@ def _build_pod_export_rows(config, rows):
                 row.get("source_path"),
                 row.get("source_modified_at"),
                 row.get("match_key"),
+                row.get("compare_status_label"),
                 row.get("matched_odoo_count"),
                 row.get("matched_odoo_picking_names"),
                 row.get("matched_odoo_states"),
+                row.get("odoo_pod_index_count"),
+                row.get("odoo_pod_index_links"),
                 sample_document.get("file_url"),
                 sample_document.get("local_file_href"),
                 row.get("reason_code"),
@@ -989,7 +1161,10 @@ def build_reconcile_metric_export_workbook(
             ),
             "found": (
                 config["pod_found_label"],
-                [row for row in dataset["pod_to_odoo_rows"] if row.get("compare_status") == "found_in_odoo"],
+                [
+                    row for row in dataset["pod_to_odoo_rows"]
+                    if row.get("compare_status") in POD_FOUND_IN_ODOO_STATUSES
+                ],
             ),
             "missing": (
                 config["pod_missing_label"],

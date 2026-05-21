@@ -4,6 +4,7 @@ import base64
 import json
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 
@@ -26,6 +27,33 @@ def load_config(path):
     with open(path, "r", encoding="utf-8") as fh:
         full_cfg = normalize_runtime_config(json.load(fh), path)
     return full_cfg["westerman_api"], full_cfg.get("download", {})
+
+
+def _safe_body_summary(body):
+    if isinstance(body, dict):
+        return {"type": "object", "keys": sorted(str(key) for key in body.keys())[:20]}
+    if isinstance(body, list):
+        return {"type": "array", "length": len(body)}
+    return {"type": type(body).__name__}
+
+
+def _allowed_download_hosts(cfg):
+    configured = cfg.get("allowed_download_hosts") or []
+    if isinstance(configured, str):
+        configured = [item.strip() for item in configured.split(",") if item.strip()]
+    hosts = {str(host).lower() for host in configured if host}
+    if not hosts and cfg.get("base_url"):
+        host = (urlparse(cfg["base_url"]).hostname or "").lower()
+        if host:
+            hosts.add(host)
+    return hosts
+
+
+def _ensure_allowed_download_url(cfg, download_url):
+    host = (urlparse(download_url).hostname or "").lower()
+    allowed_hosts = _allowed_download_hosts(cfg)
+    if allowed_hosts and host not in allowed_hosts:
+        raise SystemExit(f"Refusing Westerman download URL from untrusted host: {host}")
 
 
 def get_nested_value(payload, dotted_path):
@@ -75,9 +103,9 @@ def main():
 
     session = requests.Session()
     if method == "POST":
-        response = session.post(url, headers=headers, json=params, timeout=timeout)
+        response = session.post(url, headers=headers, json=params, timeout=timeout, stream=True)
     else:
-        response = session.get(url, headers=headers, params=params, timeout=timeout)
+        response = session.get(url, headers=headers, params=params, timeout=timeout, stream=True)
 
     content_type = response.headers.get("Content-Type") or ""
     result = {
@@ -91,11 +119,11 @@ def main():
     try:
         body = response.json()
         result["body_type"] = "json"
-        result["body"] = body
+        result["body_summary"] = _safe_body_summary(body)
         payload = body
     except ValueError:
         result["body_type"] = "text"
-        result["body_preview"] = response.text[:2000]
+        result["body_preview"] = response.text[:300]
 
     print(json.dumps(result, ensure_ascii=False, indent=2))
     response.raise_for_status()
@@ -110,7 +138,7 @@ def main():
     if "application/pdf" in content_type or content_type.startswith("image/") or content_type == "application/octet-stream":
         suffix = ".pdf" if "pdf" in content_type else ""
         destination = output_dir / sanitize_filename(f"{args.tracking_number}{suffix}")
-        write_result = save_bytes_to_file(response.content, destination)
+        write_result = save_stream_to_file(response, destination)
         manifest_entry = build_manifest_entry(
             source_name="westerman_api",
             source_cfg=cfg,
@@ -185,6 +213,7 @@ def main():
         if download_url_field:
             download_url = get_nested_value(payload, download_url_field)
             if download_url:
+                _ensure_allowed_download_url(cfg, download_url)
                 filename = get_nested_value(payload, file_name_field) or f"{args.tracking_number}.bin"
                 download_response = session.get(download_url, timeout=timeout, stream=True)
                 download_response.raise_for_status()

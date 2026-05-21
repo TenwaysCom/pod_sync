@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import unquote, urlencode, urlsplit
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
@@ -81,6 +81,7 @@ from .phase1a_runs import (
 from .remote_counts import load_remote_count_snapshot
 from .reporting import build_report_context
 from .scheduler import Scheduler
+from .signed_urls import verify_storage_path_token
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -95,13 +96,20 @@ import base64
 import json as _json_lib
 import time
 import os
+import secrets
 
 SESSION_COOKIE = "pod_sync_session"
+CSRF_COOKIE = "pod_sync_csrf"
 SESSION_MAX_AGE = 86400 * 7  # 7 days
+COOKIE_SECURE = os.environ.get("POD_SYNC_COOKIE_SECURE", "").lower() in {"1", "true", "yes", "on"}
+LOGIN_RATE_LIMIT_MAX = int(os.environ.get("POD_SYNC_LOGIN_RATE_LIMIT_MAX", "5"))
+LOGIN_RATE_LIMIT_WINDOW = int(os.environ.get("POD_SYNC_LOGIN_RATE_LIMIT_WINDOW", "600"))
+_LOGIN_FAILURES: dict[str, list[float]] = {}
 
 # Read admin password: env var > config.local.json > default
 ADMIN_PASSWORD = os.environ.get("POD_SYNC_ADMIN_PASSWORD", "")
 ENABLE_PASSWORD_LOGIN = True
+AUTH_CONFIGURATION_ERROR = ""
 if not ADMIN_PASSWORD:
     try:
         _cfg_path = PROJECT_ROOT / "config.local.json"
@@ -111,10 +119,8 @@ if not ADMIN_PASSWORD:
             ENABLE_PASSWORD_LOGIN = _cfg.get("enable_password_login", True)
     except Exception:
         pass
-if not ADMIN_PASSWORD:
-    ADMIN_PASSWORD = "pod_sync_admin"
-    import warnings
-    warnings.warn("POD_SYNC_ADMIN_PASSWORD not set. Using default password 'pod_sync_admin'.")
+if ENABLE_PASSWORD_LOGIN and not ADMIN_PASSWORD:
+    AUTH_CONFIGURATION_ERROR = "POD_SYNC_ADMIN_PASSWORD or config.local.json admin_password must be configured."
 
 SESSION_SECRET = os.environ.get("POD_SYNC_SECRET_KEY", "")
 if not SESSION_SECRET:
@@ -150,6 +156,128 @@ def _is_authenticated(request: Request) -> bool:
         return False
     session = _decode_session(cookie, SESSION_SECRET)
     return bool(session and session.get("role") == "admin")
+
+
+def _cookie_secure(request: Request) -> bool:
+    return COOKIE_SECURE or request.url.scheme == "https"
+
+
+def _encode_csrf_token(token: str) -> str:
+    return f"{token}.{_sign('csrf:' + token, SESSION_SECRET)}"
+
+
+def _decode_csrf_cookie(cookie: str | None) -> str | None:
+    if not cookie:
+        return None
+    try:
+        token, sig = cookie.split(".", 1)
+    except ValueError:
+        return None
+    if not hmac.compare_digest(sig, _sign("csrf:" + token, SESSION_SECRET)):
+        return None
+    return token
+
+
+def _csrf_token_for_response(request: Request) -> tuple[str, str | None]:
+    token = _decode_csrf_cookie(request.cookies.get(CSRF_COOKIE))
+    if token:
+        return token, None
+    token = secrets.token_urlsafe(32)
+    return token, _encode_csrf_token(token)
+
+
+async def _request_csrf_token(request: Request) -> str:
+    header_token = request.headers.get("x-csrf-token")
+    if header_token:
+        return header_token
+    try:
+        form = await request.form()
+    except Exception:
+        return ""
+    value = form.get("csrf_token")
+    return str(value or "")
+
+
+def _same_origin(request: Request) -> bool:
+    host = request.headers.get("host") or request.url.netloc
+    saw_origin_header = False
+    for header_name in ("origin", "referer"):
+        value = request.headers.get(header_name)
+        if not value:
+            continue
+        saw_origin_header = True
+        parsed = urlsplit(value)
+        if parsed.netloc and parsed.netloc != host:
+            return False
+    return saw_origin_header
+
+
+async def _is_valid_csrf(request: Request) -> bool:
+    cookie_token = _decode_csrf_cookie(request.cookies.get(CSRF_COOKIE))
+    submitted_token = await _request_csrf_token(request)
+    if cookie_token and submitted_token and hmac.compare_digest(cookie_token, submitted_token):
+        return True
+    return _same_origin(request)
+
+
+def _get_storage_file_secret() -> str:
+    env_secret = os.environ.get("POD_SYNC_FILE_URL_SECRET", "")
+    if env_secret:
+        return env_secret
+    try:
+        cfg_path = PROJECT_ROOT / "config.local.json"
+        if cfg_path.exists():
+            cfg = _json_lib.loads(cfg_path.read_text(encoding="utf-8"))
+            return str((cfg.get("pod_sync") or {}).get("file_url_secret") or "")
+    except Exception:
+        return ""
+    return ""
+
+
+def _storage_relative_path_from_request(request: Request) -> str:
+    prefix = "/storage/files/"
+    path = request.url.path
+    if path.startswith(prefix):
+        return unquote(path[len(prefix):])
+    return ""
+
+
+def _has_valid_storage_signature(request: Request) -> bool:
+    relative_path = _storage_relative_path_from_request(request)
+    return verify_storage_path_token(relative_path, request.query_params.get("token"), _get_storage_file_secret())
+
+
+def _login_client_key(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _recent_login_failures(request: Request) -> list[float]:
+    now = time.time()
+    cutoff = now - LOGIN_RATE_LIMIT_WINDOW
+    key = _login_client_key(request)
+    failures = [stamp for stamp in _LOGIN_FAILURES.get(key, []) if stamp >= cutoff]
+    _LOGIN_FAILURES[key] = failures
+    return failures
+
+
+def _is_login_rate_limited(request: Request) -> bool:
+    if LOGIN_RATE_LIMIT_MAX <= 0:
+        return False
+    return len(_recent_login_failures(request)) >= LOGIN_RATE_LIMIT_MAX
+
+
+def _record_login_failure(request: Request):
+    key = _login_client_key(request)
+    failures = _recent_login_failures(request)
+    failures.append(time.time())
+    _LOGIN_FAILURES[key] = failures
+
+
+def _clear_login_failures(request: Request):
+    _LOGIN_FAILURES.pop(_login_client_key(request), None)
 
 
 JOB_STATUS_LABELS = {
@@ -238,6 +366,7 @@ POD_COMPARE_ARTIFACT_LABELS = {
     # "summary_csv": "来源汇总 CSV",
     "matched_csv": "匹配成功 CSV",
     "matched_cancelled_csv": "匹配到已取消单 CSV",
+    "matched_other_carrier_csv": "命中其他承运商 CSV",
     "not_found_csv": "按匹配键未命中 Odoo CSV",
     "ambiguous_csv": "Odoo 命中多条 CSV",
     # "snapshot_json": "快照 JSON",
@@ -279,6 +408,7 @@ scheduler.start()
 
 
 def render(request: Request, template_name: str, *, page_id: str, **context):
+    csrf_token, csrf_cookie = _csrf_token_for_response(request)
     flash = {
         "notice": request.query_params.get("notice"),
         "error": request.query_params.get("error"),
@@ -299,9 +429,21 @@ def render(request: Request, template_name: str, *, page_id: str, **context):
         "primary_artifact_keys": PRIMARY_ARTIFACT_KEYS,
         "secondary_artifact_keys": SECONDARY_ARTIFACT_KEYS,
         "display_value": display_value,
+        "csrf_token": csrf_token,
     }
     base_context.update(context)
-    return templates.TemplateResponse(request=request, name=template_name, context=base_context)
+    response = templates.TemplateResponse(request=request, name=template_name, context=base_context)
+    if csrf_cookie:
+        response.set_cookie(
+            CSRF_COOKIE,
+            csrf_cookie,
+            max_age=SESSION_MAX_AGE,
+            httponly=True,
+            samesite="lax",
+            secure=_cookie_secure(request),
+            path="/",
+        )
+    return response
 
 
 def redirect_with_error(path: str, message: str):
@@ -313,54 +455,83 @@ def redirect_with_notice(path: str, message: str):
 
 
 def normalize_redirect_target(target: str | None, fallback: str):
-    if target and target.startswith("/"):
+    if target:
+        parsed = urlsplit(target)
+        if parsed.scheme or parsed.netloc:
+            return fallback
+    if target and target.startswith("/") and not target.startswith("//"):
         return target
     return fallback
 
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    if path == "/storage/files" or path.startswith("/storage/files/"):
+        if _is_authenticated(request) or _has_valid_storage_signature(request):
+            return await call_next(request)
+        return RedirectResponse(url=f"/login?{urlencode({'next': path})}", status_code=303)
+
     if not ENABLE_PASSWORD_LOGIN:
         return await call_next(request)
-    path = request.url.path
-    public_paths = {"/login", "/logout", "/static", "/favicon.ico", "/api/odoo-status", "/storage/files"}
-    if any(path.startswith(p) for p in public_paths):
+
+    if path == "/login" or path == "/favicon.ico" or path.startswith("/static/"):
         return await call_next(request)
+    if AUTH_CONFIGURATION_ERROR:
+        return PlainTextResponse(AUTH_CONFIGURATION_ERROR, status_code=503)
     if not _is_authenticated(request):
-        return RedirectResponse(url=f"/login?next={path}", status_code=303)
+        next_target = path
+        if request.url.query:
+            next_target = f"{next_target}?{request.url.query}"
+        return RedirectResponse(url=f"/login?{urlencode({'next': next_target})}", status_code=303)
+    if request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+        if not await _is_valid_csrf(request):
+            return PlainTextResponse("Invalid CSRF token.", status_code=403)
     return await call_next(request)
 
 
 @app.get("/login", response_class=HTMLResponse, name="login")
 async def login_page(request: Request, next: str = "/", error: str = ""):
+    safe_next = normalize_redirect_target(next, "/")
+    if AUTH_CONFIGURATION_ERROR:
+        return PlainTextResponse(AUTH_CONFIGURATION_ERROR, status_code=503)
     if not ENABLE_PASSWORD_LOGIN:
-        return RedirectResponse(url=next or "/", status_code=303)
+        return RedirectResponse(url=safe_next, status_code=303)
     if _is_authenticated(request):
-        return RedirectResponse(url=next, status_code=303)
+        return RedirectResponse(url=safe_next, status_code=303)
     return templates.TemplateResponse(
         request=request,
         name="login.html",
-        context={"request": TemplateRequestProxy(request), "next": next, "error": error},
+        context={"request": TemplateRequestProxy(request), "next": safe_next, "error": error},
     )
 
 
 @app.post("/login", name="login_post")
 async def login_post(request: Request, password: str = Form(""), next: str = Form("/")):
+    safe_next = normalize_redirect_target(next, "/")
+    if AUTH_CONFIGURATION_ERROR:
+        return PlainTextResponse(AUTH_CONFIGURATION_ERROR, status_code=503)
     if not ENABLE_PASSWORD_LOGIN:
-        return RedirectResponse(url=next or "/", status_code=303)
-    if password == ADMIN_PASSWORD:
+        return RedirectResponse(url=safe_next, status_code=303)
+    if _is_login_rate_limited(request):
+        params = {"next": safe_next, "error": "登录失败次数过多，请稍后再试"}
+        return RedirectResponse(url=f"/login?{urlencode(params)}", status_code=303)
+    if hmac.compare_digest(password, ADMIN_PASSWORD):
+        _clear_login_failures(request)
         session = {"role": "admin", "exp": time.time() + SESSION_MAX_AGE}
-        response = RedirectResponse(url=next, status_code=303)
+        response = RedirectResponse(url=safe_next, status_code=303)
         response.set_cookie(
             SESSION_COOKIE,
             _encode_session(session, SESSION_SECRET),
             max_age=SESSION_MAX_AGE,
             httponly=True,
             samesite="lax",
+            secure=_cookie_secure(request),
             path="/",
         )
         return response
-    params = {"next": next, "error": "密码错误"}
+    _record_login_failure(request)
+    params = {"next": safe_next, "error": "密码错误"}
     return RedirectResponse(url=f"/login?{urlencode(params)}", status_code=303)
 
 
@@ -368,6 +539,7 @@ async def login_post(request: Request, password: str = Form(""), next: str = For
 async def logout_post():
     response = RedirectResponse(url="/login", status_code=303)
     response.delete_cookie(SESSION_COOKIE, path="/")
+    response.delete_cookie(CSRF_COOKIE, path="/")
     return response
 
 
@@ -808,6 +980,9 @@ async def api_reconcile_push_to_odoo(
         source_name=source_name or "unknown",
         dry_run=False,
     )
+    if result.get("status") in {"pushed_tracking", "created_tracking", "skipped_same"}:
+        from . import emtc_reconcile
+        emtc_reconcile._load_reconcile_dataset_cached.cache_clear()
     return JSONResponse(result)
 
 
@@ -920,7 +1095,9 @@ async def phase1a_artifact(run_name: str, artifact_key: str):
 
 
 @app.get("/storage/files/{relative_path:path}")
-async def storage_file(relative_path: str):
+async def storage_file(request: Request, relative_path: str):
+    if not _is_authenticated(request) and not _has_valid_storage_signature(request):
+        raise HTTPException(status_code=403, detail="文件访问未授权。")
     path = resolve_storage_file(resolve_storage_dir(), relative_path)
     if not path:
         raise HTTPException(status_code=404, detail="未找到文件。")
