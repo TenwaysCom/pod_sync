@@ -175,19 +175,20 @@ class Scheduler:
         return job["job_id"]
 
     def tick(self):
-        cfg = self.load_config()
-        if not cfg.get("enabled", False):
-            return
+        with self._lock:
+            cfg = self.load_config()
+            if not cfg.get("enabled", False):
+                return
 
-        next_run_at = _parse_iso(cfg.get("next_run_at"))
-        if next_run_at is None or next_run_at <= _utc_now():
-            job_id = self._run_pipeline_job()
-            cfg["last_run_at"] = _fmt_iso(_utc_now())
-            cfg["last_run_job_id"] = job_id
-            cfg["last_run_ok"] = None  # Will be reconciled later if needed
-            cfg["next_run_at"] = _fmt_iso(self.compute_next_run(cfg)) if job_id else None
-            self.save_config(cfg)
-            self._log(f"Tick executed. Next run at {cfg['next_run_at']}")
+            next_run_at = _parse_iso(cfg.get("next_run_at"))
+            if next_run_at is None or next_run_at <= _utc_now():
+                job_id = self._run_pipeline_job()
+                cfg["last_run_at"] = _fmt_iso(_utc_now())
+                cfg["last_run_job_id"] = job_id
+                cfg["last_run_ok"] = None  # Will be reconciled later if needed
+                cfg["next_run_at"] = _fmt_iso(self.compute_next_run(cfg)) if job_id else None
+                self.save_config(cfg)
+                self._log(f"Tick executed. Next run at {cfg['next_run_at']}")
 
     def _loop(self):
         self._log("Scheduler loop started")
