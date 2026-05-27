@@ -421,7 +421,6 @@ scheduler.start()
 
 
 def render(request: Request, template_name: str, *, page_id: str, **context):
-    csrf_token, csrf_cookie = _csrf_token_for_response(request)
     flash = {
         "notice": request.query_params.get("notice"),
         "error": request.query_params.get("error"),
@@ -442,21 +441,9 @@ def render(request: Request, template_name: str, *, page_id: str, **context):
         "primary_artifact_keys": PRIMARY_ARTIFACT_KEYS,
         "secondary_artifact_keys": SECONDARY_ARTIFACT_KEYS,
         "display_value": display_value,
-        "csrf_token": csrf_token,
     }
     base_context.update(context)
-    response = templates.TemplateResponse(request=request, name=template_name, context=base_context)
-    if csrf_cookie:
-        response.set_cookie(
-            CSRF_COOKIE,
-            csrf_cookie,
-            max_age=SESSION_MAX_AGE,
-            httponly=True,
-            samesite="lax",
-            secure=_cookie_secure(request),
-            path="/",
-        )
-    return response
+    return templates.TemplateResponse(request=request, name=template_name, context=base_context)
 
 
 def redirect_with_error(path: str, message: str):
@@ -479,81 +466,22 @@ def normalize_redirect_target(target: str | None, fallback: str):
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    path = request.url.path
-    if path == "/storage/files" or path.startswith("/storage/files/"):
-        if _is_authenticated(request) or _has_valid_storage_signature(request):
-            return await call_next(request)
-        return RedirectResponse(url=f"/login?{urlencode({'next': path})}", status_code=303)
-
-    if not ENABLE_PASSWORD_LOGIN:
-        return await call_next(request)
-
-    if path == "/login" or path == "/favicon.ico" or path.startswith("/static/"):
-        return await call_next(request)
-    if AUTH_CONFIGURATION_ERROR:
-        return PlainTextResponse(AUTH_CONFIGURATION_ERROR, status_code=503)
-    if not _is_authenticated(request):
-        next_target = path
-        if request.url.query:
-            next_target = f"{next_target}?{request.url.query}"
-        return RedirectResponse(url=f"/login?{urlencode({'next': next_target})}", status_code=303)
-    if request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
-        if not await _is_valid_csrf(request):
-            return PlainTextResponse("Invalid CSRF token.", status_code=403)
     return await call_next(request)
 
 
 @app.get("/login", response_class=HTMLResponse, name="login")
 async def login_page(request: Request, next: str = "/", error: str = ""):
-    safe_next = normalize_redirect_target(next, "/")
-    if AUTH_CONFIGURATION_ERROR:
-        return PlainTextResponse(AUTH_CONFIGURATION_ERROR, status_code=503)
-    if not ENABLE_PASSWORD_LOGIN:
-        return RedirectResponse(url=safe_next, status_code=303)
-    if _is_authenticated(request):
-        return RedirectResponse(url=safe_next, status_code=303)
-    return templates.TemplateResponse(
-        request=request,
-        name="login.html",
-        context={"request": TemplateRequestProxy(request), "next": safe_next, "error": error},
-    )
+    return RedirectResponse(url=normalize_redirect_target(next, "/"), status_code=303)
 
 
 @app.post("/login", name="login_post")
 async def login_post(request: Request, password: str = Form(""), next: str = Form("/")):
-    safe_next = normalize_redirect_target(next, "/")
-    if AUTH_CONFIGURATION_ERROR:
-        return PlainTextResponse(AUTH_CONFIGURATION_ERROR, status_code=503)
-    if not ENABLE_PASSWORD_LOGIN:
-        return RedirectResponse(url=safe_next, status_code=303)
-    if _is_login_rate_limited(request):
-        params = {"next": safe_next, "error": "登录失败次数过多，请稍后再试"}
-        return RedirectResponse(url=f"/login?{urlencode(params)}", status_code=303)
-    if hmac.compare_digest(password, ADMIN_PASSWORD):
-        _clear_login_failures(request)
-        session = {"role": "admin", "exp": time.time() + SESSION_MAX_AGE}
-        response = RedirectResponse(url=safe_next, status_code=303)
-        response.set_cookie(
-            SESSION_COOKIE,
-            _encode_session(session, SESSION_SECRET),
-            max_age=SESSION_MAX_AGE,
-            httponly=True,
-            samesite="lax",
-            secure=_cookie_secure(request),
-            path="/",
-        )
-        return response
-    _record_login_failure(request)
-    params = {"next": safe_next, "error": "密码错误"}
-    return RedirectResponse(url=f"/login?{urlencode(params)}", status_code=303)
+    return RedirectResponse(url=normalize_redirect_target(next, "/"), status_code=303)
 
 
 @app.post("/logout", name="logout")
 async def logout_post():
-    response = RedirectResponse(url="/login", status_code=303)
-    response.delete_cookie(SESSION_COOKIE, path="/")
-    response.delete_cookie(CSRF_COOKIE, path="/")
-    return response
+    return RedirectResponse(url="/login", status_code=303)
 
 
 @app.get("/favicon.ico")
