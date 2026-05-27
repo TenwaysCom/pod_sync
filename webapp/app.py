@@ -441,6 +441,7 @@ def render(request: Request, template_name: str, *, page_id: str, **context):
         "primary_artifact_keys": PRIMARY_ARTIFACT_KEYS,
         "secondary_artifact_keys": SECONDARY_ARTIFACT_KEYS,
         "display_value": display_value,
+        "csrf_token": "",
     }
     base_context.update(context)
     return templates.TemplateResponse(request=request, name=template_name, context=base_context)
