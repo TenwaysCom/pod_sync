@@ -124,7 +124,19 @@ if ENABLE_PASSWORD_LOGIN and not ADMIN_PASSWORD:
 
 SESSION_SECRET = os.environ.get("POD_SYNC_SECRET_KEY", "")
 if not SESSION_SECRET:
-    SESSION_SECRET = os.urandom(32).hex()
+    secret_file = PROJECT_ROOT / "runtime" / ".session_secret"
+    try:
+        SESSION_SECRET = secret_file.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        pass
+    if not SESSION_SECRET:
+        SESSION_SECRET = os.urandom(32).hex()
+        secret_file.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            secret_file.write_text(SESSION_SECRET, encoding="utf-8")
+            os.chmod(secret_file, 0o600)
+        except OSError:
+            pass
 
 
 def _sign(value: str, secret: str) -> str:
