@@ -17,6 +17,7 @@ import xmlrpc.client
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -72,9 +73,6 @@ def get_local_file_url(full_cfg: dict, local_path: str) -> str | None:
     base_url = pod_sync_cfg.get("base_url", "").rstrip("/")
     if not base_url:
         return None
-    file_url_secret = pod_sync_cfg.get("file_url_secret", "")
-    if not is_valid_file_url_secret(file_url_secret):
-        return None
 
     download_cfg = full_cfg.get("download", {})
     base_dir = download_cfg.get("base_dir", "")
@@ -85,9 +83,15 @@ def get_local_file_url(full_cfg: dict, local_path: str) -> str | None:
         local = Path(local_path).resolve()
         base = Path(base_dir).resolve()
         rel = local.relative_to(base)
-        return build_signed_storage_url(base_url, rel.as_posix(), file_url_secret)
     except (ValueError, TypeError):
         return None
+
+    file_url_secret = pod_sync_cfg.get("file_url_secret", "")
+    if is_valid_file_url_secret(file_url_secret):
+        return build_signed_storage_url(base_url, rel.as_posix(), file_url_secret)
+
+    encoded = "/".join(quote(part, safe="") for part in rel.as_posix().split("/"))
+    return f"{base_url}/storage/files/{encoded}"
 
 
 def connect_odoo(odoo_cfg: dict):
