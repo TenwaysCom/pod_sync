@@ -130,13 +130,14 @@ if not SESSION_SECRET:
     except FileNotFoundError:
         pass
     if not SESSION_SECRET:
-        SESSION_SECRET = os.urandom(32).hex()
         secret_file.parent.mkdir(parents=True, exist_ok=True)
         try:
-            secret_file.write_text(SESSION_SECRET, encoding="utf-8")
-            os.chmod(secret_file, 0o600)
-        except OSError:
+            fd = os.open(str(secret_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.write(fd, os.urandom(32).hex().encode())
+            os.close(fd)
+        except FileExistsError:
             pass
+        SESSION_SECRET = secret_file.read_text(encoding="utf-8").strip()
 
 
 def _sign(value: str, secret: str) -> str:
