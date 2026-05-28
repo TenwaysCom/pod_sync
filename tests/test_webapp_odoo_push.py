@@ -22,6 +22,7 @@ class OdooPushTests(unittest.TestCase):
 
     def test_push_single_item_rejects_multiple_tracking_matches(self):
         with mock.patch.object(odoo_push, "load_config", return_value=self._config()), \
+            mock.patch.object(odoo_push, "resolve_push_file_url", return_value=("https://files.test/pod.pdf", None, "local")), \
             mock.patch.object(odoo_push, "connect_odoo", return_value=(FakeCommon(), object())), \
             mock.patch.object(
                 odoo_push,
@@ -41,6 +42,7 @@ class OdooPushTests(unittest.TestCase):
 
     def test_push_single_item_does_not_create_tracking_from_picking_name(self):
         with mock.patch.object(odoo_push, "load_config", return_value=self._config()), \
+            mock.patch.object(odoo_push, "resolve_push_file_url", return_value=("https://files.test/pod.pdf", None, "local")), \
             mock.patch.object(odoo_push, "connect_odoo", return_value=(FakeCommon(), object())), \
             mock.patch.object(odoo_push, "search_picking", return_value=[{"id": 100, "name": "WCB2B/OUT/100"}]), \
             mock.patch.object(odoo_push, "search_stock_tracking_by_picking_id", return_value=[]), \
@@ -60,6 +62,7 @@ class OdooPushTests(unittest.TestCase):
 
         index = ExistingPodIndex()
         with mock.patch.object(odoo_push, "load_config", return_value=self._config()), \
+            mock.patch.object(odoo_push, "resolve_push_file_url", return_value=("https://files.test/pod.pdf", None, "local")), \
             mock.patch.object(odoo_push, "connect_odoo", return_value=(FakeCommon(), object())), \
             mock.patch.object(
                 odoo_push,
@@ -82,7 +85,7 @@ class OdooPushTests(unittest.TestCase):
         self.assertTrue(index.updated_at)
         save_mock.assert_called_once_with(index)
 
-    def test_local_file_url_rejects_placeholder_secret(self):
+    def test_local_file_url_uses_unsigned_url_when_secret_is_invalid(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             local_file = tmp_path / "CMC" / "proof.pdf"
@@ -96,7 +99,26 @@ class OdooPushTests(unittest.TestCase):
                 "download": {"base_dir": str(tmp_path)},
             }
 
-            self.assertIsNone(odoo_push.get_local_file_url(cfg, str(local_file)))
+            self.assertEqual(
+                odoo_push.get_local_file_url(cfg, str(local_file)),
+                "https://pod.example.test/storage/files/CMC/proof.pdf",
+            )
+
+    def test_resolve_push_file_url_refuses_source_link_without_local_path(self):
+        cfg = {
+            "pod_sync": {"base_url": "https://pod.example.test"},
+            "download": {"base_dir": "/tmp/pod"},
+        }
+
+        file_url, error, source = odoo_push.resolve_push_file_url(
+            cfg,
+            local_path="",
+            source_file_url="https://drive.google.com/uc?id=source&export=download",
+        )
+
+        self.assertEqual(file_url, "")
+        self.assertEqual(source, "missing_local")
+        self.assertIn("refusing to push source POD link", error)
 
     def test_payload_lookup_key_converts_canonical_picking_name(self):
         key_type, key_value = odoo_push._payload_lookup_key(

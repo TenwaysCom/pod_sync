@@ -94,6 +94,50 @@ def get_local_file_url(full_cfg: dict, local_path: str) -> str | None:
     return f"{base_url}/storage/files/{encoded}"
 
 
+def explain_local_file_url_failure(full_cfg: dict, local_path: str | None) -> str:
+    """Return a concise, non-secret reason local POD URL generation would fail."""
+    if not local_path:
+        return "missing local_path; refusing to push source POD link"
+
+    pod_sync_cfg = full_cfg.get("pod_sync", {})
+    base_url = pod_sync_cfg.get("base_url", "").strip()
+    if not base_url:
+        return "missing pod_sync.base_url; refusing to push source POD link"
+
+    download_cfg = full_cfg.get("download", {})
+    base_dir = download_cfg.get("base_dir", "")
+    if not base_dir:
+        return "missing download.base_dir; refusing to push source POD link"
+
+    try:
+        local = Path(local_path).resolve()
+        base = Path(base_dir).resolve()
+        local.relative_to(base)
+    except (ValueError, TypeError):
+        return f"local_path is outside download.base_dir ({base_dir}); refusing to push source POD link"
+
+    return "unable to build local POD URL; refusing to push source POD link"
+
+
+def resolve_push_file_url(
+    full_cfg: dict,
+    *,
+    local_path: str | None,
+    source_file_url: str | None,
+) -> tuple[str, str | None, str]:
+    """Resolve the POD URL to write to Odoo.
+
+    Local pod_sync URLs are the only supported push target. Source URLs from
+    OneDrive/GDrive are useful for comparison pages, but must not be written back
+    to Odoo.
+    """
+    local_file_url = get_local_file_url(full_cfg, local_path or "")
+    if local_file_url:
+        return local_file_url, None, "local"
+
+    return "", explain_local_file_url_failure(full_cfg, local_path), "missing_local"
+
+
 def connect_odoo(odoo_cfg: dict):
     url = odoo_cfg.get("url", "").rstrip("/")
     if not url:
@@ -438,9 +482,11 @@ def push_payload(
         payload_item_id = item.get("payload_item_id", "")
         source_modified_at = item.get("source_modified_at", "")
 
-        # Prefer local file interface URL over source file URL
-        local_file_url = get_local_file_url(full_cfg, local_path)
-        file_url = local_file_url if local_file_url else source_file_url
+        file_url, file_url_error, file_url_source = resolve_push_file_url(
+            full_cfg,
+            local_path=local_path,
+            source_file_url=source_file_url,
+        )
 
         # Derive pod_time from file metadata or use current time
         pod_time = _iso_to_odoo_datetime(source_modified_at) or _utc_now_str()
@@ -451,6 +497,9 @@ def push_payload(
             "key_type": key_type,
             "key_value": key_value,
             "file_url": file_url,
+            "file_url_source": file_url_source,
+            "source_file_url": source_file_url,
+            "local_path": local_path,
             "status": "pending",
             "target_model": None,
             "target_id": None,
@@ -476,7 +525,7 @@ def push_payload(
 
         if not key_value or not file_url:
             detail["status"] = "skipped"
-            detail["error"] = "missing key or file_url"
+            detail["error"] = "missing key" if not key_value else file_url_error or "missing local file_url"
             results["details"].append(detail)
             continue
 
@@ -688,9 +737,26 @@ def push_single_item(
     if missing:
         return {"ok": False, "error": f"Missing Odoo config keys: {missing}"}
 
-    # Prefer local file URL
-    local_file_url = get_local_file_url(full_cfg, local_path) if local_path else None
-    final_url = local_file_url if local_file_url else file_url
+    final_url, file_url_error, file_url_source = resolve_push_file_url(
+        full_cfg,
+        local_path=local_path,
+        source_file_url=file_url,
+    )
+    if not final_url:
+        return {
+            "ok": False,
+            "match_key": match_key,
+            "match_key_type": match_key_type,
+            "file_url": "",
+            "file_url_source": file_url_source,
+            "source_file_url": file_url,
+            "local_path": local_path,
+            "status": "skipped",
+            "target_model": None,
+            "target_id": None,
+            "target_name": None,
+            "error": file_url_error or "missing local file_url",
+        }
 
     common, models = connect_odoo(odoo_cfg)
     try:
@@ -707,6 +773,9 @@ def push_single_item(
         "match_key": key_value,
         "match_key_type": key_type,
         "file_url": final_url,
+        "file_url_source": file_url_source,
+        "source_file_url": file_url,
+        "local_path": local_path,
         "status": "pending",
         "target_model": None,
         "target_id": None,
@@ -927,6 +996,13 @@ def preflight_payload(
         key_type, key_value = _payload_lookup_key(item)
         source = item.get("source_name", "unknown")
         payload_item_id = item.get("payload_item_id", "")
+        source_file_url = item.get("file_url", "")
+        local_path = item.get("local_path", "")
+        file_url, file_url_error, file_url_source = resolve_push_file_url(
+            full_cfg,
+            local_path=local_path,
+            source_file_url=source_file_url,
+        )
 
         entry = {
             "payload_item_id": payload_item_id,
@@ -936,9 +1012,15 @@ def preflight_payload(
             "picking_name": item.get("picking_name"),
             "tracking_number": item.get("tracking_number"),
             "file_name": item.get("file_name"),
+            "file_url": file_url,
+            "file_url_source": file_url_source,
         }
 
-        if not key_value:
+        if not key_value or not file_url:
+            if not key_value:
+                entry["error"] = "missing key"
+            else:
+                entry["error"] = file_url_error or "missing local file_url"
             invalid.append(entry)
             continue
 
