@@ -85,6 +85,8 @@ def get_local_file_url(full_cfg: dict, local_path: str) -> str | None:
         rel = local.relative_to(base)
     except (ValueError, TypeError):
         return None
+    if not local.is_file():
+        return None
 
     file_url_secret = pod_sync_cfg.get("file_url_secret", "")
     if is_valid_file_url_secret(file_url_secret):
@@ -115,6 +117,8 @@ def explain_local_file_url_failure(full_cfg: dict, local_path: str | None) -> st
         local.relative_to(base)
     except (ValueError, TypeError):
         return f"local_path is outside download.base_dir ({base_dir}); refusing to push source POD link"
+    if not local.is_file():
+        return "local_path does not exist; refusing to push source POD link"
 
     return "unable to build local POD URL; refusing to push source POD link"
 
@@ -374,6 +378,12 @@ def create_stock_tracking(models, odoo_cfg: dict, picking_id: int, tracking_numb
     return models.execute_kw(db, uid, password, "stock.tracking", "create", [vals])
 
 
+def _pod_link_overwrite_error(current_pod_link: str | None, target_pod_link: str) -> str | None:
+    if current_pod_link and str(current_pod_link) != target_pod_link:
+        return "stock.tracking already has a different pod_link; skip automatic overwrite"
+    return None
+
+
 def push_payload(
     *,
     config_path: str,
@@ -566,6 +576,15 @@ def push_payload(
                     results["tracking_skipped_same"] += 1
                     results["details"].append(detail)
                     continue
+                overwrite_error = _pod_link_overwrite_error(current_pod_link, file_url)
+                if overwrite_error:
+                    detail["status"] = "needs_review"
+                    detail["error"] = overwrite_error
+                    detail["existing_pod_link"] = str(current_pod_link)
+                    results["needs_review"] += 1
+                    results["by_source"][source]["needs_review"] += 1
+                    results["details"].append(detail)
+                    continue
 
                 if dry_run:
                     detail["status"] = "dry_run_tracking"
@@ -651,16 +670,25 @@ def push_payload(
             current_pod_link = track.get("pod_link")
             detail["target_id"] = tracking_id
 
+            if current_pod_link and str(current_pod_link) == file_url:
+                detail["status"] = "skipped_same"
+                results["tracking_skipped_same"] += 1
+                results["details"].append(detail)
+                continue
+            overwrite_error = _pod_link_overwrite_error(current_pod_link, file_url)
+            if overwrite_error:
+                detail["status"] = "needs_review"
+                detail["error"] = overwrite_error
+                detail["existing_pod_link"] = str(current_pod_link)
+                results["needs_review"] += 1
+                results["by_source"][source]["needs_review"] += 1
+                results["details"].append(detail)
+                continue
+
             if dry_run:
                 detail["status"] = "dry_run_tracking"
                 results["tracking_pushed"] += 1
                 results["by_source"][source]["tracking_pushed"] += 1
-                results["details"].append(detail)
-                continue
-
-            if current_pod_link and str(current_pod_link) == file_url:
-                detail["status"] = "skipped_same"
-                results["tracking_skipped_same"] += 1
                 results["details"].append(detail)
                 continue
 
@@ -819,6 +847,12 @@ def push_single_item(
             if current_pod_link and str(current_pod_link) == final_url:
                 result["status"] = "skipped_same"
                 return finish()
+            overwrite_error = _pod_link_overwrite_error(current_pod_link, final_url)
+            if overwrite_error:
+                result["status"] = "needs_review"
+                result["error"] = overwrite_error
+                result["existing_pod_link"] = str(current_pod_link)
+                return finish()
 
             if dry_run:
                 result["status"] = "dry_run_tracking"
@@ -876,13 +910,19 @@ def push_single_item(
         result["target_id"] = primary_track.get("id")
         result["target_name"] = primary_track.get("tracking_number")
 
-        if dry_run:
-            result["status"] = "dry_run_tracking"
-            return finish()
-
         current_pod_link = primary_track.get("pod_link")
         if current_pod_link and str(current_pod_link) == final_url:
             result["status"] = "skipped_same"
+            return finish()
+        overwrite_error = _pod_link_overwrite_error(current_pod_link, final_url)
+        if overwrite_error:
+            result["status"] = "needs_review"
+            result["error"] = overwrite_error
+            result["existing_pod_link"] = str(current_pod_link)
+            return finish()
+
+        if dry_run:
+            result["status"] = "dry_run_tracking"
             return finish()
 
         try:

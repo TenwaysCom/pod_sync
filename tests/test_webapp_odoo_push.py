@@ -1,3 +1,4 @@
+import json
 import sys
 import tempfile
 import unittest
@@ -14,6 +15,17 @@ from webapp import odoo_push
 class FakeCommon:
     def version(self):
         return {"server_version": "test"}
+
+
+class EmptyExistingIndex:
+    def summary(self):
+        return {"total_loaded": 0}
+
+    def has_pod(self, *, tracking_number=None, picking_name=None):
+        return False
+
+    def get_pod_info(self, *, tracking_number=None, picking_name=None):
+        return None
 
 
 class OdooPushTests(unittest.TestCase):
@@ -119,6 +131,81 @@ class OdooPushTests(unittest.TestCase):
         self.assertEqual(file_url, "")
         self.assertEqual(source, "missing_local")
         self.assertIn("refusing to push source POD link", error)
+
+    def test_resolve_push_file_url_refuses_missing_local_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = {
+                "pod_sync": {"base_url": "https://pod.example.test"},
+                "download": {"base_dir": tmpdir},
+            }
+            missing_file = Path(tmpdir) / "CMC" / "missing.pdf"
+
+            file_url, error, source = odoo_push.resolve_push_file_url(
+                cfg,
+                local_path=str(missing_file),
+                source_file_url="https://drive.google.com/uc?id=source&export=download",
+            )
+
+        self.assertEqual(file_url, "")
+        self.assertEqual(source, "missing_local")
+        self.assertIn("does not exist", error)
+
+    def test_push_single_item_does_not_overwrite_different_existing_pod(self):
+        with mock.patch.object(odoo_push, "load_config", return_value=self._config()), \
+            mock.patch.object(odoo_push, "resolve_push_file_url", return_value=("https://files.test/new.pdf", None, "local")), \
+            mock.patch.object(odoo_push, "connect_odoo", return_value=(FakeCommon(), object())), \
+            mock.patch.object(
+                odoo_push,
+                "search_stock_tracking",
+                return_value=[{"id": 10, "tracking_number": "TN1", "pod_link": "https://files.test/old.pdf"}],
+            ), \
+            mock.patch.object(odoo_push, "write_tracking_pod") as write_mock:
+            result = odoo_push.push_single_item(
+                config_path="config.local.json",
+                match_key="TN1",
+                match_key_type="tracking_number",
+                file_url="https://files.test/new.pdf",
+            )
+
+        self.assertEqual(result["status"], "needs_review")
+        self.assertIn("different pod_link", result["error"])
+        write_mock.assert_not_called()
+
+    def test_push_payload_does_not_overwrite_different_existing_pod(self):
+        payload = {
+            "items": [
+                {
+                    "identifier_status": "ready",
+                    "preferred_key_type": "tracking_number",
+                    "preferred_key": "TN1",
+                    "file_url": "https://drive.google.com/uc?id=source&export=download",
+                    "local_path": "/tmp/pod/CMC/proof.pdf",
+                    "source_name": "EMTC",
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            payload_path = Path(tmpdir) / "payload.json"
+            payload_path.write_text(json.dumps(payload), encoding="utf-8")
+            with mock.patch.object(odoo_push, "load_config", return_value=self._config()), \
+                mock.patch.object(odoo_push, "resolve_push_file_url", return_value=("https://files.test/new.pdf", None, "local")), \
+                mock.patch("webapp.odoo_pull.get_index", return_value=EmptyExistingIndex()), \
+                mock.patch.object(odoo_push, "connect_odoo", return_value=(FakeCommon(), object())), \
+                mock.patch.object(
+                    odoo_push,
+                    "search_stock_tracking",
+                    return_value=[{"id": 10, "tracking_number": "TN1", "pod_link": "https://files.test/old.pdf"}],
+                ), \
+                mock.patch.object(odoo_push, "write_tracking_pod") as write_mock:
+                result = odoo_push.push_payload(
+                    config_path="config.local.json",
+                    payload_path=str(payload_path),
+                )
+
+        self.assertEqual(result["needs_review"], 1)
+        self.assertEqual(result["details"][0]["status"], "needs_review")
+        self.assertIn("different pod_link", result["details"][0]["error"])
+        write_mock.assert_not_called()
 
     def test_payload_lookup_key_converts_canonical_picking_name(self):
         key_type, key_value = odoo_push._payload_lookup_key(
