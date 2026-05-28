@@ -81,7 +81,7 @@ from .phase1a_runs import (
 from .remote_counts import load_remote_count_snapshot
 from .reporting import build_report_context
 from .scheduler import Scheduler
-from .signed_urls import verify_storage_path_token
+from .signed_urls import is_valid_file_url_secret, verify_storage_path_token
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -258,6 +258,10 @@ def _storage_relative_path_from_request(request: Request) -> str:
 def _has_valid_storage_signature(request: Request) -> bool:
     relative_path = _storage_relative_path_from_request(request)
     return verify_storage_path_token(relative_path, request.query_params.get("token"), _get_storage_file_secret())
+
+
+def _storage_requires_signature() -> bool:
+    return is_valid_file_url_secret(_get_storage_file_secret())
 
 
 def _login_client_key(request: Request) -> str:
@@ -1038,7 +1042,7 @@ async def phase1a_artifact(run_name: str, artifact_key: str):
 
 @app.get("/storage/files/{relative_path:path}")
 async def storage_file(request: Request, relative_path: str):
-    if not _is_authenticated(request) and not _has_valid_storage_signature(request):
+    if _storage_requires_signature() and not _is_authenticated(request) and not _has_valid_storage_signature(request):
         raise HTTPException(status_code=403, detail="文件访问未授权。")
     path = resolve_storage_file(resolve_storage_dir(), relative_path)
     if not path:

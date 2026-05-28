@@ -44,6 +44,14 @@ class WebAppSecurityTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"POD_SYNC_FILE_URL_SECRET": "secret"}):
             self.assertFalse(app_module._has_valid_storage_signature(request))
 
+    def test_storage_signature_is_optional_without_secret(self):
+        with mock.patch.dict(os.environ, {"POD_SYNC_FILE_URL_SECRET": ""}):
+            self.assertFalse(app_module._storage_requires_signature())
+
+    def test_storage_signature_is_required_with_valid_secret(self):
+        with mock.patch.dict(os.environ, {"POD_SYNC_FILE_URL_SECRET": "x" * 32}):
+            self.assertTrue(app_module._storage_requires_signature())
+
     def test_normalize_redirect_target_rejects_external_urls(self):
         self.assertEqual(app_module.normalize_redirect_target("https://evil.test", "/"), "/")
         self.assertEqual(app_module.normalize_redirect_target("//evil.test/path", "/"), "/")

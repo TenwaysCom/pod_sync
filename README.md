@@ -124,7 +124,7 @@ python3 -m uvicorn webapp.app:app --host 0.0.0.0 --port 8080
 - 生产环境建议同时设置稳定的 `POD_SYNC_SECRET_KEY`，并通过 HTTPS 反向代理访问。
 - 登录默认每个来源 IP 在 10 分钟内最多失败 5 次；可用 `POD_SYNC_LOGIN_RATE_LIMIT_MAX` 和 `POD_SYNC_LOGIN_RATE_LIMIT_WINDOW` 调整。
 - `config.local.json` 包含 token/API key，建议权限为 `600`。
-- 如果需要把本地 POD 文件链接写回 Odoo，请配置 `pod_sync.base_url`；系统只会写入 `/storage/files/...` 本地链接。配置 `pod_sync.file_url_secret` 后会生成带签名的链接，否则生成普通本地链接。
+- 如果需要把本地 POD 文件链接写回 Odoo，请配置 `pod_sync.base_url`；系统只会写入 `/storage/files/...` 本地链接，不会写入 OneDrive/Google Drive 源链。`pod_sync.file_url_secret` 是可选项，配置后会要求签名 token；不配置时本地文件链接公开可读。
 - 默认单文件下载上限是 200MB，可用 `POD_SYNC_MAX_DOWNLOAD_BYTES` 调整，设为 `0` 表示关闭限制。
 - 后台任务默认最多并发 2 个、单任务最长 6 小时；可用 `POD_SYNC_MAX_CONCURRENT_JOBS` 和 `POD_SYNC_JOB_TIMEOUT_SECONDS` 调整。
 
