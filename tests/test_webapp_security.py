@@ -15,7 +15,7 @@ from webapp.signed_urls import build_signed_storage_url
 
 class FakeRequest:
     def __init__(self, *, path="/", query_params=None, cookies=None, headers=None, form=None):
-        self.url = SimpleNamespace(path=path, netloc="testserver", scheme="http")
+        self.url = SimpleNamespace(path=path, netloc="testserver", scheme="http", query="")
         self.query_params = query_params or {}
         self.cookies = cookies or {}
         self.headers = headers or {}
@@ -27,6 +27,9 @@ class FakeRequest:
 
 
 class WebAppSecurityTests(unittest.TestCase):
+    def setUp(self):
+        app_module._LOGIN_FAILURES.clear()
+
     def test_signed_storage_token_uses_decoded_relative_path(self):
         url = build_signed_storage_url("http://testserver", "CMC/2024 POD/EU22114.pdf", "secret")
         token = url.rsplit("token=", 1)[1]
@@ -70,6 +73,61 @@ class WebAppSecurityTests(unittest.TestCase):
         request = FakeRequest()
 
         self.assertFalse(asyncio.run(app_module._is_valid_csrf(request)))
+
+    def test_unauthenticated_page_redirects_to_login(self):
+        with (
+            mock.patch.object(app_module, "ENABLE_PASSWORD_LOGIN", True),
+            mock.patch.object(app_module, "ADMIN_PASSWORD", "secret"),
+            mock.patch.object(app_module, "AUTH_CONFIGURATION_ERROR", ""),
+        ):
+            async def call_next(_request):
+                self.fail("unauthenticated request should not reach downstream handler")
+
+            response = asyncio.run(app_module.auth_middleware(FakeRequest(path="/"), call_next))
+
+        self.assertEqual(response.status_code, 303)
+        self.assertTrue(response.headers["location"].startswith("/login?"))
+        self.assertIn("next=%2F", response.headers["location"])
+
+    def test_login_page_renders_password_form(self):
+        with (
+            mock.patch.object(app_module, "ENABLE_PASSWORD_LOGIN", True),
+            mock.patch.object(app_module, "ADMIN_PASSWORD", "secret"),
+            mock.patch.object(app_module, "AUTH_CONFIGURATION_ERROR", ""),
+            mock.patch.object(app_module.templates, "TemplateResponse") as template_response,
+        ):
+            template_response.return_value = SimpleNamespace(status_code=200)
+            response = asyncio.run(app_module.login_page(FakeRequest(path="/login"), next="/jobs"))
+
+        self.assertEqual(response.status_code, 200)
+        template_response.assert_called_once()
+        kwargs = template_response.call_args.kwargs
+        self.assertEqual(kwargs["name"], "login.html")
+        self.assertEqual(kwargs["context"]["next"], "/jobs")
+
+    def test_login_post_sets_session_cookie(self):
+        with (
+            mock.patch.object(app_module, "ENABLE_PASSWORD_LOGIN", True),
+            mock.patch.object(app_module, "ADMIN_PASSWORD", "secret"),
+            mock.patch.object(app_module, "AUTH_CONFIGURATION_ERROR", ""),
+        ):
+            response = asyncio.run(app_module.login_post(FakeRequest(path="/login"), password="secret", next="/jobs"))
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/jobs")
+        self.assertIn(app_module.SESSION_COOKIE, response.headers.get("set-cookie", ""))
+
+    def test_login_post_rejects_wrong_password(self):
+        with (
+            mock.patch.object(app_module, "ENABLE_PASSWORD_LOGIN", True),
+            mock.patch.object(app_module, "ADMIN_PASSWORD", "secret"),
+            mock.patch.object(app_module, "AUTH_CONFIGURATION_ERROR", ""),
+        ):
+            response = asyncio.run(app_module.login_post(FakeRequest(path="/login"), password="wrong", next="/jobs"))
+
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("/login?", response.headers["location"])
+        self.assertIn("error=", response.headers["location"])
 
 
 if __name__ == "__main__":
