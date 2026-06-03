@@ -12,7 +12,7 @@
       <article class="card">
         <h3>CMC OneDrive</h3>
         <form method="post" action="{{ request.url_for('action_cmc_onedrive') }}" class="form-grid">
-          <label>配置文件路径<input name="config_path" value="{{ ui_defaults.sync_config_path }}"></label>
+          <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
           <label>模式
             <select name="mode">
               {% for value, label in sync_mode_options %}
@@ -33,7 +33,7 @@
       <article class="card">
         <h3>EMTC Google Drive</h3>
         <form method="post" action="{{ request.url_for('action_emtc_gdrive') }}" class="form-grid">
-          <label>配置文件路径<input name="config_path" value="{{ ui_defaults.sync_config_path }}"></label>
+          <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
           <label>模式
             <select name="mode">
               {% for value, label in sync_mode_options %}
@@ -55,7 +55,7 @@
       <article class="card">
         <h3>Westerman API</h3>
         <form method="post" action="{{ request.url_for('action_westerman_api') }}" class="form-grid">
-          <label>配置文件路径<input name="config_path" value="{{ ui_defaults.sync_config_path }}"></label>
+          <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
           <label>模式
             <select name="mode">
               {% for value, label in westerman_mode_options %}
@@ -72,7 +72,7 @@
       <article class="card">
         <h3>完整性校验</h3>
         <form method="post" action="{{ request.url_for('action_verify_integrity') }}" class="form-grid">
-          <label>配置文件路径<input name="config_path" value="{{ ui_defaults.sync_config_path }}"></label>
+          <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
           <label>来源
             <select name="source">
               {% for value, label in verify_source_options %}
@@ -88,7 +88,7 @@
       <article class="card">
         <h3>状态检查</h3>
         <form method="post" action="{{ request.url_for('action_check_status') }}" class="form-grid">
-          <label>配置文件路径<input name="config_path" value="{{ ui_defaults.sync_config_path }}"></label>
+          <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
           <label>来源
             <select name="source">
               {% for value, label in status_source_options %}
@@ -122,12 +122,12 @@
     <div class="section-head">
       <div>
         <p class="eyebrow">数量对比</p>
-        <h2>远端与本地文件数</h2>
-        <p>递归统计远端目录中的文件数，并与本地落盘和 manifest 记录做快速对比。</p>
+        <h2>云端文件对比</h2>
+        <p>统计云盘上的文件数，和本地已下载的文件数做对比，检查是否有遗漏的 POD。</p>
       </div>
       <form method="post" action="{{ request.url_for('action_refresh_remote_counts') }}" class="inline-action-form">
         <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
-        <button type="submit" class="ghost-button">刷新远端数量</button>
+        <button type="submit" class="ghost-button">刷新对比</button>
       </form>
     </div>
     {% if remote_count_snapshot.exists %}
@@ -152,7 +152,7 @@
             <p class="muted">仓库：{{ source.warehouse or "无" }}</p>
             <div class="compare-metrics">
               <div class="compare-metric">
-                <span class="compare-label">远端文件</span>
+                <span class="compare-label">云端文件</span>
                 <strong>{{ source.remote_file_count if source.remote_file_count is not none else "-" }}</strong>
               </div>
               <div class="compare-metric">
@@ -175,7 +175,7 @@
               </div>
             </div>
             <ul class="compact-list">
-              <li>远端文件夹：{{ source.remote_folder_count if source.remote_folder_count is not none else "-" }}</li>
+              <li>云端文件夹：{{ source.remote_folder_count if source.remote_folder_count is not none else "-" }}</li>
               <li>Manifest 唯一本地路径：{{ source.manifest_unique_local_count }}</li>
               <li>Manifest 缺失本地文件：{{ source.manifest_missing_local_count }}</li>
               {% if source.note %}
@@ -186,7 +186,7 @@
         {% endfor %}
       </div>
     {% else %}
-      <p class="empty">还没有远端数量快照。点击上面的“刷新远端数量”后，会在这里显示最新对比结果。</p>
+      <p class="empty">还没有对比快照。点击“刷新对比”后显示结果。</p>
     {% endif %}
   </section>
 
