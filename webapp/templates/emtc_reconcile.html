@@ -6,9 +6,8 @@
       <div class="section-head section-head-tight">
         <div>
           <p class="eyebrow">对账入口</p>
-          <h2>按来源看 Odoo 和 POD 的双向命中情况</h2>
-          <p>这里固定读取最新一批 POD 识别结果，并与最新 Odoo 总明细快照做双向对账。开始月份只作用于 Odoo 出库单池，按 `business_datetime` 过滤；POD 文件池保持全量，再去看是否能命中过滤后的 Odoo 单池。</p>
         </div>
+        <button class="secondary-button" type="button" data-open-reconcile-note>查看说明</button>
       </div>
       <div class="reconcile-toolbar">
         <div class="reconcile-tabs">
@@ -308,6 +307,59 @@
       <p class="empty">还没有可用的 {{ selected_source.label }} 对账数据。</p>
     {% endif %}
   </section>
+
+  <dialog class="modal-dialog reconcile-note-dialog" id="reconcileNoteDialog" aria-labelledby="reconcileNoteDialogTitle">
+    <div class="modal-panel">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">总结对账</p>
+          <h2 id="reconcileNoteDialogTitle">页面口径说明</h2>
+        </div>
+        <button class="ghost-button modal-close-button" type="button" data-close-reconcile-note>关闭</button>
+      </div>
+      <div class="modal-body">
+        <ul class="reconcile-explain-list reconcile-explain-list-modal">
+          <li>数据来源：页面固定读取最新一批 POD 识别结果，并与最新 Odoo 总明细快照做双向对账；切换上方来源标签后，只看对应渠道或承运商的结果。</li>
+          <li>筛选口径：开始月份只过滤 Odoo 出库单池，按 Odoo 的 <code>business_datetime</code> 判断；POD 文件池保持全量，用来检查这些 Odoo 单据是否能在现有 POD 文件中命中。</li>
+          <li>Odoo -> POD：从 Odoo 单据角度看 POD 覆盖率。这里的“未命中 POD”优先级最高，代表 Odoo 有业务单据，但当前 POD 文件池没有找到对应凭证，需要补文件、修识别规则或核对单号。</li>
+          <li>POD -> Odoo：从本地 POD 文件角度看回写准备度。这里的“无法识别”或“未命中 Odoo”通常表示文件名、PDF 内容、tracking / customer reference 等匹配键有问题，需要先人工核对，避免错误推送。</li>
+          <li>下载按钮会导出当前卡片对应的明细，方便把问题清单发给业务、仓库或承运商逐条跟进。</li>
+        </ul>
+      </div>
+    </div>
+  </dialog>
+
+  <script>
+    (() => {
+      const dialog = document.getElementById("reconcileNoteDialog");
+      if (!dialog) return;
+
+      const closeDialog = () => {
+        if (typeof dialog.close === "function") {
+          dialog.close();
+        } else {
+          dialog.removeAttribute("open");
+        }
+      };
+
+      document.querySelectorAll("[data-open-reconcile-note]").forEach((button) => {
+        button.addEventListener("click", () => {
+          if (typeof dialog.showModal === "function") {
+            dialog.showModal();
+          } else {
+            dialog.setAttribute("open", "");
+          }
+        });
+      });
+
+      dialog.querySelector("[data-close-reconcile-note]")?.addEventListener("click", closeDialog);
+      dialog.addEventListener("click", (event) => {
+        if (event.target === dialog) {
+          closeDialog();
+        }
+      });
+    })();
+  </script>
 
   <script>
     (() => {

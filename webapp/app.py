@@ -52,7 +52,7 @@ def _get_odoo_missing_detail_url() -> str:
         raise ValueError("Odoo URL not configured in config.local.json")
     return f"{odoo_url}/api/querydeluxe/{query_id}/data"
 from .annual_pod_report import build_annual_pod_workbook
-from .odoo_push_history import list_push_runs, get_log_content
+from .odoo_push_history import list_push_runs, get_log_content, delete_push_run
 from .odoo_pull import fetch_and_save_index, load_saved_index
 from .odoo_pod_compare import (
     build_pod_odoo_compare_listing,
@@ -429,6 +429,10 @@ def render(request: Request, template_name: str, *, page_id: str, **context):
         "notice": request.query_params.get("notice"),
         "error": request.query_params.get("error"),
     }
+    try:
+        static_version = str(int((STATIC_DIR / "app.css").stat().st_mtime))
+    except OSError:
+        static_version = "1"
     base_context = {
         "request": TemplateRequestProxy(request),
         "page_id": page_id,
@@ -446,6 +450,7 @@ def render(request: Request, template_name: str, *, page_id: str, **context):
         "secondary_artifact_keys": SECONDARY_ARTIFACT_KEYS,
         "display_value": display_value,
         "csrf_token": "",
+        "static_version": static_version,
     }
     base_context.update(context)
     return templates.TemplateResponse(request=request, name=template_name, context=base_context)
@@ -532,6 +537,32 @@ async def sync_page(request: Request):
     recent_jobs = job_store.list_jobs(limit=10)
     config_snapshot = load_runtime_config_snapshot()
     remote_count_snapshot = load_remote_count_snapshot()
+    running_jobs = [job for job in recent_jobs if job.get("status") in {"queued", "running"}]
+    enabled_sources = [source for source in config_snapshot.get("sources", []) if source.get("enabled")]
+    remote_sources = remote_count_snapshot.get("sources", [])
+    remote_status_counts = {
+        "ok": sum(1 for source in remote_sources if source.get("status") == "ok"),
+        "mismatch": sum(1 for source in remote_sources if source.get("status") == "mismatch"),
+        "error": sum(1 for source in remote_sources if source.get("status") == "error"),
+    }
+    if not remote_count_snapshot.get("exists"):
+        remote_health = {"label": "未刷新", "badge": "muted"}
+    elif remote_status_counts["error"]:
+        remote_health = {"label": "部分异常", "badge": "warn"}
+    elif remote_status_counts["mismatch"]:
+        remote_health = {"label": "有差异", "badge": "warn"}
+    else:
+        remote_health = {"label": "一致", "badge": "ok"}
+
+    sync_dashboard = {
+        "running_jobs": running_jobs,
+        "running_count": len(running_jobs),
+        "last_job": recent_jobs[0] if recent_jobs else None,
+        "enabled_source_count": len(enabled_sources),
+        "source_count": len(config_snapshot.get("sources", [])),
+        "remote_health": remote_health,
+        "remote_status_counts": remote_status_counts,
+    }
     return render(
         request,
         "sync.html",
@@ -539,6 +570,8 @@ async def sync_page(request: Request):
         recent_jobs=recent_jobs,
         config_snapshot=config_snapshot,
         remote_count_snapshot=remote_count_snapshot,
+        scheduler_status=scheduler.status(),
+        sync_dashboard=sync_dashboard,
     )
 
 
@@ -934,12 +967,18 @@ async def api_reconcile_push_to_odoo(
 
 @app.get("/jobs", response_class=HTMLResponse)
 async def jobs_page(request: Request):
-    jobs = job_store.list_jobs(limit=50)
+    jobs = job_store.list_jobs(limit=10)
+    recent_runs = discover_phase1a_runs(limit=30)
+    push_runs = list_push_runs(limit=30)
+    running_jobs = [job for job in jobs if job.get("status") in {"queued", "running"}]
     return render(
         request,
         "jobs.html",
         page_id="jobs",
         jobs=jobs,
+        recent_runs=recent_runs,
+        push_runs=push_runs,
+        running_job_count=len(running_jobs),
     )
 
 
@@ -977,6 +1016,15 @@ async def delete_job(job_id: str, redirect_to: str = Form("/jobs")):
     if not ok:
         return redirect_with_error(target, error or "删除任务失败。")
     return redirect_with_notice(target, f"已删除任务 {job_id}")
+
+
+@app.post("/odoo-push/history/{push_id}/delete")
+async def delete_odoo_push_history(push_id: str, redirect_to: str = Form("/jobs")):
+    ok, error = delete_push_run(push_id)
+    target = normalize_redirect_target(redirect_to, "/jobs")
+    if not ok:
+        return redirect_with_error(target, error or "删除推送记录失败。")
+    return redirect_with_notice(target, f"已删除推送记录 {push_id}")
 
 
 @app.get("/phase1a/runs/{run_name}", response_class=HTMLResponse)
@@ -1270,7 +1318,9 @@ async def action_run_pipeline(
     emtc_limit: int = Form(0),
     cmc_workers: int = Form(3),
     emtc_workers: int = Form(3),
+    redirect_to: str = Form("/scheduler"),
 ):
+    safe_redirect_to = normalize_redirect_target(redirect_to, "/scheduler")
     # Read current scheduler steps config
     scheduler_cfg = scheduler.load_config()
     steps = scheduler_cfg.get("steps", {})
@@ -1291,7 +1341,7 @@ async def action_run_pipeline(
             skip_odoo_push=not steps.get("odoo_push", False),
         )
     except ValueError as exc:
-        return redirect_with_error("/scheduler", str(exc))
+        return redirect_with_error(safe_redirect_to, str(exc))
     job = job_store.start_job(action="run_pipeline", label=label, command=command, metadata=metadata)
     return RedirectResponse(url=f"/jobs/{job['job_id']}", status_code=303)
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import json
 import shutil
+from collections import Counter
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote
@@ -185,6 +186,7 @@ def _load_document_rows_cached(
             )
 
     rows.sort(key=lambda item: (item.get("source_modified_at") or "", item.get("file_name") or ""), reverse=True)
+    rows.sort(key=lambda item: 0 if item.get("status") == "needs_review" else 1)
     return {
         "items": rows,
         "source_options": sorted(source_options.items(), key=lambda item: item[1]),
@@ -216,17 +218,26 @@ def build_phase1a_document_listing(
     )
     rows = cached["items"]
     query_text = (query or "").strip().lower()
+    def row_matches(row, *, skip: str = "") -> bool:
+        if skip != "query" and query_text and query_text not in row["search_blob"]:
+            return False
+        if skip != "status" and status and row.get("status") != status:
+            return False
+        if skip != "source" and source and row.get("source_key") != source:
+            return False
+        if skip != "reason" and reason and (row.get("reason_code") or "") != reason:
+            return False
+        return True
+
     filtered = []
     for row in rows:
-        if query_text and query_text not in row["search_blob"]:
-            continue
-        if status and row.get("status") != status:
-            continue
-        if source and row.get("source_key") != source:
-            continue
-        if reason and (row.get("reason_code") or "") != reason:
+        if not row_matches(row):
             continue
         filtered.append(row)
+
+    status_counts = Counter(row.get("status") or "" for row in rows if row_matches(row, skip="status"))
+    source_counts = Counter(row.get("source_key") or "" for row in rows if row_matches(row, skip="source"))
+    reason_counts = Counter(row.get("reason_code") or "" for row in rows if row_matches(row, skip="reason"))
 
     safe_page_size = max(1, min(int(page_size or 25), 200))
     safe_page = max(1, int(page or 1))
@@ -252,6 +263,9 @@ def build_phase1a_document_listing(
             "source": source,
             "reason": reason,
         },
+        "status_counts": dict(status_counts),
+        "source_counts": dict(source_counts),
+        "reason_counts": dict(reason_counts),
         "status_options": [
             {"value": "", "label": "全部状态"},
             {"value": "ready", "label": "可推送"},

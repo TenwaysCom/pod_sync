@@ -1,50 +1,52 @@
 {% extends "base.html" %}
 {% block title %}定时任务 · POD 同步控制台{% endblock %}
 {% block content %}
-  <section class="section">
-    <div class="section-head">
+  <section class="section scheduler-hero">
+    <div class="scheduler-head">
       <div>
         <p class="eyebrow">后台调度</p>
         <h2>定时任务配置</h2>
-        <p>配置自动运行完整流水线的间隔。调度器会在后台每分钟检查一次，到达执行时间后自动提交流水线任务。</p>
+        <p class="lede">调度器每分钟检查一次，到达时间后自动提交完整流水线任务。</p>
+      </div>
+      <div class="scheduler-head-actions">
+        <span class="badge {% if scheduler_status.is_running %}badge-success{% else %}badge-failed{% endif %}">
+          线程{{ "运行中" if scheduler_status.is_running else "已停止" }}
+        </span>
+        <span class="badge {% if scheduler_status.enabled %}badge-running{% else %}badge-muted{% endif %}">
+          定时{{ "已启用" if scheduler_status.enabled else "已停用" }}
+        </span>
       </div>
     </div>
 
-    <div class="grid grid-cards">
-      <article class="card stat-card">
-        <p class="label">调度器状态</p>
-        <h2>{{ "运行中" if scheduler_status.is_running else "已停止" }}</h2>
-        <p class="muted">后台线程</p>
+    <div class="scheduler-overview">
+      <article class="scheduler-next-card">
+        <span class="scheduler-card-label">下次执行</span>
+        <strong>{{ scheduler_status.next_run_at or "未计划" }}</strong>
+        <p>{{ scheduler_status.interval_hours }} 小时执行一次{% if not scheduler_status.enabled %}，当前不会自动触发{% endif %}。</p>
       </article>
-      <article class="card stat-card">
-        <p class="label">定时启用</p>
-        <h2>{{ "是" if scheduler_status.enabled else "否" }}</h2>
-        <p class="muted">是否自动执行</p>
+
+      <article class="scheduler-mini-card">
+        <span>上次执行</span>
+        <strong>{{ scheduler_status.last_run_at or "-" }}</strong>
       </article>
-      <article class="card stat-card">
-        <p class="label">执行间隔</p>
-        <h2>{{ scheduler_status.interval_hours }} 小时</h2>
-        <p class="muted">每次执行的间隔</p>
+
+      <article class="scheduler-mini-card">
+        <span>上次任务</span>
+        {% if scheduler_status.last_run_job_id %}
+          <strong><a href="{{ request.url_for('job_detail', job_id=scheduler_status.last_run_job_id) }}">{{ scheduler_status.last_run_job_id }}</a></strong>
+        {% else %}
+          <strong>-</strong>
+        {% endif %}
       </article>
-      <article class="card stat-card">
-        <p class="label">下次执行</p>
-        <h2>{{ scheduler_status.next_run_at or "-" }}</h2>
-        <p class="muted">预计触发时间</p>
-      </article>
-      <article class="card stat-card">
-        <p class="label">上次执行</p>
-        <h2>{{ scheduler_status.last_run_at or "-" }}</h2>
-        <p class="muted">上次触发时间</p>
-      </article>
-      <article class="card stat-card">
-        <p class="label">上次任务</p>
-        <h2>
-          {% if scheduler_status.last_run_job_id %}
-            <a href="{{ request.url_for('job_detail', job_id=scheduler_status.last_run_job_id) }}">{{ scheduler_status.last_run_job_id }}</a>
-          {% else %}-{% endif %}
-        </h2>
-        <p class="muted">最近自动触发的任务</p>
-      </article>
+    </div>
+
+    <div class="scheduler-step-strip" aria-label="当前定时流水线步骤">
+      {% for step in scheduler_status.step_definitions %}
+        {% set enabled = scheduler_status.steps.get(step.key, step.default) %}
+        <span class="scheduler-step-pill {% if enabled %}is-enabled{% else %}is-disabled{% endif %}">
+          {{ loop.index }}. {{ step.label }}
+        </span>
+      {% endfor %}
     </div>
   </section>
 
@@ -55,59 +57,109 @@
         <h2>修改调度参数</h2>
       </div>
     </div>
-    <div class="grid forms-grid">
-      <article class="card">
-        <h3>调度器设置</h3>
-        <form method="post" action="{{ request.url_for('action_update_scheduler') }}" class="form-grid" data-submit-state>
-          <label>启用定时任务
-            <select name="enabled">
-              <option value="1" {% if scheduler_status.enabled %}selected{% endif %}>启用</option>
-              <option value="0" {% if not scheduler_status.enabled %}selected{% endif %}>停用</option>
-            </select>
-          </label>
-          <label>执行间隔（小时）<input type="number" name="interval_hours" value="{{ scheduler_status.interval_hours }}" min="1" max="168"></label>
-          <hr style="border: none; border-top: 1px solid var(--border-color); margin: 8px 0;">
-          <p class="label" style="margin-bottom: 8px;">执行步骤（按顺序）</p>
-          <div class="step-checkboxes">
-            {% for step in scheduler_status.step_definitions %}
-            <label class="step-checkbox">
-              <input type="checkbox" name="step_{{ step.key }}" value="on" {% if scheduler_status.steps.get(step.key, step.default) %}checked{% endif %}>
-              <span>{{ step.label }}</span>
+
+    <div class="scheduler-layout">
+      <article class="card scheduler-config-card">
+        <div class="card-top">
+          <div>
+            <h3>调度器设置</h3>
+            <p class="muted">保存后会更新后台调度配置，已运行中的任务不受影响。</p>
+          </div>
+        </div>
+
+        <form method="post" action="{{ request.url_for('action_update_scheduler') }}" class="form-grid scheduler-form" data-submit-state>
+          <div class="scheduler-form-section">
+            <p class="label">基础设置</p>
+            <div class="scheduler-form-row">
+              <label>启用定时任务
+                <select name="enabled">
+                  <option value="1" {% if scheduler_status.enabled %}selected{% endif %}>启用</option>
+                  <option value="0" {% if not scheduler_status.enabled %}selected{% endif %}>停用</option>
+                </select>
+              </label>
+              <label>执行间隔（小时）
+                <input type="number" name="interval_hours" value="{{ scheduler_status.interval_hours }}" min="1" max="168">
+                <span class="field-hint">允许 1 到 168 小时。</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="scheduler-form-section">
+            <p class="label">执行步骤（按顺序）</p>
+            <div class="scheduler-step-grid">
+              {% for step in scheduler_status.step_definitions %}
+                {% set enabled = scheduler_status.steps.get(step.key, step.default) %}
+                <label class="scheduler-step-option {% if enabled %}is-enabled{% endif %}">
+                  <input type="checkbox" name="step_{{ step.key }}" value="on" {% if enabled %}checked{% endif %}>
+                  <span class="scheduler-step-number">{{ loop.index }}</span>
+                  <span>{{ step.label }}</span>
+                </label>
+              {% endfor %}
+            </div>
+          </div>
+
+          <div class="scheduler-form-section">
+            <p class="label">流水线参数</p>
+            <label>同步配置文件
+              <input name="pipeline_config_path" value="{{ scheduler_status.pipeline_options.config_path or 'config.local.json' }}">
             </label>
-            {% endfor %}
+            <label>Phase 1A 配置文件
+              <input name="pipeline_phase1a_config_path" value="{{ scheduler_status.pipeline_options.phase1a_config_path or 'phase1a/examples/phase1a_from_sync.example.json' }}">
+            </label>
+            <div class="scheduler-form-row">
+              <label>CMC 并发数
+                <input type="number" name="pipeline_cmc_workers" value="{{ scheduler_status.pipeline_options.cmc_workers or 3 }}" min="1" max="12">
+              </label>
+              <label>EMTC 并发数
+                <input type="number" name="pipeline_emtc_workers" value="{{ scheduler_status.pipeline_options.emtc_workers or 3 }}" min="1" max="12">
+              </label>
+            </div>
           </div>
-          <hr style="border: none; border-top: 1px solid var(--border-color); margin: 8px 0;">
-          <label>同步配置文件<input name="pipeline_config_path" value="{{ scheduler_status.pipeline_options.config_path or 'config.local.json' }}"></label>
-          <label>Phase 1A 配置文件<input name="pipeline_phase1a_config_path" value="{{ scheduler_status.pipeline_options.phase1a_config_path or 'phase1a/examples/phase1a_from_sync.example.json' }}"></label>
-          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
-            <label>CMC 并发数<input type="number" name="pipeline_cmc_workers" value="{{ scheduler_status.pipeline_options.cmc_workers or 3 }}"></label>
-            <label>EMTC 并发数<input type="number" name="pipeline_emtc_workers" value="{{ scheduler_status.pipeline_options.emtc_workers or 3 }}"></label>
-          </div>
-          {# 隐藏的固定参数 #}
+
           <input type="hidden" name="pipeline_cmc_limit" value="0">
           <input type="hidden" name="pipeline_emtc_limit" value="0">
           <input type="hidden" name="pipeline_cmc_incremental" value="on">
           <input type="hidden" name="pipeline_emtc_incremental" value="on">
-          <button type="submit" class="primary-button" data-loading-text="保存中...">保存配置</button>
+
+          <button type="submit" class="action-button" data-loading-text="保存中...">保存配置</button>
         </form>
       </article>
 
-      <article class="card">
-        <h3>手动触发</h3>
-        <p class="muted">使用当前定时配置立即执行一次流水线，方便调试配置是否正确。</p>
-        <form method="post" action="{{ request.url_for('action_run_pipeline') }}" class="form-grid" data-submit-state data-pending-notice="流水线已提交，正在后台执行...">
-          <input type="hidden" name="config_path" value="{{ scheduler_status.pipeline_options.config_path or 'config.local.json' }}">
-          <input type="hidden" name="phase1a_config_path" value="{{ scheduler_status.pipeline_options.phase1a_config_path or 'phase1a/examples/phase1a_from_sync.example.json' }}">
-          <input type="hidden" name="cmc_incremental" value="on">
-          <input type="hidden" name="emtc_incremental" value="on">
-          <input type="hidden" name="cmc_limit" value="0">
-          <input type="hidden" name="emtc_limit" value="0">
-          <input type="hidden" name="cmc_workers" value="{{ scheduler_status.pipeline_options.cmc_workers or 3 }}">
-          <input type="hidden" name="emtc_workers" value="{{ scheduler_status.pipeline_options.emtc_workers or 3 }}">
-          <button type="submit" class="action-button" data-loading-text="提交中...">使用当前定时配置立即执行</button>
-        </form>
-      </article>
+      <aside class="scheduler-side">
+        <article class="card scheduler-run-card">
+          <h3>手动触发</h3>
+          <p class="muted">使用当前定时配置立即执行一次流水线，适合保存配置后做验证。</p>
+          <form method="post" action="{{ request.url_for('action_run_pipeline') }}" class="form-grid" data-submit-state data-pending-notice="流水线已提交，正在后台执行...">
+            <input type="hidden" name="config_path" value="{{ scheduler_status.pipeline_options.config_path or 'config.local.json' }}">
+            <input type="hidden" name="phase1a_config_path" value="{{ scheduler_status.pipeline_options.phase1a_config_path or 'phase1a/examples/phase1a_from_sync.example.json' }}">
+            <input type="hidden" name="cmc_incremental" value="on">
+            <input type="hidden" name="emtc_incremental" value="on">
+            <input type="hidden" name="cmc_limit" value="0">
+            <input type="hidden" name="emtc_limit" value="0">
+            <input type="hidden" name="cmc_workers" value="{{ scheduler_status.pipeline_options.cmc_workers or 3 }}">
+            <input type="hidden" name="emtc_workers" value="{{ scheduler_status.pipeline_options.emtc_workers or 3 }}">
+            <button type="submit" class="action-button" data-loading-text="提交中...">立即执行一次流水线</button>
+          </form>
+        </article>
 
+        <article class="card scheduler-note-card">
+          <h3>当前执行范围</h3>
+          <div class="scheduler-summary-list">
+            <div>
+              <span>同步配置</span>
+              <strong>{{ scheduler_status.pipeline_options.config_path or 'config.local.json' }}</strong>
+            </div>
+            <div>
+              <span>Phase 1A 配置</span>
+              <strong>{{ scheduler_status.pipeline_options.phase1a_config_path or 'phase1a/examples/phase1a_from_sync.example.json' }}</strong>
+            </div>
+            <div>
+              <span>并发</span>
+              <strong>CMC {{ scheduler_status.pipeline_options.cmc_workers or 3 }} · EMTC {{ scheduler_status.pipeline_options.emtc_workers or 3 }}</strong>
+            </div>
+          </div>
+        </article>
+      </aside>
     </div>
   </section>
 {% endblock %}

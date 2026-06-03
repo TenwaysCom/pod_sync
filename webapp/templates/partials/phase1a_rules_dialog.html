@@ -1,0 +1,41 @@
+<dialog class="modal-dialog phase-rules-dialog" id="phaseRulesDialog" aria-labelledby="phaseRulesDialogTitle">
+  <div class="modal-panel">
+    <div class="modal-head">
+      <div>
+        <p class="eyebrow">POD 识别</p>
+        <h2 id="phaseRulesDialogTitle">识别规则说明</h2>
+      </div>
+      <button class="ghost-button modal-close-button" type="button" data-close-phase-rules>关闭</button>
+    </div>
+    <div class="modal-body">
+      {% include "partials/phase1a_rules.html" %}
+    </div>
+  </div>
+</dialog>
+
+<script>
+  (() => {
+    const dialog = document.getElementById("phaseRulesDialog");
+    if (!dialog) return;
+
+    document.querySelectorAll("[data-open-phase-rules]").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (typeof dialog.showModal === "function") {
+          dialog.showModal();
+        } else {
+          dialog.setAttribute("open", "");
+        }
+      });
+    });
+
+    dialog.querySelector("[data-close-phase-rules]")?.addEventListener("click", () => {
+      dialog.close();
+    });
+
+    dialog.addEventListener("click", (event) => {
+      if (event.target === dialog) {
+        dialog.close();
+      }
+    });
+  })();
+</script>

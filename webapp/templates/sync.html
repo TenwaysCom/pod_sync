@@ -1,118 +1,68 @@
 {% extends "base.html" %}
 {% block title %}同步 · POD 同步控制台{% endblock %}
 {% block content %}
-  <section class="section">
-    <div class="section-head">
-      <div>
-        <p class="eyebrow">操作面板</p>
-        <h2>同步与巡检控制</h2>
+  <section class="section sync-workbench">
+    <div class="sync-hero">
+      <div class="sync-hero-main">
+        <p class="eyebrow">同步工作台</p>
+        <h2>日常 POD 同步</h2>
+        <div class="sync-step-row" aria-label="流水线步骤">
+          {% for step_key, step_label in [
+            ("cmc_sync", "CMC"),
+            ("emtc_sync", "EMTC"),
+            ("phase1a", "识别"),
+            ("odoo_push", "Odoo"),
+            ("refresh_reports", "报告")
+          ] %}
+            {% set enabled = scheduler_status.steps.get(step_key, False) %}
+            <span class="sync-step {% if enabled %}is-enabled{% else %}is-disabled{% endif %}">{{ step_label }}</span>
+          {% endfor %}
+        </div>
       </div>
+      <form method="post" action="{{ request.url_for('action_run_pipeline') }}" class="sync-run-form" data-submit-state data-pending-notice="日常同步任务已提交，正在后台执行...">
+        <input type="hidden" name="redirect_to" value="/sync">
+        <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
+        <input type="hidden" name="phase1a_config_path" value="{{ ui_defaults.phase1a_config_path }}">
+        <input type="hidden" name="cmc_incremental" value="on">
+        <input type="hidden" name="emtc_incremental" value="on">
+        <input type="hidden" name="cmc_limit" value="0">
+        <input type="hidden" name="emtc_limit" value="0">
+        <label>CMC 并发<input type="number" name="cmc_workers" value="{{ ui_defaults.cmc_workers }}" min="1" max="12"></label>
+        <label>EMTC 并发<input type="number" name="emtc_workers" value="{{ ui_defaults.emtc_workers }}" min="1" max="12"></label>
+        <button type="submit" class="action-button" data-loading-text="提交中...">启动日常同步</button>
+      </form>
     </div>
-    <div class="grid forms-grid">
-      <article class="card">
-        <h3>CMC OneDrive</h3>
-        <form method="post" action="{{ request.url_for('action_cmc_onedrive') }}" class="form-grid">
-          <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
-          <label>模式
-            <select name="mode">
-              {% for value, label in sync_mode_options %}
-                <option value="{{ value }}" {% if value == ui_defaults.sync_mode %}selected{% endif %}>{{ label }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label>数量上限<input type="number" name="limit" value="{{ ui_defaults.cmc_limit }}"></label>
-          <label>并发数<input type="number" name="workers" value="{{ ui_defaults.cmc_workers }}"></label>
-          <label>下载文件 ID<input name="download_file_id" placeholder="仅在指定文件模式下填写"></label>
-          <label>输出目录<input name="output_dir" placeholder="./storage/pod/CMC"></label>
-          <label class="toggle"><input type="checkbox" name="recursive" checked>递归遍历</label>
-          <label class="toggle"><input type="checkbox" name="incremental" {% if ui_defaults.cmc_incremental %}checked{% endif %}>增量模式</label>
-          <button type="submit">执行 CMC OneDrive</button>
-        </form>
-      </article>
 
-      <article class="card">
-        <h3>EMTC Google Drive</h3>
-        <form method="post" action="{{ request.url_for('action_emtc_gdrive') }}" class="form-grid">
-          <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
-          <label>模式
-            <select name="mode">
-              {% for value, label in sync_mode_options %}
-                <option value="{{ value }}" {% if value == ui_defaults.sync_mode %}selected{% endif %}>{{ label }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label>数量上限<input type="number" name="limit" value="{{ ui_defaults.emtc_limit }}"></label>
-          <label>并发数<input type="number" name="workers" value="{{ ui_defaults.emtc_workers }}"></label>
-          <label>导出 MIME 类型<input name="export_mime_type" placeholder="application/pdf"></label>
-          <label>下载文件 ID<input name="download_file_id" placeholder="仅在指定文件模式下填写"></label>
-          <label>输出目录<input name="output_dir" placeholder="./storage/pod/EMTC"></label>
-          <label class="toggle"><input type="checkbox" name="recursive" checked>递归遍历</label>
-          <label class="toggle"><input type="checkbox" name="incremental" {% if ui_defaults.emtc_incremental %}checked{% endif %}>增量模式</label>
-          <button type="submit">执行 EMTC Google Drive</button>
-        </form>
+    <div class="sync-status-grid">
+      <article class="sync-status-tile">
+        <span class="sync-status-label">任务队列</span>
+        <strong>{{ sync_dashboard.running_count }}</strong>
+        <span class="badge {% if sync_dashboard.running_count %}badge-running{% else %}badge-ok{% endif %}">
+          {% if sync_dashboard.running_count %}运行中{% else %}空闲{% endif %}
+        </span>
       </article>
-
-      <article class="card">
-        <h3>Westerman API</h3>
-        <form method="post" action="{{ request.url_for('action_westerman_api') }}" class="form-grid">
-          <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
-          <label>模式
-            <select name="mode">
-              {% for value, label in westerman_mode_options %}
-                <option value="{{ value }}">{{ label }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label>tracking number<input name="tracking_number" placeholder="必填"></label>
-          <label>输出目录<input name="output_dir" placeholder="./storage/pod/Westerman"></label>
-          <button type="submit">执行 Westerman API</button>
-        </form>
+      <article class="sync-status-tile">
+        <span class="sync-status-label">启用来源</span>
+        <strong>{{ sync_dashboard.enabled_source_count }} / {{ sync_dashboard.source_count }}</strong>
+        <span class="badge {% if sync_dashboard.enabled_source_count %}badge-ok{% else %}badge-failed{% endif %}">
+          {% if sync_dashboard.enabled_source_count %}已配置{% else %}未启用{% endif %}
+        </span>
       </article>
-
-      <article class="card">
-        <h3>完整性校验</h3>
-        <form method="post" action="{{ request.url_for('action_verify_integrity') }}" class="form-grid">
-          <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
-          <label>来源
-            <select name="source">
-              {% for value, label in verify_source_options %}
-                <option value="{{ value }}" {% if value == ui_defaults.verify_source %}selected{% endif %}>{{ label }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label class="toggle"><input type="checkbox" name="skip_sha256">跳过 SHA256</label>
-          <button type="submit">执行完整性校验</button>
-        </form>
+      <article class="sync-status-tile">
+        <span class="sync-status-label">远端对比</span>
+        <strong>{{ sync_dashboard.remote_health.label }}</strong>
+        <span class="badge badge-{{ sync_dashboard.remote_health.badge }}">
+          {{ sync_dashboard.remote_status_counts.ok }} 正常 · {{ sync_dashboard.remote_status_counts.mismatch }} 差异{% if sync_dashboard.remote_status_counts.error %} · {{ sync_dashboard.remote_status_counts.error }} 异常{% endif %}
+        </span>
       </article>
-
-      <article class="card">
-        <h3>状态检查</h3>
-        <form method="post" action="{{ request.url_for('action_check_status') }}" class="form-grid">
-          <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
-          <label>来源
-            <select name="source">
-              {% for value, label in status_source_options %}
-                <option value="{{ value }}" {% if value == ui_defaults.status_source %}selected{% endif %}>{{ label }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label class="toggle"><input type="checkbox" name="quick" checked>快速模式</label>
-          <button type="submit">执行状态检查</button>
-        </form>
-      </article>
-
-      <article class="card">
-        <h3>运行时配置快照</h3>
-        {% if config_snapshot.exists %}
-          <p class="muted">当前读取配置自：</p>
-          <code class="inline-code">{{ config_snapshot.path }}</code>
-          <ul class="compact-list">
-            {% for source in config_snapshot.sources %}
-              <li>{{ source.label }} · {{ "已启用" if source.enabled else "已停用" }} · {{ source.warehouse or "无" }}</li>
-            {% endfor %}
-          </ul>
+      <article class="sync-status-tile">
+        <span class="sync-status-label">最近任务</span>
+        {% if sync_dashboard.last_job %}
+          <strong>{{ sync_dashboard.last_job.label }}</strong>
+          <a href="{{ request.url_for('job_detail', job_id=sync_dashboard.last_job.job_id) }}" class="text-link">查看任务</a>
         {% else %}
-          <p class="empty">`config.local.json` 还不存在。</p>
+          <strong>暂无</strong>
+          <span class="muted">-</span>
         {% endif %}
       </article>
     </div>
@@ -121,73 +71,184 @@
   <section class="section">
     <div class="section-head">
       <div>
-        <p class="eyebrow">数量对比</p>
-        <h2>云端文件对比</h2>
-        <p>统计云盘上的文件数，和本地已下载的文件数做对比，检查是否有遗漏的 POD。</p>
+        <p class="eyebrow">来源状态</p>
+        <h2>配置与文件数量</h2>
       </div>
-      <form method="post" action="{{ request.url_for('action_refresh_remote_counts') }}" class="inline-action-form">
+      <form method="post" action="{{ request.url_for('action_refresh_remote_counts') }}" class="inline-action-form" data-submit-state data-pending-notice="数量对比任务已提交...">
         <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
-        <button type="submit" class="ghost-button">刷新对比</button>
+        <button type="submit" class="secondary-button" data-loading-text="刷新中...">刷新数量对比</button>
       </form>
     </div>
-    {% if remote_count_snapshot.exists %}
-      <p class="muted">上次刷新：{{ remote_count_snapshot.generated_at }} · 配置：{{ remote_count_snapshot.config_path }}</p>
-      <div class="grid compare-grid">
-        {% for source in remote_count_snapshot.sources %}
-          <article class="card compare-card">
+
+    {% if config_snapshot.exists %}
+      <div class="source-overview-grid">
+        {% for source in config_snapshot.sources %}
+          {% set remote = namespace(item=None) %}
+          {% for row in remote_count_snapshot.sources %}
+            {% if row.key == source.key %}
+              {% set remote.item = row %}
+            {% endif %}
+          {% endfor %}
+          <article class="source-overview-card">
             <div class="card-top">
-              <h3>{{ source.label }}</h3>
-              {% if source.status == "ok" %}
-                <span class="badge badge-ok">一致</span>
-              {% elif source.status == "mismatch" %}
-                <span class="badge badge-failed">有差异</span>
-              {% elif source.status == "error" %}
-                <span class="badge badge-failed">刷新失败</span>
-              {% elif source.status == "unsupported" %}
-                <span class="badge badge-muted">不支持</span>
-              {% else %}
-                <span class="badge badge-muted">未启用</span>
-              {% endif %}
+              <div>
+                <h3>{{ source.label }}</h3>
+                <p class="muted">{{ source.warehouse or "未设置仓库" }}</p>
+              </div>
+              <span class="badge {% if source.enabled %}badge-ok{% else %}badge-muted{% endif %}">
+                {% if source.enabled %}已启用{% else %}已停用{% endif %}
+              </span>
             </div>
-            <p class="muted">仓库：{{ source.warehouse or "无" }}</p>
-            <div class="compare-metrics">
-              <div class="compare-metric">
-                <span class="compare-label">云端文件</span>
-                <strong>{{ source.remote_file_count if source.remote_file_count is not none else "-" }}</strong>
+            <div class="sync-mini-metrics">
+              <div>
+                <span>云端</span>
+                <strong>{{ remote.item.remote_file_count if remote.item and remote.item.remote_file_count is not none else "-" }}</strong>
               </div>
-              <div class="compare-metric">
-                <span class="compare-label">本地文件</span>
-                <strong>{{ source.local_file_count }}</strong>
+              <div>
+                <span>本地</span>
+                <strong>{{ remote.item.local_file_count if remote.item else "-" }}</strong>
               </div>
-              <div class="compare-metric">
-                <span class="compare-label">Manifest 记录</span>
-                <strong>{{ source.manifest_record_count }}</strong>
-              </div>
-              <div class="compare-metric">
-                <span class="compare-label">差值</span>
-                <strong class="{% if source.delta_local_vs_remote == 0 %}compare-delta-zero{% elif source.delta_local_vs_remote is not none and source.delta_local_vs_remote > 0 %}compare-delta-positive{% elif source.delta_local_vs_remote is not none %}compare-delta-negative{% endif %}">
-                  {% if source.delta_local_vs_remote is not none %}
-                    {{ "%+d"|format(source.delta_local_vs_remote) }}
-                  {% else %}
-                    -
-                  {% endif %}
-                </strong>
+              <div>
+                <span>缺失</span>
+                <strong>{{ remote.item.manifest_missing_local_count if remote.item else "-" }}</strong>
               </div>
             </div>
-            <ul class="compact-list">
-              <li>云端文件夹：{{ source.remote_folder_count if source.remote_folder_count is not none else "-" }}</li>
-              <li>Manifest 唯一本地路径：{{ source.manifest_unique_local_count }}</li>
-              <li>Manifest 缺失本地文件：{{ source.manifest_missing_local_count }}</li>
-              {% if source.note %}
-                <li>{{ source.note }}</li>
-              {% endif %}
-            </ul>
+            {% if remote.item %}
+              <p class="source-note">
+                <span class="badge {% if remote.item.status == 'ok' %}badge-ok{% elif remote.item.status == 'mismatch' %}badge-warn{% elif remote.item.status == 'error' %}badge-failed{% else %}badge-muted{% endif %}">
+                  {% if remote.item.status == "ok" %}一致{% elif remote.item.status == "mismatch" %}有差异{% elif remote.item.status == "error" %}失败{% elif remote.item.status == "unsupported" %}不支持{% else %}未启用{% endif %}
+                </span>
+                <span>差值 {{ "%+d"|format(remote.item.delta_local_vs_remote) if remote.item.delta_local_vs_remote is not none else "-" }}</span>
+              </p>
+            {% else %}
+              <p class="source-note muted">暂无数量快照</p>
+            {% endif %}
           </article>
         {% endfor %}
       </div>
+      <div class="sync-config-strip">
+        <span>配置</span>
+        <code>{{ config_snapshot.path }}</code>
+        <span>存储</span>
+        <code>{{ config_snapshot.storage_dir }}</code>
+        {% if remote_count_snapshot.exists %}
+          <span>数量快照</span>
+          <code>{{ remote_count_snapshot.generated_at }}</code>
+        {% endif %}
+      </div>
     {% else %}
-      <p class="empty">还没有对比快照。点击“刷新对比”后显示结果。</p>
+      <p class="empty">`config.local.json` 还不存在。</p>
     {% endif %}
+  </section>
+
+  <section class="section">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">高级操作</p>
+        <h2>单来源同步与巡检</h2>
+      </div>
+    </div>
+
+    <div class="grid forms-grid sync-tools-grid">
+      <details class="details-card sync-tool-card" open>
+        <summary>CMC OneDrive</summary>
+        <form method="post" action="{{ request.url_for('action_cmc_onedrive') }}" class="form-grid" data-submit-state data-pending-notice="CMC 同步任务已提交...">
+          <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
+          <label>模式
+            <select name="mode">
+              {% for value, label in sync_mode_options %}
+                <option value="{{ value }}" {% if value == ui_defaults.sync_mode %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <div class="form-pair">
+            <label>数量上限<input type="number" name="limit" value="{{ ui_defaults.cmc_limit }}" min="0"></label>
+            <label>并发数<input type="number" name="workers" value="{{ ui_defaults.cmc_workers }}" min="1" max="12"></label>
+          </div>
+          <label>下载文件 ID<input name="download_file_id" placeholder="仅在指定文件模式下填写"></label>
+          <label>输出目录<input name="output_dir" placeholder="./storage/pod/CMC"></label>
+          <div class="toggle-row">
+            <label class="toggle"><input type="checkbox" name="recursive" checked>递归遍历</label>
+            <label class="toggle"><input type="checkbox" name="incremental" {% if ui_defaults.cmc_incremental %}checked{% endif %}>增量模式</label>
+          </div>
+          <button type="submit" data-loading-text="提交中...">执行 CMC OneDrive</button>
+        </form>
+      </details>
+
+      <details class="details-card sync-tool-card" open>
+        <summary>EMTC Google Drive</summary>
+        <form method="post" action="{{ request.url_for('action_emtc_gdrive') }}" class="form-grid" data-submit-state data-pending-notice="EMTC 同步任务已提交...">
+          <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
+          <label>模式
+            <select name="mode">
+              {% for value, label in sync_mode_options %}
+                <option value="{{ value }}" {% if value == ui_defaults.sync_mode %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <div class="form-pair">
+            <label>数量上限<input type="number" name="limit" value="{{ ui_defaults.emtc_limit }}" min="0"></label>
+            <label>并发数<input type="number" name="workers" value="{{ ui_defaults.emtc_workers }}" min="1" max="12"></label>
+          </div>
+          <label>导出 MIME 类型<input name="export_mime_type" placeholder="application/pdf"></label>
+          <label>下载文件 ID<input name="download_file_id" placeholder="仅在指定文件模式下填写"></label>
+          <label>输出目录<input name="output_dir" placeholder="./storage/pod/EMTC"></label>
+          <div class="toggle-row">
+            <label class="toggle"><input type="checkbox" name="recursive" checked>递归遍历</label>
+            <label class="toggle"><input type="checkbox" name="incremental" {% if ui_defaults.emtc_incremental %}checked{% endif %}>增量模式</label>
+          </div>
+          <button type="submit" data-loading-text="提交中...">执行 EMTC Google Drive</button>
+        </form>
+      </details>
+
+      <details class="details-card sync-tool-card">
+        <summary>Westerman API</summary>
+        <form method="post" action="{{ request.url_for('action_westerman_api') }}" class="form-grid" data-submit-state data-pending-notice="Westerman 任务已提交...">
+          <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
+          <label>模式
+            <select name="mode">
+              {% for value, label in westerman_mode_options %}
+                <option value="{{ value }}">{{ label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Tracking number<input name="tracking_number" placeholder="必填"></label>
+          <label>输出目录<input name="output_dir" placeholder="./storage/pod/Westerman"></label>
+          <button type="submit" data-loading-text="提交中...">执行 Westerman API</button>
+        </form>
+      </details>
+
+      <details class="details-card sync-tool-card">
+        <summary>巡检工具</summary>
+        <div class="sync-inspection-grid">
+          <form method="post" action="{{ request.url_for('action_verify_integrity') }}" class="form-grid" data-submit-state data-pending-notice="完整性校验任务已提交...">
+            <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
+            <label>完整性来源
+              <select name="source">
+                {% for value, label in verify_source_options %}
+                  <option value="{{ value }}" {% if value == ui_defaults.verify_source %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label class="toggle"><input type="checkbox" name="skip_sha256">跳过 SHA256</label>
+            <button type="submit" data-loading-text="提交中...">执行完整性校验</button>
+          </form>
+
+          <form method="post" action="{{ request.url_for('action_check_status') }}" class="form-grid" data-submit-state data-pending-notice="状态检查任务已提交...">
+            <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
+            <label>状态来源
+              <select name="source">
+                {% for value, label in status_source_options %}
+                  <option value="{{ value }}" {% if value == ui_defaults.status_source %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label class="toggle"><input type="checkbox" name="quick" checked>快速模式</label>
+            <button type="submit" data-loading-text="提交中...">执行状态检查</button>
+          </form>
+        </div>
+      </details>
+    </div>
   </section>
 
   <section class="section">
@@ -196,10 +257,11 @@
         <p class="eyebrow">任务队列</p>
         <h2>最近同步任务</h2>
       </div>
+      <a href="{{ request.url_for('jobs_page') }}" class="secondary-button">查看全部任务</a>
     </div>
     <div class="list-stack">
       {% for job in recent_jobs %}
-        <div class="list-item list-item-shell">
+        <div class="list-item list-item-shell sync-job-item">
           <a class="list-item-main" href="{{ request.url_for('job_detail', job_id=job.job_id) }}">
             <div>
               <strong>{{ job.label }}</strong>
@@ -212,6 +274,8 @@
             <button type="submit" class="danger-button" {% if job.status in ['queued', 'running'] %}disabled{% endif %}>删除</button>
           </form>
         </div>
+      {% else %}
+        <p class="empty">暂无同步任务。</p>
       {% endfor %}
     </div>
   </section>

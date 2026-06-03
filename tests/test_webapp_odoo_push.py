@@ -10,6 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from webapp import odoo_push
+from webapp import odoo_push_history
 
 
 class FakeCommon:
@@ -214,6 +215,44 @@ class OdooPushTests(unittest.TestCase):
 
         self.assertEqual(key_type, "picking_name")
         self.assertEqual(key_value, "WCB2B/OUT/33271")
+
+    def test_delete_push_run_removes_record_and_local_log(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            history_dir = root / "runtime" / "odoo_push"
+            history_dir.mkdir(parents=True)
+            history_file = history_dir / "history.json"
+            log_file = history_dir / "push-a.log"
+            log_file.write_text("log", encoding="utf-8")
+            history_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "push_id": "push-a",
+                            "status": "success",
+                            "log_file": "runtime/odoo_push/push-a.log",
+                        },
+                        {
+                            "push_id": "push-b",
+                            "status": "failed",
+                            "log_file": "runtime/odoo_push/push-b.log",
+                        },
+                    ],
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(odoo_push_history, "PROJECT_ROOT", root), \
+                mock.patch.object(odoo_push_history, "HISTORY_DIR", history_dir), \
+                mock.patch.object(odoo_push_history, "HISTORY_FILE", history_file):
+                ok, error = odoo_push_history.delete_push_run("push-a")
+
+            self.assertTrue(ok)
+            self.assertIsNone(error)
+            self.assertFalse(log_file.exists())
+            remaining = json.loads(history_file.read_text(encoding="utf-8"))
+            self.assertEqual([rec["push_id"] for rec in remaining], ["push-b"])
 
 
 if __name__ == "__main__":

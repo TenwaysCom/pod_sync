@@ -207,6 +207,19 @@ class Phase1aRunDiscoveryTests(unittest.TestCase):
             self.assertEqual(review_payload["items"][0]["reason_label"], "命中多个候选出库单")
             self.assertEqual(review_payload["reason_options"][1]["label"], "命中多个候选出库单")
 
+            with mock.patch.object(phase1a_runs, "PHASE1A_OUT_ROOT", out_root):
+                with mock.patch.object(phase1a_runs, "resolve_storage_dir", return_value=storage_root):
+                    all_payload = phase1a_runs.build_phase1a_document_listing(
+                        "202604270999",
+                        page=1,
+                        page_size=10,
+                    )
+
+            self.assertEqual(all_payload["items"][0]["document_uid"], "doc-3")
+            self.assertEqual(all_payload["status_counts"]["ready"], 2)
+            self.assertEqual(all_payload["status_counts"]["needs_review"], 1)
+            self.assertEqual(all_payload["reason_counts"]["MULTIPLE_PICKING_CANDIDATES"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

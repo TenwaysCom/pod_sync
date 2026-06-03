@@ -4,7 +4,7 @@
   <section class="grid grid-cards">
     <article class="card stat-card">
       <p class="label">存储目录</p>
-      <h2 id="filesStorageDir">{{ config_snapshot.storage_dir }}</h2>
+      <h2 id="filesStorageDir" class="storage-path mono" title="{{ config_snapshot.storage_dir }}">{{ config_snapshot.storage_dir }}</h2>
       <p class="muted">当前下载文件根目录</p>
     </article>
     <article class="card stat-card">
@@ -23,7 +23,7 @@
     <article class="card stat-card">
       <p class="label">列表状态</p>
       <h2 id="filesLatestModified">-</h2>
-      <p class="muted">最近修改时间与实时刷新状态</p>
+      <p class="muted">最新入库时间与实时刷新状态</p>
       <div class="files-status-tools">
         <label class="toggle">
           <input id="includeInternal" type="checkbox">
@@ -71,7 +71,7 @@
       </div>
       <div class="filter-meta">
         <span id="fileFilterSummary">等待加载文件列表。</span>
-        <span id="fileAutoRefreshHint">自动刷新：10 秒</span>
+        <span id="fileAutoRefreshHint">默认排序：最新入库在前 · 自动刷新：10 秒</span>
       </div>
     </div>
   </section>
@@ -85,7 +85,7 @@
             <th>来源</th>
             <th>相对路径</th>
             <th>大小</th>
-            <th>修改时间</th>
+            <th>入库时间</th>
             <th>操作</th>
           </tr>
         </thead>
@@ -153,11 +153,12 @@
         root.innerHTML = '<p class="empty">当前没有可显示的文件来源。</p>';
         return;
       }
+      const currentSource = document.getElementById('fileSourceFilter').value;
       root.innerHTML = payload.source_options.map((item) => `
-        <div class="source-summary-item">
+        <button class="source-summary-item source-filter-chip${item.key === currentSource ? ' is-active' : ''}" type="button" data-source-key="${escapeHtml(item.key)}">
           <strong>${escapeHtml(item.label)}</strong>
           <span>${escapeHtml(String(item.count))} 个文件</span>
-        </div>
+        </button>
       `).join('');
     }
 
@@ -176,8 +177,8 @@
     function renderStats(payload) {
       document.getElementById('filesTotalCount').textContent = String(payload.total_files);
       document.getElementById('filesTotalSize').textContent = payload.total_size_label;
-      document.getElementById('filesLatestModified').textContent = payload.latest_modified_at || '无';
-      document.getElementById('fileFilterSummary').textContent = `当前筛选命中 ${payload.total_files} 个文件，正在显示第 ${payload.page_from} - ${payload.page_to} 条`;
+      document.getElementById('filesLatestModified').textContent = payload.latest_stored_at || payload.latest_modified_at || '无';
+      document.getElementById('fileFilterSummary').textContent = `当前筛选命中 ${payload.total_files} 个文件，默认按入库时间倒序，正在显示第 ${payload.page_from} - ${payload.page_to} 条`;
       document.getElementById('paginationSummary').textContent = `第 ${payload.page_from} - ${payload.page_to} 条，共 ${payload.total_files} 条`;
       document.getElementById('paginationCurrent').textContent = `第 ${payload.page} / ${payload.total_pages} 页`;
       document.getElementById('prevPageButton').disabled = !payload.has_prev;
@@ -194,19 +195,22 @@
         body.innerHTML = '<tr><td colspan="6"><div class="empty">当前筛选下没有文件。</div></td></tr>';
         return;
       }
-      body.innerHTML = payload.items.map((item) => `
-        <tr class="file-row">
+      body.innerHTML = payload.items.map((item) => {
+        const extensionLabel = item.extension ? item.extension.toUpperCase() : '无扩展名';
+        return `
+        <tr class="file-row" data-source="${escapeHtml(item.source_key)}">
           <td class="file-name-cell">
             <div class="file-primary"><strong>${escapeHtml(item.file_name)}</strong></div>
-            <div class="file-meta">${escapeHtml(item.extension || '无扩展名')} · ${escapeHtml(item.size_label)}</div>
+            <div class="file-meta">${escapeHtml(extensionLabel)}</div>
           </td>
-          <td><span class="source-pill">${escapeHtml(item.source_label)}</span></td>
+          <td><span class="source-pill" data-source="${escapeHtml(item.source_key)}">${escapeHtml(item.source_label)}</span></td>
           <td class="mono file-path-cell" title="${escapeHtml(item.relative_path)}">${escapeHtml(item.relative_path)}</td>
           <td>${escapeHtml(item.size_label)}</td>
-          <td>${escapeHtml(item.modified_at)}</td>
+          <td>${escapeHtml(item.stored_at || item.modified_at)}</td>
           <td><a class="table-link" href="${storageFileUrl(item.relative_path)}" target="_blank" rel="noreferrer">打开文件</a></td>
         </tr>
-      `).join('');
+      `;
+      }).join('');
     }
 
     async function refreshFiles() {
@@ -249,6 +253,14 @@
     }
 
     document.getElementById('refreshFilesButton').addEventListener('click', refreshFiles);
+    document.getElementById('sourceSummaryList').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-source-key]');
+      if (!button) return;
+      const select = document.getElementById('fileSourceFilter');
+      const nextSource = button.dataset.sourceKey || '';
+      select.value = select.value === nextSource ? '' : nextSource;
+      resetToFirstPageAndRefresh();
+    });
     document.getElementById('fileSourceFilter').addEventListener('change', resetToFirstPageAndRefresh);
     document.getElementById('includeInternal').addEventListener('change', resetToFirstPageAndRefresh);
     document.getElementById('filePageSize').addEventListener('change', resetToFirstPageAndRefresh);

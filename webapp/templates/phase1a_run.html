@@ -29,32 +29,45 @@
       <div class="card">
         <div class="section-head section-head-tight">
           <div>
-            <p class="eyebrow">运行摘要</p>
-            <h2>{{ run.run_name }}</h2>
+            <p class="eyebrow">当前批次</p>
+            <h2>处理概况</h2>
           </div>
         </div>
-        <ul class="compact-list kv-list">
-          <li>
-            <span class="kv-label">处理模式</span>
-            <span class="kv-value">{{ "仅解析直推" if run.summary.processing_mode == "parse_only" else "Scope 匹配" }}</span>
-          </li>
-          <li>
-            <span class="kv-label">生成时间</span>
-            <span class="kv-value">{{ run.summary.generated_at }}</span>
-          </li>
-          <li>
-            <span class="kv-label">同步配置</span>
-            <span class="kv-value mono">{{ run.summary.sync_config_path or "无" }}</span>
-          </li>
-          <li>
-            <span class="kv-label">输出目录</span>
-            <span class="kv-value mono">{{ run.summary.output_dir }}</span>
-          </li>
-          <li>
-            <span class="kv-label">Odoo Scope</span>
-            <span class="kv-value mono">{{ run.summary.odoo_scope_path or "当前模式不需要" }}</span>
-          </li>
-        </ul>
+        <div class="phase-side-metrics">
+          <div>
+            <span>待处理</span>
+            <strong>{{ run.summary.review_document_count or run.summary.unmatched_document_count }}</strong>
+          </div>
+          <div>
+            <span>可推送</span>
+            <strong>{{ run.summary.ready_document_count or run.summary.matched_document_count }}</strong>
+          </div>
+        </div>
+        <details class="details-card details-card-block phase-technical-summary">
+          <summary>技术配置</summary>
+          <ul class="compact-list kv-list">
+            <li>
+              <span class="kv-label">处理模式</span>
+              <span class="kv-value">{{ "仅解析直推" if run.summary.processing_mode == "parse_only" else "Scope 匹配" }}</span>
+            </li>
+            <li>
+              <span class="kv-label">生成时间</span>
+              <span class="kv-value">{{ run.summary.generated_at }}</span>
+            </li>
+            <li>
+              <span class="kv-label">同步配置</span>
+              <span class="kv-value mono">{{ run.summary.sync_config_path or "无" }}</span>
+            </li>
+            <li>
+              <span class="kv-label">输出目录</span>
+              <span class="kv-value mono">{{ run.summary.output_dir }}</span>
+            </li>
+            <li>
+              <span class="kv-label">Odoo Scope</span>
+              <span class="kv-value mono">{{ run.summary.odoo_scope_path or "当前模式不需要" }}</span>
+            </li>
+          </ul>
+        </details>
       </div>
 
       <div class="card">
@@ -87,6 +100,7 @@
           {% endfor %}
         </div>
       </details>
+
     </aside>
 
     <div class="phase-main">
@@ -94,14 +108,33 @@
         <div class="section-head">
           <div>
             <p class="eyebrow">主视图</p>
+            <h2>文档检查</h2>
+            <p>默认先看待处理文档；确认结果稳定后再切换到可推送或全部。</p>
           </div>
           <div class="header-actions">
+            <button class="secondary-button" type="button" data-open-phase-rules>识别规则</button>
             <form method="post" action="{{ request.url_for('delete_phase1a_run_action', run_name=run.run_name) }}" class="inline-action-form" onsubmit="return confirm('确认删除运行 {{ run.run_name }} 吗？')">
               <input type="hidden" name="redirect_to" value="{{ request.url_for('phase1a_page') }}">
               <button type="submit" class="danger-button">删除运行</button>
             </form>
           </div>
         </div>
+
+        <div class="phase-focus-bar" id="phaseQuickFilters">
+          <button type="button" class="phase-filter-chip is-review" data-filter-status="needs_review">
+            <span>待处理</span>
+            <strong>{{ run.summary.review_document_count or run.summary.unmatched_document_count }}</strong>
+          </button>
+          <button type="button" class="phase-filter-chip is-ready" data-filter-status="ready">
+            <span>可推送</span>
+            <strong>{{ run.summary.ready_document_count or run.summary.matched_document_count }}</strong>
+          </button>
+          <button type="button" class="phase-filter-chip" data-filter-status="">
+            <span>全部文档</span>
+            <strong>{{ run.summary.document_count }}</strong>
+          </button>
+        </div>
+        <div class="phase-reason-strip" id="phaseReasonQuickFilters"></div>
 
         <div class="toolbar filter-toolbar phase-doc-toolbar">
           <label class="search-field">
@@ -150,15 +183,14 @@
             <thead>
               <tr>
                 <th>文档</th>
-                <th>状态</th>
+                <th>识别结果</th>
                 <th>来源</th>
-                <th>匹配键 / 原因</th>
-                <th>路径与链接</th>
+                <th>文件</th>
               </tr>
             </thead>
             <tbody id="phaseDocBody">
               <tr class="file-row">
-                <td colspan="5" class="empty-cell">正在加载文档列表…</td>
+                <td colspan="4" class="empty-cell">正在加载文档列表…</td>
               </tr>
             </tbody>
           </table>
@@ -181,12 +213,14 @@
         page: Math.max(1, Number(queryParams.get("page") || 1)),
         pageSize: Math.max(1, Number(queryParams.get("page_size") || 25)),
         query: (queryParams.get("q") || "").trim(),
-        status: queryParams.get("status") || "",
+        status: queryParams.has("status") ? (queryParams.get("status") || "") : "needs_review",
         source: queryParams.get("source") || "",
         reason: queryParams.get("reason") || "",
       };
 
       const elements = {
+        quickFilters: document.getElementById("phaseQuickFilters"),
+        reasonQuickFilters: document.getElementById("phaseReasonQuickFilters"),
         search: document.getElementById("phaseDocSearch"),
         status: document.getElementById("phaseDocStatus"),
         source: document.getElementById("phaseDocSource"),
@@ -218,23 +252,60 @@
         select.innerHTML = html;
       }
 
+      function countFor(payload, group, value) {
+        if (!payload[group]) return null;
+        return Number(payload[group][value] || 0);
+      }
+
+      function renderQuickFilters(payload) {
+        elements.quickFilters.querySelectorAll("[data-filter-status]").forEach((button) => {
+          const status = button.dataset.filterStatus || "";
+          button.classList.toggle("is-active", state.status === status);
+          const countTarget = button.querySelector("strong");
+          if (!countTarget) return;
+          const nextCount = status
+            ? countFor(payload, "status_counts", status)
+            : (() => {
+                const readyCount = countFor(payload, "status_counts", "ready");
+                const reviewCount = countFor(payload, "status_counts", "needs_review");
+                return readyCount === null || reviewCount === null ? null : readyCount + reviewCount;
+              })();
+          if (nextCount !== null) countTarget.textContent = String(nextCount);
+        });
+
+        const reasonOptions = payload.reason_options.filter((item) => item.value);
+        if (!reasonOptions.length || state.status === "ready") {
+          elements.reasonQuickFilters.innerHTML = "";
+          return;
+        }
+        elements.reasonQuickFilters.innerHTML = reasonOptions.map((item) => {
+          const active = state.reason === item.value ? " is-active" : "";
+          const count = countFor(payload, "reason_counts", item.value);
+          const countHtml = count === null ? "" : ` <strong>${escapeHtml(String(count))}</strong>`;
+          return `<button type="button" class="phase-reason-chip${active}" data-filter-reason="${escapeHtml(item.value)}">${escapeHtml(item.label)}${countHtml}</button>`;
+        }).join("");
+      }
+
       function renderRows(items) {
         if (!items.length) {
-          elements.body.innerHTML = '<tr class="file-row"><td colspan="5" class="empty-cell">当前筛选下没有文档。</td></tr>';
+          elements.body.innerHTML = '<tr class="file-row"><td colspan="4" class="empty-cell">当前筛选下没有文档。</td></tr>';
           return;
         }
         elements.body.innerHTML = items.map((item) => {
           const keyLabel = item.preferred_key_type ? (keyTypeLabels[item.preferred_key_type] || item.preferred_key_type) : "未定匹配键";
           const keyValue = item.preferred_key || item.primary_picking_name || item.primary_tracking_number || "-";
-          const reason = item.reason_label || item.reason_code || "-";
+          const reason = item.reason_label || item.reason_code || "";
           const sourceLink = item.file_url
             ? `<a class="text-link" href="${escapeHtml(item.file_url)}" target="_blank" rel="noreferrer">源文件</a>`
             : '<span class="muted">无源链接</span>';
           const localLink = item.local_file_href
             ? `<a class="text-link" href="${escapeHtml(item.local_file_href)}" target="_blank" rel="noreferrer">本地文件</a>`
             : '<span class="muted">无本地链接</span>';
+          const resultClass = item.status === "ready" ? "badge-success" : "badge-failed";
+          const sourceClass = item.source_name === "CMC" ? "CMC" : (item.source_name === "EMTC" ? "EMTC" : "");
+          const filePath = item.local_relative_path || item.source_path || "-";
           return `
-            <tr class="file-row">
+            <tr class="file-row phase-doc-row ${item.status === "needs_review" ? "needs-review" : "ready"}">
               <td class="file-name-cell">
                 <div class="file-primary">
                   <strong>${escapeHtml(item.file_name)}</strong>
@@ -242,24 +313,19 @@
                 </div>
               </td>
               <td>
-                <span class="badge badge-${item.status === "ready" ? "success" : "failed"}">${escapeHtml(statusLabels[item.status] || item.status || "-")}</span>
-              </td>
-              <td>
-                <div class="file-primary">
-                  <strong>${escapeHtml(item.source_name || "-")}</strong>
-                  <div class="file-meta">${escapeHtml(item.source_type || "-")}</div>
+                <div class="phase-result-cell">
+                  <span class="badge ${resultClass}">${escapeHtml(statusLabels[item.status] || item.status || "-")}</span>
+                  <strong>${escapeHtml(keyValue)}</strong>
+                  <div class="file-meta">${escapeHtml(reason || keyLabel)}</div>
                 </div>
               </td>
               <td>
-                <div class="file-primary">
-                  <strong>${escapeHtml(keyLabel)} · ${escapeHtml(keyValue)}</strong>
-                  <div class="file-meta">${escapeHtml(reason)}</div>
-                </div>
+                <span class="source-pill" data-source="${escapeHtml(sourceClass)}">${escapeHtml(item.source_label || item.source_name || "-")}</span>
               </td>
               <td class="file-path-cell">
                 <div class="file-primary">
-                  <strong>${escapeHtml(item.source_path || "-")}</strong>
-                  <div class="file-meta">${localLink} · ${sourceLink}</div>
+                  <strong class="phase-file-path" title="${escapeHtml(filePath)}">${escapeHtml(filePath)}</strong>
+                  <div class="file-meta phase-file-links">${localLink} · ${sourceLink}</div>
                 </div>
               </td>
             </tr>
@@ -285,6 +351,7 @@
         updateSelectOptions(elements.status, payload.status_options, state.status);
         updateSelectOptions(elements.source, payload.source_options, state.source);
         updateSelectOptions(elements.reason, payload.reason_options, state.reason);
+        renderQuickFilters(payload);
         renderRows(payload.items);
         elements.meta.textContent = payload.total
           ? `当前筛选命中 ${payload.total} 条，正在显示第 ${payload.page_start} - ${payload.page_end} 条`
@@ -300,17 +367,35 @@
         debounceTimer = window.setTimeout(() => {
           loadRows().catch((error) => {
             elements.meta.textContent = `加载失败：${error.message}`;
-            elements.body.innerHTML = '<tr class="file-row"><td colspan="5" class="empty-cell">加载失败，请稍后重试。</td></tr>';
+            elements.body.innerHTML = '<tr class="file-row"><td colspan="4" class="empty-cell">加载失败，请稍后重试。</td></tr>';
           });
         }, 220);
       }
 
+      elements.quickFilters.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-filter-status]");
+        if (!button) return;
+        state.status = button.dataset.filterStatus || "";
+        if (state.status === "ready") state.reason = "";
+        elements.status.value = state.status;
+        elements.reason.value = state.reason;
+        scheduleReload(true);
+      });
+      elements.reasonQuickFilters.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-filter-reason]");
+        if (!button) return;
+        const nextReason = button.dataset.filterReason || "";
+        state.reason = state.reason === nextReason ? "" : nextReason;
+        elements.reason.value = state.reason;
+        scheduleReload(true);
+      });
       elements.search.addEventListener("input", (event) => {
         state.query = event.target.value.trim();
         scheduleReload(true);
       });
       elements.status.addEventListener("change", (event) => {
         state.status = event.target.value;
+        if (state.status === "ready") state.reason = "";
         scheduleReload(true);
       });
       elements.source.addEventListener("change", (event) => {
@@ -337,12 +422,15 @@
       });
 
       elements.search.value = state.query;
+      elements.status.value = state.status;
+      elements.reason.value = state.reason;
       elements.pageSize.value = String(state.pageSize);
 
       loadRows().catch((error) => {
         elements.meta.textContent = `加载失败：${error.message}`;
-        elements.body.innerHTML = '<tr class="file-row"><td colspan="5" class="empty-cell">加载失败，请稍后重试。</td></tr>';
+        elements.body.innerHTML = '<tr class="file-row"><td colspan="4" class="empty-cell">加载失败，请稍后重试。</td></tr>';
       });
     })();
   </script>
+  {% include "partials/phase1a_rules_dialog.html" %}
 {% endblock %}

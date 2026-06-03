@@ -6,7 +6,7 @@
   <title>{% block title %}POD 同步控制台{% endblock %}</title>
   <meta name="csrf-token" content="{{ csrf_token or '' }}">
   <link rel="icon" href="{{ request.url_for('static', path='favicon.svg') }}" type="image/svg+xml">
-  <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}">
+  <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}?v={{ static_version|default('20260603') }}">
 </head>
 <body>
   <header class="topbar">
@@ -27,7 +27,7 @@
       <a class="{% if page_id == 'sync' %}active{% endif %}" href="{{ request.url_for('sync_page') }}">同步</a>
       <a class="{% if page_id == 'files' %}active{% endif %}" href="{{ request.url_for('files_page') }}">文件</a>
       <a class="{% if page_id == 'phase1a' %}active{% endif %}" href="{{ request.url_for('phase1a_page') }}">识别</a>
-      <a class="{% if page_id == 'reconcile' %}active{% endif %}" href="{{ request.url_for('reconcile_page') }}">总结对账</a>
+      <a class="nav-critical {% if page_id == 'reconcile' %}active{% endif %}" href="{{ request.url_for('reconcile_page') }}">总结对账</a>
       <a class="{% if page_id == 'odoo_push' %}active{% endif %}" href="{{ request.url_for('odoo_push_page') }}">Odoo 推送</a>
       <a class="{% if page_id == 'scheduler' %}active{% endif %}" href="{{ request.url_for('scheduler_page') }}">定时任务</a>
       <a class="{% if page_id == 'jobs' %}active{% endif %}" href="{{ request.url_for('jobs_page') }}">任务</a>

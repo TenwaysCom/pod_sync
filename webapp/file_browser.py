@@ -66,15 +66,18 @@ def build_storage_listing(
 
             relative_path = relative.as_posix()
             source_key = relative_path.split("/", 1)[0] if relative_path else ""
-            if source and source_key != source:
-                continue
             if not include_internal and source_key == "_integrity":
                 continue
             if query_text and query_text not in relative_path.lower():
                 continue
 
+            source_counts[source_key] += 1
+            if source and source_key != source:
+                continue
+
             stat = path.stat()
-            modified_at = datetime.fromtimestamp(stat.st_mtime).astimezone()
+            stored_at = datetime.fromtimestamp(stat.st_mtime).astimezone()
+            stored_at_label = stored_at.strftime("%Y-%m-%d %H:%M:%S")
             rows.append(
                 {
                     "file_name": path.name,
@@ -83,17 +86,18 @@ def build_storage_listing(
                     "source_label": source_label(source_key),
                     "size_bytes": stat.st_size,
                     "size_label": format_file_size(stat.st_size),
-                    "modified_at": modified_at.strftime("%Y-%m-%d %H:%M:%S"),
+                    "stored_at": stored_at_label,
+                    "stored_ts": stat.st_mtime,
+                    "modified_at": stored_at_label,
                     "modified_ts": stat.st_mtime,
                     "extension": path.suffix.lower(),
                 }
             )
-            source_counts[source_key] += 1
             total_size += stat.st_size
             if latest_mtime is None or stat.st_mtime > latest_mtime:
                 latest_mtime = stat.st_mtime
 
-    rows.sort(key=lambda row: (row["modified_ts"], row["relative_path"]), reverse=True)
+    rows.sort(key=lambda row: (row["stored_ts"], row["relative_path"]), reverse=True)
     filtered_total = len(rows)
     page_size = max(1, min(int(page_size or 25), 200))
     page = max(1, int(page or 1))
@@ -123,7 +127,9 @@ def build_storage_listing(
         "total_files": filtered_total,
         "total_size_bytes": total_size,
         "total_size_label": format_file_size(total_size),
+        "latest_stored_at": latest_modified_at,
         "latest_modified_at": latest_modified_at,
+        "default_sort": "stored_at_desc",
         "source_count": len(source_options),
         "source_options": source_options,
         "page": page,

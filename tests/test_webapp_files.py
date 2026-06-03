@@ -1,3 +1,4 @@
+import os
 import sys
 import tempfile
 import unittest
@@ -39,6 +40,20 @@ class WebAppFileBrowserTests(unittest.TestCase):
             self.assertEqual(payload["total_files"], 1)
             self.assertEqual(payload["items"][0]["source_key"], "CMC")
 
+    def test_build_storage_listing_keeps_source_options_when_source_filtered(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "storage" / "pod"
+            (root / "CMC").mkdir(parents=True)
+            (root / "EMTC").mkdir(parents=True)
+            (root / "CMC" / "cmc.pdf").write_text("a", encoding="utf-8")
+            (root / "EMTC" / "emtc.png").write_text("b", encoding="utf-8")
+
+            payload = build_storage_listing(root, source="CMC")
+
+            self.assertEqual(payload["total_files"], 1)
+            self.assertEqual(payload["items"][0]["source_key"], "CMC")
+            self.assertEqual([item["key"] for item in payload["source_options"]], ["CMC", "EMTC"])
+
     def test_build_storage_listing_supports_pagination(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "storage" / "pod"
@@ -55,6 +70,29 @@ class WebAppFileBrowserTests(unittest.TestCase):
             self.assertEqual(payload["page_from"], 11)
             self.assertEqual(payload["page_to"], 20)
             self.assertEqual(len(payload["items"]), 10)
+
+    def test_build_storage_listing_defaults_to_newest_stored_first(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "storage" / "pod"
+            (root / "CMC").mkdir(parents=True)
+            files = [
+                (root / "CMC" / "old.pdf", 1000),
+                (root / "CMC" / "middle.pdf", 2000),
+                (root / "CMC" / "new.pdf", 3000),
+            ]
+            for path, stored_ts in files:
+                path.write_text(path.name, encoding="utf-8")
+                os.utime(path, (stored_ts, stored_ts))
+
+            payload = build_storage_listing(root)
+
+            self.assertEqual(payload["default_sort"], "stored_at_desc")
+            self.assertEqual(
+                [item["relative_path"] for item in payload["items"]],
+                ["CMC/new.pdf", "CMC/middle.pdf", "CMC/old.pdf"],
+            )
+            self.assertEqual(payload["items"][0]["stored_at"], payload["items"][0]["modified_at"])
+            self.assertEqual(payload["items"][0]["stored_ts"], payload["items"][0]["modified_ts"])
 
     def test_resolve_storage_file_blocks_path_traversal(self):
         with tempfile.TemporaryDirectory() as tmpdir:

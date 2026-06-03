@@ -125,6 +125,40 @@ def list_push_runs(limit: int = 50) -> list[dict]:
     return load_history()[:limit]
 
 
+def delete_push_run(push_id: str) -> tuple[bool, str | None]:
+    with _lock:
+        records = load_history()
+        target = None
+        kept = []
+        for rec in records:
+            if rec.get("push_id") == push_id:
+                target = rec
+            else:
+                kept.append(rec)
+
+        if target is None:
+            return False, "未找到推送记录。"
+        if target.get("status") == "running":
+            return False, "运行中的推送记录不能删除。"
+
+        _save_history(kept)
+
+        log_file = target.get("log_file")
+        if log_file:
+            log_path = (PROJECT_ROOT / log_file).resolve()
+            history_root = HISTORY_DIR.resolve()
+            try:
+                log_path.relative_to(history_root)
+            except ValueError:
+                return True, None
+            if log_path.exists() and log_path.is_file():
+                try:
+                    log_path.unlink()
+                except OSError:
+                    pass
+        return True, None
+
+
 def get_log_content(push_id: str) -> str | None:
     rec = get_push_run(push_id)
     if not rec:

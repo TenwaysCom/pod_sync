@@ -44,27 +44,8 @@
         </ul>
       </div>
 
-      <div class="card">
-        <div class="section-head section-head-tight">
-          <div>
-            <p class="eyebrow">识别规则</p>
-            <h2>当前规则</h2>
-          </div>
-        </div>
-        <ul class="compact-list">
-          <li>`EMTC Google Drive`：提取 tracking number，例如 `3SYZXG8293874`。</li>
-          <li>`CMC OneDrive`：把 `EU22114` 还原成 `WCB2B/OUT/22114`。</li>
-          <li>只有无法确定匹配键的文件才会进入 `待处理`。</li>
-        </ul>
-      </div>
-
-      <div class="card">
-        <div class="section-head section-head-tight">
-          <div>
-            <p class="eyebrow">最近任务</p>
-            <h2>网页触发记录</h2>
-          </div>
-        </div>
+      <details class="card details-card details-card-block">
+        <summary>网页触发记录</summary>
         {% if recent_jobs %}
           <div class="list-stack">
             {% for job in recent_jobs %}
@@ -86,7 +67,7 @@
         {% else %}
           <p class="empty">还没有从网页控制台启动过识别任务。</p>
         {% endif %}
-      </div>
+      </details>
     </aside>
 
     <div class="phase-main">
@@ -97,15 +78,16 @@
             <h2>{% if latest_run %}{{ latest_run.run_name }}{% else %}等待第一次运行{% endif %}</h2>
             <p>{% if latest_run %}这里保留最常用的摘要和下载入口，不再内嵌巡检页。{% else %}运行后会在这里显示核心摘要和下载入口。{% endif %}</p>
           </div>
-          {% if latest_run %}
-            <div class="header-actions">
-              <a class="text-link" href="{{ request.url_for('phase1a_run_detail', run_name=latest_run.run_name) }}">打开运行详情</a>
+          <div class="header-actions">
+            <button class="secondary-button" type="button" data-open-phase-rules>识别规则</button>
+            {% if latest_run %}
+              <a class="text-link" href="{{ request.url_for('phase1a_run_detail', run_name=latest_run.run_name) }}?status=">全部文档</a>
               <form method="post" action="{{ request.url_for('delete_phase1a_run_action', run_name=latest_run.run_name) }}" class="inline-action-form" onsubmit="return confirm('确认删除运行 {{ latest_run.run_name }} 吗？')">
                 <input type="hidden" name="redirect_to" value="{{ request.url.path }}">
                 <button type="submit" class="danger-button">删除运行</button>
               </form>
-            </div>
-          {% endif %}
+            {% endif %}
+          </div>
         </div>
         {% if latest_run %}
           <div class="summary-inline-grid">
@@ -204,4 +186,5 @@
       </section>
     </div>
   </section>
+  {% include "partials/phase1a_rules_dialog.html" %}
 {% endblock %}

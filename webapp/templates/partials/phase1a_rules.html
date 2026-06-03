@@ -1,0 +1,65 @@
+<div class="phase-rule-guide">
+  <section class="phase-rule-block">
+    <h3>当前默认模式</h3>
+    <ul>
+      <li>默认使用 <code>parse_only</code> 模式：不先查 Odoo Scope，只从 POD 文件信息里识别可回填主键。</li>
+      <li>识别文本来源包括 <code>file_name</code>、<code>source_path</code>、<code>local_path</code>。</li>
+      <li>识别结果优先使用 <code>picking_name</code>；没有唯一 picking 时，才使用唯一 <code>tracking_number</code>。</li>
+      <li>无法确定唯一主键的文件会进入“待处理”，不会进入 Odoo 回传 payload。</li>
+    </ul>
+  </section>
+
+  <section class="phase-rule-block">
+    <h3>通用清洗</h3>
+    <ul>
+      <li>所有候选值会转大写，并去掉非字母数字字符，例如 <code>WCB2B/OUT/22114</code> 会规范成 <code>WCB2BOUT22114</code>。</li>
+      <li>同一个候选只保留一次。</li>
+      <li>类似 <code>20260430</code> 的日期数字不会当作 tracking number。</li>
+      <li>picking 后面的噪音字母会剥离，例如 <code>WCB2BOUT19782A</code> 识别为 <code>WCB2BOUT19782</code>。</li>
+      <li>邮政 tracking 的尾部字母会保留，例如 <code>LA857793468NL</code>、<code>CF438625735NL</code>。</li>
+    </ul>
+  </section>
+
+  <section class="phase-rule-block">
+    <h3>CMC OneDrive</h3>
+    <ul>
+      <li><code>EU22114.pdf</code> 识别为 <code>WCB2BOUT22114</code>。</li>
+      <li><code>HK23898.pdf</code> 识别为 <code>WCB2COUT23898</code>。</li>
+      <li>支持 <code>EU-22114</code>、<code>EU_22114</code>、<code>EU 22114</code> 这类分隔符。</li>
+      <li>多单文件会拆成多条 payload，例如 <code>EU22080-82-83.pdf</code> 识别为 <code>WCB2BOUT22080</code>、<code>WCB2BOUT22082</code>、<code>WCB2BOUT22083</code>。</li>
+      <li>单页后缀不拆单，例如 <code>EU22114-1.pdf</code>、<code>23735-2.pdf</code> 仍识别为同一个 POD。</li>
+      <li>纯数字文件默认按 CMC B2B 出库识别，例如 <code>23735.pdf</code> 识别为 <code>WCB2BOUT23735</code>。</li>
+      <li>完整出库单号会直接使用，例如 <code>WHOUT15504</code>、<code>WCB2BOUT20655</code>、<code>WCB2C-OUT-23898</code>。</li>
+      <li>退货和其他类型也会识别，例如 <code>WBB2BRET01301</code>、<code>WCB2BRET01301</code>、<code>WRB2BRET01301</code>、<code>Other07400</code>。</li>
+    </ul>
+  </section>
+
+  <section class="phase-rule-block">
+    <h3>EMTC Google Drive</h3>
+    <ul>
+      <li>主要识别 tracking number，例如 <code>2026-03-19_3SYZXG8293874.png</code> 识别为 <code>3SYZXG8293874</code>。</li>
+      <li>支持 <code>3SHOHR</code> 开头的 tracking，例如 <code>3SHOHR094388273</code>。</li>
+      <li>支持邮政 tracking，例如 <code>LA857793468NL</code>、<code>CF438625735NL</code>。</li>
+      <li>也支持常见字母数字 tracking：字母开头、数字开头、以及 8 到 24 位纯数字。</li>
+    </ul>
+  </section>
+
+  <section class="phase-rule-block">
+    <h3>Westerman API</h3>
+    <ul>
+      <li>当前没有 Westerman 专属 picking 还原规则。</li>
+      <li>如果文件名或路径中出现通用 picking/tracking 模式，会按通用规则识别。</li>
+      <li>Westerman 下载通常按 tracking 查询，因此正常情况下应以 tracking number 作为主键。</li>
+    </ul>
+  </section>
+
+  <section class="phase-rule-block">
+    <h3>待处理原因</h3>
+    <ul>
+      <li><code>NO_IDENTIFIER_FOUND</code>：文件名和路径里没有可用 picking 或 tracking。</li>
+      <li><code>MULTIPLE_PICKING_CANDIDATES</code>：识别出多个 picking，无法安全拆单，也没有唯一 tracking 兜底。</li>
+      <li><code>MULTIPLE_TRACKING_CANDIDATES</code>：识别出多个 tracking，且没有唯一 picking 兜底。</li>
+      <li><code>source_url_missing</code> 只是解析备注：说明源文件链接缺失，不等同于识别失败。</li>
+    </ul>
+  </section>
+</div>

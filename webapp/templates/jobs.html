@@ -1,21 +1,51 @@
 {% extends "base.html" %}
-{% block title %}任务 · POD 同步控制台{% endblock %}
+{% block title %}任务与历史 · POD 同步控制台{% endblock %}
 {% block content %}
-  <section class="section">
+  {% set visible_jobs = jobs[:10] %}
+
+  <section class="section jobs-hero">
     <div class="section-head">
       <div>
         <p class="eyebrow">执行队列</p>
-        <h2>最近任务</h2>
+        <h2>任务与历史数据</h2>
+        <p class="lede">这里集中查看后台任务、识别运行和 Odoo 推送记录。</p>
       </div>
     </div>
-    {% if jobs %}
-      <div class="list-stack">
-        {% for job in jobs %}
+
+    <div class="jobs-summary-grid">
+      <article class="jobs-summary-card">
+        <span>后台 Job</span>
+        <strong>{{ visible_jobs|length }}</strong>
+        <p>本页只显示最新 10 条 Job。</p>
+      </article>
+      <article class="jobs-summary-card">
+        <span>识别运行</span>
+        <strong>{{ recent_runs|length }}</strong>
+        <p>最近发现的 Phase 1A 运行。</p>
+      </article>
+      <article class="jobs-summary-card">
+        <span>Odoo 推送</span>
+        <strong>{{ push_runs|length }}</strong>
+        <p>最近推送历史记录。</p>
+      </article>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">后台任务</p>
+        <h2>最新 10 条 Job</h2>
+      </div>
+    </div>
+    {% if visible_jobs %}
+      <div class="list-stack jobs-list">
+        {% for job in visible_jobs %}
           <div class="list-item list-item-shell">
-            <a class="list-item-main" href="{{ request.url_for('job_detail', job_id=job.job_id) }}">
+            <div class="list-item-main">
               <div>
                 <strong>{{ job.label }}</strong>
-                <p>{{ job.created_at }} · {{ job.command_display }}</p>
+                <p class="wrap-anywhere">{{ job.created_at }} · {{ job.command_display }}</p>
               </div>
               <div class="list-metrics">
                 <span class="badge badge-{{ job.status }}">{{ job_status_labels.get(job.status, job.status) }}</span>
@@ -23,16 +53,101 @@
                   <span>退出码 {{ job.exit_code }}</span>
                 {% endif %}
               </div>
-            </a>
-            <form method="post" action="{{ request.url_for('delete_job', job_id=job.job_id) }}" class="inline-action-form" onsubmit="return confirm('确认删除任务 {{ job.job_id }} 吗？')">
-              <input type="hidden" name="redirect_to" value="{{ request.url.path }}">
-              <button type="submit" class="danger-button" {% if job.status in ['queued', 'running'] %}disabled{% endif %}>删除</button>
-            </form>
+            </div>
+            <div class="jobs-row-actions">
+              <a class="secondary-button" href="{{ request.url_for('job_detail', job_id=job.job_id) }}">打开</a>
+              <form method="post" action="{{ request.url_for('delete_job', job_id=job.job_id) }}" class="inline-action-form" onsubmit="return confirm('确认删除任务 {{ job.job_id }} 吗？')">
+                <input type="hidden" name="redirect_to" value="{{ request.url.path }}">
+                <button type="submit" class="danger-button" {% if job.status in ['queued', 'running'] %}disabled{% endif %}>删除</button>
+              </form>
+            </div>
           </div>
         {% endfor %}
       </div>
     {% else %}
       <p class="empty">还没有任务记录。</p>
+    {% endif %}
+  </section>
+
+  <section class="section">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">历史数据</p>
+        <h2>识别运行列表</h2>
+      </div>
+    </div>
+    {% if recent_runs %}
+      <div class="jobs-history-list">
+        {% for run in recent_runs %}
+          <div class="jobs-history-row jobs-history-row-wide">
+            <div>
+              <strong>{{ run.run_name }}</strong>
+              <p>{{ run.generated_at or "-" }}</p>
+            </div>
+            <div class="jobs-history-metrics">
+              <span>{{ run.document_count or 0 }} 文档</span>
+              <span>{{ run.ready_document_count or 0 }} 可推送</span>
+              <span>{{ run.review_document_count or 0 }} 待处理</span>
+            </div>
+            <div class="jobs-row-actions">
+              <a class="secondary-button" href="{{ request.url_for('phase1a_run_detail', run_name=run.run_name) }}">打开</a>
+              <a class="secondary-button" href="{{ request.url_for('phase1a_run_detail', run_name=run.run_name) }}?status=">全部文档</a>
+              <form method="post" action="{{ request.url_for('delete_phase1a_run_action', run_name=run.run_name) }}" class="inline-action-form" onsubmit="return confirm('确认删除运行 {{ run.run_name }} 吗？')">
+                <input type="hidden" name="redirect_to" value="{{ request.url.path }}">
+                <button type="submit" class="danger-button">删除</button>
+              </form>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="empty">`phase1a/out` 下还没有识别运行记录。</p>
+    {% endif %}
+  </section>
+
+  <section class="section">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">历史数据</p>
+        <h2>Odoo 推送列表</h2>
+      </div>
+    </div>
+    {% if push_runs %}
+      <div class="jobs-history-list">
+        {% for rec in push_runs %}
+          {% set skipped_count = (rec.tracking_skipped_same or 0) + (rec.skipped_existing or 0) %}
+          {% set not_found_count = (rec.tracking_not_found or 0) + (rec.picking_not_found or 0) %}
+          <div class="jobs-history-row jobs-history-row-wide">
+            <div>
+              <strong>{{ rec.started_at or rec.push_id }}</strong>
+              <p class="wrap-anywhere"><code>{{ rec.push_id }}</code></p>
+            </div>
+            <div class="jobs-history-metrics">
+              {% if rec.status == "success" %}
+                <span class="badge badge-success">成功</span>
+              {% elif rec.status == "failed" %}
+                <span class="badge badge-failed">失败</span>
+              {% else %}
+                <span class="badge badge-running">运行中</span>
+              {% endif %}
+              <span>推送 {{ rec.tracking_pushed or 0 }}</span>
+              <span>跳过 {{ skipped_count }}</span>
+              <span>未找到 {{ not_found_count }}</span>
+            </div>
+            <div class="jobs-row-actions">
+              {% if rec.log_file %}
+                <a class="secondary-button" href="{{ request.url_for('odoo_push_log', push_id=rec.push_id) }}">日志</a>
+              {% endif %}
+              <form method="post" action="/odoo-push/history/{{ rec.push_id }}/delete" class="inline-action-form" onsubmit="return confirm('确认删除推送记录 {{ rec.push_id }} 吗？')">
+                <input type="hidden" name="redirect_to" value="{{ request.url.path }}">
+                <button type="submit" class="danger-button" {% if rec.status == 'running' %}disabled{% endif %}>删除</button>
+              </form>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="empty">还没有 Odoo 推送历史。</p>
     {% endif %}
   </section>
 {% endblock %}

@@ -113,8 +113,9 @@ def count_cmc_remote(config_path: str):
 def count_gdrive_remote(config_path: str):
     full_cfg, cfg, _download_cfg = gdrive_probe.load_config(config_path)
     timeout = int(cfg.get("timeout_seconds", 30))
-    with requests.Session() as session:
-        headers = gdrive_probe.get_headers(session, cfg, timeout, full_cfg=full_cfg, config_path=config_path)
+    with requests.Session() as raw_session:
+        session = gdrive_probe.RefreshingGDriveSession(raw_session, cfg, timeout, full_cfg, config_path)
+        headers = session.prepare_headers(force_refresh=gdrive_probe.has_refresh_flow(cfg))
         items = gdrive_probe.iter_items(
             session=session,
             cfg=cfg,
