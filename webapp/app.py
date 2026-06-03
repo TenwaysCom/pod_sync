@@ -78,7 +78,6 @@ from .phase1a_runs import (
     get_phase1a_run,
     resolve_artifact_path,
 )
-from .remote_counts import load_remote_count_snapshot
 from .reporting import build_report_context
 from .scheduler import Scheduler
 from .signed_urls import is_valid_file_url_secret, verify_storage_path_token
@@ -500,7 +499,6 @@ async def overview(request: Request):
     recent_runs = discover_phase1a_runs(limit=6)
     recent_jobs = job_store.list_jobs(limit=8)
     config_snapshot = load_runtime_config_snapshot()
-    remote_count_snapshot = load_remote_count_snapshot()
     return render(
         request,
         "overview.html",
@@ -509,7 +507,6 @@ async def overview(request: Request):
         recent_runs=recent_runs,
         recent_jobs=recent_jobs,
         config_snapshot=config_snapshot,
-        remote_count_snapshot=remote_count_snapshot,
     )
 
 
@@ -531,14 +528,12 @@ async def report_page(request: Request):
 async def sync_page(request: Request):
     recent_jobs = job_store.list_jobs(limit=10)
     config_snapshot = load_runtime_config_snapshot()
-    remote_count_snapshot = load_remote_count_snapshot()
     return render(
         request,
         "sync.html",
         page_id="sync",
         recent_jobs=recent_jobs,
         config_snapshot=config_snapshot,
-        remote_count_snapshot=remote_count_snapshot,
     )
 
 

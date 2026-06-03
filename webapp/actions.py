@@ -460,7 +460,6 @@ def load_runtime_config_snapshot(config_path: str | None = None):
     for key, label, secret_field in (
         ("cmc_onedrive", "CMC OneDrive", "refresh_token"),
         ("emtc_gdrive", "EMTC Google Drive", "refresh_token"),
-        ("westerman_api", "Westerman API", "api_key"),
     ):
         source_cfg = payload.get(key, {})
         sources.append(
