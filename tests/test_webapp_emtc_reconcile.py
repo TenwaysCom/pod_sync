@@ -380,12 +380,134 @@ class EmtcReconcileTests(unittest.TestCase):
         filtered = emtc_reconcile._apply_start_month_filter(dataset, "2024-06")
 
         self.assertEqual(filtered["selected_start_month"], "2024-06")
+        self.assertEqual(filtered["selected_end_month"], "")
         self.assertEqual(filtered["odoo_summary"]["total_count"], 2)
         self.assertEqual(filtered["odoo_summary"]["without_pod_count"], 1)
         self.assertEqual(filtered["pod_summary"]["total_count"], 3)
         self.assertEqual(filtered["pod_summary"]["not_found_in_odoo_count"], 2)
         self.assertEqual(filtered["pod_summary"]["found_in_odoo_count"], 0)
-        self.assertEqual([item["value"] for item in filtered["start_month_options"]], ["2024-05", "2024-06"])
+        self.assertEqual(filtered["selected_odoo_states"], ["cancel", "done"])
+        self.assertFalse(filtered["odoo_state_filter_active"])
+        self.assertEqual([item["value"] for item in filtered["start_month_options"]], ["2024-06", "2024-05"])
+        self.assertEqual([item["value"] for item in filtered["end_month_options"]], ["2024-06", "2024-05"])
+        self.assertEqual([item["value"] for item in filtered["odoo_state_options"]], ["cancel", "done"])
+        self.assertEqual(
+            {item["value"]: item["count"] for item in filtered["odoo_state_options"]},
+            {"cancel": 1, "done": 1},
+        )
+
+    def test_apply_end_month_filter_limits_odoo_pool(self):
+        dataset = {
+            "generated_at": "2026-04-28T02:00:00Z",
+            "source_config": emtc_reconcile.RECONCILE_SOURCE_CONFIGS["emtc"],
+            "_odoo_rows": [
+                {"business_datetime": "2024-05-20 10:00:00", "match_key": "3SYZXG1", "normalized_match_key": "3SYZXG1", "odoo_picking_id": 1, "picking_name": "WH/OUT/1", "state": "done"},
+                {"business_datetime": "2024-06-20 10:00:00", "match_key": "3SYZXG2", "normalized_match_key": "3SYZXG2", "odoo_picking_id": 2, "picking_name": "WH/OUT/2", "state": "done"},
+                {"business_datetime": "2024-07-20 10:00:00", "match_key": "3SYZXG3", "normalized_match_key": "3SYZXG3", "odoo_picking_id": 3, "picking_name": "WH/OUT/3", "state": "done"},
+            ],
+            "_pod_docs": [
+                {"source_modified_at": "2024-05-21T10:00:00Z", "match_key": "3SYZXG1", "normalized_match_key": "3SYZXG1", "document_uid": "pod-1", "file_name": "a.png", "source_path": "EMTC/a.png", "sample_document": {}, "reason_code": None},
+                {"source_modified_at": "2024-07-21T10:00:00Z", "match_key": "3SYZXG3", "normalized_match_key": "3SYZXG3", "document_uid": "pod-3", "file_name": "c.png", "source_path": "EMTC/c.png", "sample_document": {}, "reason_code": None},
+            ],
+        }
+
+        filtered = emtc_reconcile._apply_start_month_filter(dataset, "", "2024-06")
+
+        self.assertEqual(filtered["selected_start_month"], "")
+        self.assertEqual(filtered["selected_end_month"], "2024-06")
+        self.assertEqual(filtered["odoo_summary"]["total_count"], 2)
+        self.assertEqual([row["picking_name"] for row in filtered["odoo_to_pod_rows"]], ["WH/OUT/1", "WH/OUT/2"])
+        self.assertEqual(filtered["pod_summary"]["found_in_odoo_count"], 1)
+        self.assertEqual(filtered["pod_summary"]["not_found_in_odoo_count"], 1)
+
+    def test_apply_odoo_state_filter_updates_odoo_pool(self):
+        dataset = {
+            "generated_at": "2026-04-28T02:00:00Z",
+            "source_config": emtc_reconcile.RECONCILE_SOURCE_CONFIGS["emtc"],
+            "_odoo_rows": [
+                {"carrier_id": 24, "business_datetime": "2024-05-20 10:00:00", "match_key": "A", "normalized_match_key": "A", "odoo_picking_id": 1, "picking_name": "WH/OUT/1", "state": "done"},
+                {"carrier_id": 24, "business_datetime": "2024-05-21 10:00:00", "match_key": "B", "normalized_match_key": "B", "odoo_picking_id": 2, "picking_name": "WH/OUT/2", "state": "cancel"},
+                {"carrier_id": 24, "business_datetime": "2024-05-22 10:00:00", "match_key": None, "normalized_match_key": None, "odoo_picking_id": 3, "picking_name": "WH/OUT/3", "state": "done"},
+                {"carrier_id": 24, "business_datetime": "2024-05-23 10:00:00", "match_key": "E", "normalized_match_key": "E", "odoo_picking_id": 4, "picking_name": "WH/OUT/4", "state": "waiting"},
+            ],
+            "_all_odoo_rows": [
+                {"carrier_id": 24, "business_datetime": "2024-05-20 10:00:00", "match_key": "A", "normalized_match_key": "A", "picking_name": "WH/OUT/1", "state": "done"},
+                {"carrier_id": 24, "business_datetime": "2024-05-21 10:00:00", "match_key": "B", "normalized_match_key": "B", "picking_name": "WH/OUT/2", "state": "cancel"},
+                {"carrier_id": 24, "business_datetime": "2024-05-23 10:00:00", "match_key": "E", "normalized_match_key": "E", "picking_name": "WH/OUT/4", "state": "waiting"},
+                {"carrier_id": 99, "business_datetime": "2024-05-22 10:00:00", "match_key": "C", "normalized_match_key": "C", "picking_name": "OTHER/OUT/1", "state": "cancel"},
+                {"carrier_id": 99, "business_datetime": "2024-05-23 10:00:00", "match_key": "D", "normalized_match_key": "D", "picking_name": "OTHER/OUT/2", "state": "done"},
+                {"carrier_id": 99, "business_datetime": "2024-05-24 10:00:00", "match_key": "F", "normalized_match_key": "F", "picking_name": "OTHER/OUT/3", "state": "waiting"},
+            ],
+            "_pod_docs": [
+                {"source_modified_at": "2024-05-21T10:00:00Z", "match_key": "A", "normalized_match_key": "A", "document_uid": "pod-a", "file_name": "a.png", "source_path": "EMTC/a.png", "sample_document": {}, "reason_code": None},
+                {"source_modified_at": "2024-05-22T10:00:00Z", "match_key": "B", "normalized_match_key": "B", "document_uid": "pod-b", "file_name": "b.png", "source_path": "EMTC/b.png", "sample_document": {}, "reason_code": None},
+                {"source_modified_at": "2024-05-23T10:00:00Z", "match_key": "C", "normalized_match_key": "C", "document_uid": "pod-c", "file_name": "c.png", "source_path": "EMTC/c.png", "sample_document": {}, "reason_code": None},
+                {"source_modified_at": "2024-05-24T10:00:00Z", "match_key": "D", "normalized_match_key": "D", "document_uid": "pod-d", "file_name": "d.png", "source_path": "EMTC/d.png", "sample_document": {}, "reason_code": None},
+                {"source_modified_at": "2024-05-25T10:00:00Z", "match_key": "E", "normalized_match_key": "E", "document_uid": "pod-e", "file_name": "e.png", "source_path": "EMTC/e.png", "sample_document": {}, "reason_code": None},
+                {"source_modified_at": "2024-05-26T10:00:00Z", "match_key": "F", "normalized_match_key": "F", "document_uid": "pod-f", "file_name": "f.png", "source_path": "EMTC/f.png", "sample_document": {}, "reason_code": None},
+            ],
+        }
+
+        filtered = emtc_reconcile._apply_start_month_filter(dataset, "", "", ["done", "cancel"])
+
+        self.assertEqual(filtered["selected_odoo_states"], ["done", "cancel"])
+        self.assertTrue(filtered["odoo_state_filter_active"])
+        self.assertEqual(
+            {item["value"]: item["count"] for item in filtered["odoo_state_options"]},
+            {"cancel": 1, "done": 2, "waiting": 1},
+        )
+        self.assertEqual(filtered["odoo_summary"]["total_count"], 3)
+        self.assertEqual(filtered["odoo_summary"]["matched_pod_count"], 2)
+        self.assertEqual(filtered["odoo_summary"]["without_match_key_count"], 1)
+        self.assertEqual({row["state"] for row in filtered["odoo_to_pod_rows"]}, {"done", "cancel"})
+        pod_rows = {row["document_uid"]: row for row in filtered["pod_to_odoo_rows"]}
+        self.assertEqual(pod_rows["pod-a"]["compare_status"], "found_in_odoo")
+        self.assertEqual(pod_rows["pod-b"]["compare_status"], "found_in_odoo")
+        self.assertEqual(pod_rows["pod-c"]["compare_status"], "found_other_carrier")
+        self.assertEqual(pod_rows["pod-d"]["compare_status"], "found_other_carrier")
+        self.assertEqual(pod_rows["pod-e"]["compare_status"], "not_found_in_odoo")
+        self.assertEqual(pod_rows["pod-f"]["compare_status"], "not_found_in_odoo")
+        self.assertEqual(filtered["pod_summary"]["found_in_odoo_count"], 4)
+        self.assertEqual(filtered["pod_summary"]["not_found_in_odoo_count"], 2)
+
+    def test_summary_mode_omits_detail_rows_but_keeps_counts(self):
+        dataset = {
+            "generated_at": "2026-04-28T02:00:00Z",
+            "source_config": emtc_reconcile.RECONCILE_SOURCE_CONFIGS["emtc"],
+            "_odoo_rows": [
+                {"carrier_id": 24, "business_datetime": "2024-05-20 10:00:00", "match_key": "A", "normalized_match_key": "A", "odoo_picking_id": 1, "picking_name": "WH/OUT/1", "state": "done"},
+                {"carrier_id": 24, "business_datetime": "2024-05-21 10:00:00", "match_key": "B", "normalized_match_key": "B", "odoo_picking_id": 2, "picking_name": "WH/OUT/2", "state": "done"},
+                {"carrier_id": 24, "business_datetime": "2024-05-22 10:00:00", "match_key": None, "normalized_match_key": None, "odoo_picking_id": 3, "picking_name": "WH/OUT/3", "state": "done"},
+            ],
+            "_all_odoo_rows": [
+                {"carrier_id": 24, "business_datetime": "2024-05-20 10:00:00", "match_key": "A", "normalized_match_key": "A", "picking_name": "WH/OUT/1", "state": "done"},
+                {"carrier_id": 99, "business_datetime": "2024-05-20 10:00:00", "match_key": "C", "normalized_match_key": "C", "picking_name": "OTHER/OUT/1", "state": "done"},
+            ],
+            "_pod_docs": [
+                {"source_modified_at": "2024-05-21T10:00:00Z", "match_key": "A", "normalized_match_key": "A", "document_uid": "pod-1", "file_name": "a.png", "source_path": "EMTC/a.png", "sample_document": {}, "reason_code": None},
+                {"source_modified_at": "2024-05-22T10:00:00Z", "match_key": "C", "normalized_match_key": "C", "document_uid": "pod-2", "file_name": "c.png", "source_path": "EMTC/c.png", "sample_document": {}, "reason_code": None},
+                {"source_modified_at": "2024-05-23T10:00:00Z", "match_key": "D", "normalized_match_key": "D", "document_uid": "pod-3", "file_name": "d.png", "source_path": "EMTC/d.png", "sample_document": {}, "reason_code": None},
+                {"source_modified_at": "2024-05-24T10:00:00Z", "match_key": None, "normalized_match_key": None, "document_uid": "pod-4", "file_name": "bad.png", "source_path": "EMTC/bad.png", "sample_document": {}, "reason_code": "NO_IDENTIFIER_FOUND"},
+            ],
+            "_pod_index_by_key": {
+                "D": [{"picking_name": "IDX/OUT/1", "pod_link": "https://example.test/d.png"}],
+            },
+        }
+
+        filtered = emtc_reconcile._apply_start_month_filter(dataset, "", "", include_rows=False)
+
+        self.assertFalse(filtered["detail_rows_loaded"])
+        self.assertEqual(filtered["odoo_to_pod_rows"], [])
+        self.assertEqual(filtered["pod_to_odoo_rows"], [])
+        self.assertEqual(filtered["odoo_summary"]["total_count"], 3)
+        self.assertEqual(filtered["odoo_summary"]["matched_pod_count"], 1)
+        self.assertEqual(filtered["odoo_summary"]["without_pod_count"], 1)
+        self.assertEqual(filtered["odoo_summary"]["without_match_key_count"], 1)
+        self.assertEqual(filtered["pod_summary"]["total_count"], 4)
+        self.assertEqual(filtered["pod_summary"]["parseable_count"], 3)
+        self.assertEqual(filtered["pod_summary"]["found_in_odoo_count"], 3)
+        self.assertEqual(filtered["pod_summary"]["not_found_in_odoo_count"], 0)
+        self.assertEqual(filtered["pod_summary"]["unparseable_count"], 1)
 
     def test_build_reconcile_export_workbook_contains_six_sheets(self):
         dataset = {
@@ -473,7 +595,7 @@ class EmtcReconcileTests(unittest.TestCase):
             ],
         }
 
-        with mock.patch.object(emtc_reconcile, "load_reconcile_dataset", return_value=dataset):
+        with mock.patch.object(emtc_reconcile, "load_filtered_reconcile_dataset", return_value=dataset):
             payload = emtc_reconcile.build_reconcile_export_workbook("emtc")
 
         self.assertTrue(payload["filename"].endswith(".xlsx"))
@@ -574,6 +696,20 @@ class EmtcReconcileTests(unittest.TestCase):
             self.assertIn("POD 可在 Odoo 找到", workbook_xml)
             self.assertIn("POD 解析不了匹配键", workbook_xml)
             self.assertNotIn("Odoo 命中 POD", workbook_xml)
+
+    def test_reconcile_export_suffix_includes_month_range(self):
+        self.assertEqual(
+            emtc_reconcile._reconcile_export_suffix({"selected_start_month": "2024-05", "selected_end_month": "2024-06"}),
+            "202405_202406",
+        )
+        self.assertEqual(
+            emtc_reconcile._reconcile_export_suffix({"selected_start_month": "", "selected_end_month": "2024-06"}),
+            "to_202406",
+        )
+        self.assertEqual(
+            emtc_reconcile._reconcile_export_suffix({"selected_start_month": "2024-05", "selected_end_month": "", "selected_odoo_states": ["done", "cancel"], "odoo_state_filter_active": True}),
+            "202405_states_done_cancel",
+        )
 
     def test_build_reconcile_metric_export_workbook_for_odoo_with_key(self):
         dataset = {

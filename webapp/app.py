@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from urllib.parse import unquote, urlencode, urlsplit
 
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -68,7 +68,7 @@ from .emtc_reconcile import (
     build_reconcile_pod_export_workbook,
     build_reconcile_pod_to_odoo_listing,
     list_reconcile_sources,
-    load_filtered_reconcile_dataset,
+    load_filtered_reconcile_summary,
 )
 from .phase1a_runs import (
     build_phase1a_document_listing,
@@ -782,12 +782,25 @@ async def compare_page(request: Request):
 
 
 @app.get("/reconcile", response_class=HTMLResponse)
-async def reconcile_page(request: Request, kind: str = "emtc", start_month: str = ""):
+async def reconcile_page(
+    request: Request,
+    kind: str = "emtc",
+    start_month: str = "",
+    end_month: str = "",
+    odoo_state: list[str] | None = Query(default=None),
+    odoo_state_filter: bool = False,
+):
     selected_source = next(
         (item for item in list_reconcile_sources() if item["slug"] == (kind or "").strip().lower()),
         list_reconcile_sources()[0],
     )
-    dataset = load_filtered_reconcile_dataset(selected_source["slug"], start_month)
+    dataset = load_filtered_reconcile_summary(
+        selected_source["slug"],
+        start_month,
+        end_month,
+        odoo_state,
+        odoo_state_filter,
+    )
     return render(
         request,
         "emtc_reconcile.html",
@@ -796,7 +809,12 @@ async def reconcile_page(request: Request, kind: str = "emtc", start_month: str 
         selected_source=selected_source,
         reconcile_sources=list_reconcile_sources(),
         selected_start_month=(dataset or {}).get("selected_start_month", ""),
+        selected_end_month=(dataset or {}).get("selected_end_month", ""),
+        selected_odoo_states=(dataset or {}).get("selected_odoo_states", []),
+        odoo_state_filter_active=bool((dataset or {}).get("odoo_state_filter_active")),
         start_month_options=(dataset or {}).get("start_month_options", []),
+        end_month_options=(dataset or {}).get("end_month_options", []),
+        odoo_state_options=(dataset or {}).get("odoo_state_options", []),
     )
 
 
@@ -806,8 +824,14 @@ async def emtc_reconcile_redirect():
 
 
 @app.get("/reconcile/export")
-async def reconcile_export(kind: str = "emtc", start_month: str = ""):
-    payload = build_reconcile_export_workbook(kind, start_month)
+async def reconcile_export(
+    kind: str = "emtc",
+    start_month: str = "",
+    end_month: str = "",
+    odoo_state: list[str] | None = Query(default=None),
+    odoo_state_filter: bool = False,
+):
+    payload = build_reconcile_export_workbook(kind, start_month, end_month, odoo_state, odoo_state_filter)
     if payload is None:
         raise HTTPException(status_code=404, detail="还没有可导出的对账数据。")
     return Response(
@@ -821,8 +845,14 @@ async def reconcile_export(kind: str = "emtc", start_month: str = ""):
 
 
 @app.get("/reconcile/export/odoo")
-async def reconcile_odoo_export(kind: str = "emtc", start_month: str = ""):
-    payload = build_reconcile_odoo_export_workbook(kind, start_month)
+async def reconcile_odoo_export(
+    kind: str = "emtc",
+    start_month: str = "",
+    end_month: str = "",
+    odoo_state: list[str] | None = Query(default=None),
+    odoo_state_filter: bool = False,
+):
+    payload = build_reconcile_odoo_export_workbook(kind, start_month, end_month, odoo_state, odoo_state_filter)
     if payload is None:
         raise HTTPException(status_code=404, detail="还没有可导出的 Odoo -> POD 明细。")
     return Response(
@@ -836,8 +866,14 @@ async def reconcile_odoo_export(kind: str = "emtc", start_month: str = ""):
 
 
 @app.get("/reconcile/export/pod")
-async def reconcile_pod_export(kind: str = "emtc", start_month: str = ""):
-    payload = build_reconcile_pod_export_workbook(kind, start_month)
+async def reconcile_pod_export(
+    kind: str = "emtc",
+    start_month: str = "",
+    end_month: str = "",
+    odoo_state: list[str] | None = Query(default=None),
+    odoo_state_filter: bool = False,
+):
+    payload = build_reconcile_pod_export_workbook(kind, start_month, end_month, odoo_state, odoo_state_filter)
     if payload is None:
         raise HTTPException(status_code=404, detail="还没有可导出的 POD -> Odoo 明细。")
     return Response(
@@ -869,6 +905,9 @@ async def report_export_annual_pod_coverage():
 async def reconcile_metric_export(
     kind: str = "emtc",
     start_month: str = "",
+    end_month: str = "",
+    odoo_state: list[str] | None = Query(default=None),
+    odoo_state_filter: bool = False,
     scope: str = "odoo",
     metric: str = "total",
 ):
@@ -876,6 +915,9 @@ async def reconcile_metric_export(
         payload = build_reconcile_metric_export_workbook(
             kind,
             start_month,
+            end_month,
+            odoo_state,
+            odoo_state_filter,
             scope=scope,
             metric=metric,
         )
@@ -960,6 +1002,9 @@ async def api_compare_details(
 async def api_reconcile_odoo_to_pod(
     kind: str = "emtc",
     start_month: str = "",
+    end_month: str = "",
+    odoo_state: list[str] | None = Query(default=None),
+    odoo_state_filter: bool = False,
     q: str = "",
     status: str = "",
     page: int = 1,
@@ -968,6 +1013,9 @@ async def api_reconcile_odoo_to_pod(
     payload = build_reconcile_odoo_to_pod_listing(
         kind=kind,
         start_month=start_month,
+        end_month=end_month,
+        odoo_state=odoo_state,
+        odoo_state_filter=odoo_state_filter,
         query=q,
         status=status,
         page=page,
@@ -982,6 +1030,9 @@ async def api_reconcile_odoo_to_pod(
 async def api_reconcile_pod_to_odoo(
     kind: str = "emtc",
     start_month: str = "",
+    end_month: str = "",
+    odoo_state: list[str] | None = Query(default=None),
+    odoo_state_filter: bool = False,
     q: str = "",
     status: str = "",
     page: int = 1,
@@ -990,6 +1041,9 @@ async def api_reconcile_pod_to_odoo(
     payload = build_reconcile_pod_to_odoo_listing(
         kind=kind,
         start_month=start_month,
+        end_month=end_month,
+        odoo_state=odoo_state,
+        odoo_state_filter=odoo_state_filter,
         query=q,
         status=status,
         page=page,

@@ -1,11 +1,21 @@
 {% extends "base.html" %}
 {% block title %}对账 · POD 同步控制台{% endblock %}
 {% block content %}
+  {% set query_parts = namespace(value=(("&start_month=" ~ selected_start_month) if selected_start_month else "") ~ (("&end_month=" ~ selected_end_month) if selected_end_month else "")) %}
+  {% if odoo_state_filter_active %}
+    {% set query_parts.value = query_parts.value ~ "&odoo_state_filter=1" %}
+    {% for state in selected_odoo_states %}
+      {% set query_parts.value = query_parts.value ~ "&odoo_state=" ~ (state | urlencode) %}
+    {% endfor %}
+  {% endif %}
+  {% set filter_query = query_parts.value %}
   <section class="section">
     <div class="card">
       <div class="section-head section-head-tight">
         <div>
           <p class="eyebrow">对账入口</p>
+          <h2 class="reconcile-title-critical">总结对账</h2>
+          <p class="lede">按 Odoo 出库业务月份筛选对账范围，POD 文件池保持全量，用来判断当前单据池的 POD 覆盖风险。</p>
         </div>
         <button class="secondary-button" type="button" data-open-reconcile-note>查看说明</button>
       </div>
@@ -14,7 +24,7 @@
           {% for item in reconcile_sources %}
             <a
               class="reconcile-tab {% if item.slug == selected_source.slug %}active{% endif %}"
-              href="{{ request.url_for('reconcile_page') }}?kind={{ item.slug }}{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}"
+              href="{{ request.url_for('reconcile_page') }}?kind={{ item.slug }}{{ filter_query }}"
             >
               {{ item.label }}
             </a>
@@ -22,20 +32,60 @@
         </div>
         <form class="reconcile-range-form" method="get" action="{{ request.url_for('reconcile_page') }}">
           <input type="hidden" name="kind" value="{{ selected_source.slug }}">
-          <label>
-            <span>开始月份</span>
-            <select id="reconcileStartMonth" name="start_month">
-              <option value="">全部时间</option>
-              {% for item in start_month_options %}
-                <option value="{{ item.value }}"{% if item.value == selected_start_month %} selected{% endif %}>{{ item.label }}</option>
+          <input type="hidden" name="odoo_state_filter" value="1">
+          <div class="reconcile-filter-row">
+            <label class="reconcile-filter-field">
+              <span>开始月份</span>
+              <select id="reconcileStartMonth" name="start_month">
+                <option value="">全部时间</option>
+                {% for item in start_month_options %}
+                  <option value="{{ item.value }}"{% if item.value == selected_start_month %} selected{% endif %}>{{ item.label }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label class="reconcile-filter-field">
+              <span>结束月份</span>
+              <select id="reconcileEndMonth" name="end_month">
+                <option value="">不限结束</option>
+                {% for item in end_month_options %}
+                  <option value="{{ item.value }}"{% if item.value == selected_end_month %} selected{% endif %}>{{ item.label }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <div class="reconcile-filter-actions">
+              <button type="submit" class="action-button">应用筛选</button>
+              {% if selected_start_month or selected_end_month or odoo_state_filter_active %}
+                <a class="secondary-button" href="{{ request.url_for('reconcile_page') }}?kind={{ selected_source.slug }}">清空筛选</a>
+              {% endif %}
+              {% if dataset %}
+                <a class="secondary-button" href="{{ request.url_for('reconcile_export') }}?kind={{ selected_source.slug }}{{ filter_query }}">
+                  下载 总报告
+                </a>
+              {% endif %}
+            </div>
+          </div>
+          <fieldset class="reconcile-state-panel">
+            <legend class="reconcile-state-head">
+              <span class="reconcile-state-title">包含出库状态</span>
+              <span class="reconcile-tag-count" data-state-count>已选 {{ selected_odoo_states | length }}/{{ odoo_state_options | length }}</span>
+              <span class="reconcile-state-head-actions">
+                <button type="button" class="reconcile-mini-button" data-state-select-all>全选</button>
+                <button type="button" class="reconcile-mini-button" data-state-clear>清空</button>
+              </span>
+            </legend>
+            <div class="reconcile-tag-list" data-state-tag-list>
+              {% for item in odoo_state_options %}
+                <label class="reconcile-state-tag{% if item.value in selected_odoo_states %} active{% endif %}">
+                  <input type="checkbox" name="odoo_state" value="{{ item.value }}"{% if item.value in selected_odoo_states %} checked{% endif %}>
+                  <span class="reconcile-state-label">{{ item.label }}</span>
+                  <span class="reconcile-state-row-count">{{ item.count_text or item.count }}</span>
+                </label>
               {% endfor %}
-            </select>
-          </label>
-          {% if dataset %}
-            <a class="action-button" href="{{ request.url_for('reconcile_export') }}?kind={{ selected_source.slug }}{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}">
-              下载 总报告
-            </a>
-          {% endif %}
+              {% if not odoo_state_options %}
+                <span class="muted">暂无状态</span>
+              {% endif %}
+            </div>
+          </fieldset>
         </form>
       </div>
     </div>
@@ -71,7 +121,7 @@
         <article class="card stat-card stat-card-inline">
           <div class="stat-card-topline">
             <p class="label">{{ selected_source.odoo_total_label }}</p>
-            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=odoo&metric=total{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}">下载</a>
+            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=odoo&metric=total{{ filter_query }}">下载</a>
           </div>
           <h2>{{ dataset.odoo_summary.total_count }}</h2>
           <p class="stat-card-share">{{ dataset.odoo_summary.total_share_text }}</p>
@@ -80,7 +130,7 @@
         <article class="card stat-card stat-card-inline stat-card-alert">
           <div class="stat-card-topline">
             <p class="label">{{ selected_source.odoo_without_key_label }}</p>
-            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=odoo&metric=without_key{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}">下载</a>
+            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=odoo&metric=without_key{{ filter_query }}">下载</a>
           </div>
           <h2>{{ dataset.odoo_summary.without_match_key_count }}</h2>
           <p class="stat-card-share">{{ dataset.odoo_summary.without_match_key_share_text }}</p>
@@ -89,7 +139,7 @@
         <article class="card stat-card stat-card-inline">
           <div class="stat-card-topline">
             <p class="label">{{ selected_source.odoo_with_key_label }}</p>
-            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=odoo&metric=with_key{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}">下载</a>
+            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=odoo&metric=with_key{{ filter_query }}">下载</a>
           </div>
           <h2>{{ dataset.odoo_summary.with_match_key_count }}</h2>
           <p class="stat-card-share">{{ dataset.odoo_summary.with_match_key_share_text }}</p>
@@ -98,7 +148,7 @@
         <article class="card stat-card stat-card-inline">
           <div class="stat-card-topline">
             <p class="label">{{ selected_source.odoo_match_label }}</p>
-            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=odoo&metric=matched{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}">下载</a>
+            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=odoo&metric=matched{{ filter_query }}">下载</a>
           </div>
           <h2>{{ dataset.odoo_summary.matched_pod_count }}</h2>
           <p class="stat-card-share">{{ dataset.odoo_summary.matched_pod_share_text }}</p>
@@ -107,7 +157,7 @@
         <article class="card stat-card stat-card-inline stat-card-alert">
           <div class="stat-card-topline">
             <p class="label">{{ selected_source.odoo_missing_label }}</p>
-            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=odoo&metric=missing{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}">下载</a>
+            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=odoo&metric=missing{{ filter_query }}">下载</a>
           </div>
           <h2>{{ dataset.odoo_summary.without_pod_count }}</h2>
           <p class="stat-card-share">{{ dataset.odoo_summary.without_pod_share_text }}</p>
@@ -195,7 +245,7 @@
         <article class="card stat-card stat-card-inline">
           <div class="stat-card-topline">
             <p class="label">{{ selected_source.pod_total_label }}</p>
-            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=pod&metric=total{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}">下载</a>
+            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=pod&metric=total{{ filter_query }}">下载</a>
           </div>
           <h2>{{ dataset.pod_summary.total_count }}</h2>
           <p class="stat-card-share">{{ dataset.pod_summary.total_share_text }}</p>
@@ -204,7 +254,7 @@
         <article class="card stat-card stat-card-inline stat-card-alert">
           <div class="stat-card-topline">
             <p class="label">{{ selected_source.pod_unparseable_label }}</p>
-            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=pod&metric=unparseable{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}">下载</a>
+            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=pod&metric=unparseable{{ filter_query }}">下载</a>
           </div>
           <h2>{{ dataset.pod_summary.unparseable_count }}</h2>
           <p class="stat-card-share">{{ dataset.pod_summary.unparseable_share_text }}</p>
@@ -213,7 +263,7 @@
         <article class="card stat-card stat-card-inline">
           <div class="stat-card-topline">
             <p class="label">{{ selected_source.pod_parseable_label }}</p>
-            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=pod&metric=parseable{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}">下载</a>
+            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=pod&metric=parseable{{ filter_query }}">下载</a>
           </div>
           <h2>{{ dataset.pod_summary.parseable_count }}</h2>
           <p class="stat-card-share">{{ dataset.pod_summary.parseable_share_text }}</p>
@@ -222,7 +272,7 @@
         <article class="card stat-card stat-card-inline">
           <div class="stat-card-topline">
             <p class="label">{{ selected_source.pod_found_label }}</p>
-            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=pod&metric=found{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}">下载</a>
+            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=pod&metric=found{{ filter_query }}">下载</a>
           </div>
           <h2>{{ dataset.pod_summary.found_in_odoo_count }}</h2>
           <p class="stat-card-share">{{ dataset.pod_summary.found_in_odoo_share_text }}</p>
@@ -231,7 +281,7 @@
         <article class="card stat-card stat-card-inline stat-card-alert">
           <div class="stat-card-topline">
             <p class="label">{{ selected_source.pod_missing_label }}</p>
-            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=pod&metric=missing{% if selected_start_month %}&start_month={{ selected_start_month }}{% endif %}">下载</a>
+            <a class="ghost-button stat-card-export" href="{{ request.url_for('reconcile_metric_export') }}?kind={{ selected_source.slug }}&scope=pod&metric=missing{{ filter_query }}">下载</a>
           </div>
           <h2>{{ dataset.pod_summary.not_found_in_odoo_count }}</h2>
           <p class="stat-card-share">{{ dataset.pod_summary.not_found_in_odoo_share_text }}</p>
@@ -320,7 +370,7 @@
       <div class="modal-body">
         <ul class="reconcile-explain-list reconcile-explain-list-modal">
           <li>数据来源：页面固定读取最新一批 POD 识别结果，并与最新 Odoo 总明细快照做双向对账；切换上方来源标签后，只看对应渠道或承运商的结果。</li>
-          <li>筛选口径：开始月份只过滤 Odoo 出库单池，按 Odoo 的 <code>business_datetime</code> 判断；POD 文件池保持全量，用来检查这些 Odoo 单据是否能在现有 POD 文件中命中。</li>
+          <li>筛选口径：开始月份、结束月份和“包含出库状态”只过滤 Odoo 出库单池；月份按 Odoo 的 <code>business_datetime</code> 判断，月份边界会被包含；POD 文件池保持全量，用来检查这些 Odoo 单据是否能在现有 POD 文件中命中。</li>
           <li>Odoo -> POD：从 Odoo 单据角度看 POD 覆盖率。这里的“未命中 POD”优先级最高，代表 Odoo 有业务单据，但当前 POD 文件池没有找到对应凭证，需要补文件、修识别规则或核对单号。</li>
           <li>POD -> Odoo：从本地 POD 文件角度看回写准备度。这里的“无法识别”或“未命中 Odoo”通常表示文件名、PDF 内容、tracking / customer reference 等匹配键有问题，需要先人工核对，避免错误推送。</li>
           <li>下载按钮会导出当前卡片对应的明细，方便把问题清单发给业务、仓库或承运商逐条跟进。</li>
@@ -359,19 +409,39 @@
         }
       });
     })();
-  </script>
 
-  <script>
     (() => {
-      const monthSelect = document.getElementById("reconcileStartMonth");
-      if (!monthSelect || !monthSelect.form) return;
-      monthSelect.addEventListener("change", () => {
-        if (typeof monthSelect.form.requestSubmit === "function") {
-          monthSelect.form.requestSubmit();
-          return;
+      const stateInputs = Array.from(document.querySelectorAll(".reconcile-state-tag input"));
+      const stateCount = document.querySelector("[data-state-count]");
+      const selectAllButton = document.querySelector("[data-state-select-all]");
+      const clearButton = document.querySelector("[data-state-clear]");
+
+      const refreshStateTags = () => {
+        const selectedCount = stateInputs.filter((input) => input.checked).length;
+        if (stateCount) {
+          stateCount.textContent = `已选 ${selectedCount}/${stateInputs.length}`;
         }
-        monthSelect.form.submit();
+        stateInputs.forEach((input) => {
+          input.closest(".reconcile-state-tag")?.classList.toggle("active", input.checked);
+        });
+      };
+
+      stateInputs.forEach((input) => {
+        input.addEventListener("change", refreshStateTags);
       });
+      selectAllButton?.addEventListener("click", () => {
+        stateInputs.forEach((input) => {
+          input.checked = true;
+        });
+        refreshStateTags();
+      });
+      clearButton?.addEventListener("click", () => {
+        stateInputs.forEach((input) => {
+          input.checked = false;
+        });
+        refreshStateTags();
+      });
+      refreshStateTags();
     })();
   </script>
 
@@ -389,7 +459,6 @@
       function createPager(config) {
         const state = { page: 1, pageSize: 25, query: "", status: "" };
         let debounceTimer = null;
-        let hasLoaded = false;
 
         function updateSelectOptions(select, options, currentValue) {
           select.innerHTML = options.map((item) => {
@@ -398,15 +467,25 @@
           }).join("");
         }
 
+        function showLoadError(error) {
+          config.meta.textContent = `加载失败：${error.message}`;
+          config.body.innerHTML = `<tr class="file-row"><td colspan="${config.colspan}" class="empty-cell">加载失败，请稍后重试。</td></tr>`;
+        }
+
         async function loadRows() {
           const params = new URLSearchParams({
             kind: config.kind,
             start_month: config.startMonth,
+            end_month: config.endMonth,
             q: state.query,
             status: state.status,
             page: String(state.page),
             page_size: String(state.pageSize),
           });
+          if (config.odooStateFilterActive) {
+            params.set("odoo_state_filter", "1");
+            (config.odooStates || []).forEach((value) => params.append("odoo_state", value));
+          }
           config.meta.textContent = "正在加载…";
           const response = await fetch(`${config.endpoint}?${params.toString()}`, { cache: "no-store" });
           if (!response.ok) {
@@ -421,17 +500,13 @@
           config.indicator.textContent = `第 ${payload.page} / ${payload.total_pages} 页`;
           config.prev.disabled = payload.page <= 1;
           config.next.disabled = payload.page >= payload.total_pages;
-          hasLoaded = true;
         }
 
         function scheduleReload(resetPage = false) {
           if (resetPage) state.page = 1;
           if (debounceTimer) window.clearTimeout(debounceTimer);
           debounceTimer = window.setTimeout(() => {
-            loadRows().catch((error) => {
-              config.meta.textContent = `加载失败：${error.message}`;
-              config.body.innerHTML = `<tr class="file-row"><td colspan="${config.colspan}" class="empty-cell">加载失败，请稍后重试。</td></tr>`;
-            });
+            loadRows().catch(showLoadError);
           }, 180);
         }
 
@@ -464,22 +539,35 @@
           scheduleReload(false);
         });
 
+        loadRows().catch(showLoadError);
+      }
+
+      function mountPagerOnFirstOpen(config) {
+        let mounted = false;
+        function mount() {
+          if (mounted) return;
+          mounted = true;
+          createPager(config);
+        }
+
+        if (!config.details) return;
+        if (config.details.open) {
+          mount();
+          return;
+        }
         config.details.addEventListener("toggle", () => {
-          if (!config.details.open || hasLoaded) {
-            return;
-          }
-          loadRows().catch((error) => {
-            config.meta.textContent = `加载失败：${error.message}`;
-            config.body.innerHTML = `<tr class="file-row"><td colspan="${config.colspan}" class="empty-cell">加载失败，请稍后重试。</td></tr>`;
-          });
+          if (config.details.open) mount();
         });
       }
 
-      createPager({
+      mountPagerOnFirstOpen({
         details: document.getElementById("odooToPodDetails"),
         endpoint: "{{ request.url_for('api_reconcile_odoo_to_pod') }}",
-        kind: "{{ selected_source.slug }}",
-        startMonth: "{{ selected_start_month or '' }}",
+        kind: {{ selected_source.slug | tojson }},
+        startMonth: {{ (selected_start_month or '') | tojson }},
+        endMonth: {{ (selected_end_month or '') | tojson }},
+        odooStates: {{ (selected_odoo_states or []) | tojson }},
+        odooStateFilterActive: {{ odoo_state_filter_active | tojson }},
         search: document.getElementById("odooToPodSearch"),
         clear: document.getElementById("odooToPodClear"),
         status: document.getElementById("odooToPodStatus"),
@@ -559,11 +647,14 @@
         }
       }
 
-      createPager({
+      mountPagerOnFirstOpen({
         details: document.getElementById("podToOdooDetails"),
         endpoint: "{{ request.url_for('api_reconcile_pod_to_odoo') }}",
-        kind: "{{ selected_source.slug }}",
-        startMonth: "{{ selected_start_month or '' }}",
+        kind: {{ selected_source.slug | tojson }},
+        startMonth: {{ (selected_start_month or '') | tojson }},
+        endMonth: {{ (selected_end_month or '') | tojson }},
+        odooStates: {{ (selected_odoo_states or []) | tojson }},
+        odooStateFilterActive: {{ odoo_state_filter_active | tojson }},
         search: document.getElementById("podToOdooSearch"),
         clear: document.getElementById("podToOdooClear"),
         status: document.getElementById("podToOdooStatus"),

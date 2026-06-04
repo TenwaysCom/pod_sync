@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -278,6 +278,20 @@ def _build_sample_document(row, storage_root: Path):
     }
 
 
+def _resolve_sample_document(row, storage_root: str | None):
+    if row.get("sample_document") is not None:
+        return row.get("sample_document")
+    if storage_root:
+        return _build_sample_document(row, Path(storage_root))
+    return {
+        "file_name": row.get("file_name"),
+        "source_path": row.get("source_path"),
+        "file_url": row.get("file_url"),
+        "local_relative_path": None,
+        "local_file_href": None,
+    }
+
+
 def _safe_int(value):
     try:
         return int(value)
@@ -319,7 +333,7 @@ def _timestamp_sort_value(value: str | None):
     return int(parsed.timestamp())
 
 
-def _normalize_start_month(value: str | None):
+def _normalize_month(value: str | None):
     text = str(value or "").strip()
     if not re.fullmatch(r"\d{4}-\d{2}", text):
         return ""
@@ -332,6 +346,10 @@ def _normalize_start_month(value: str | None):
     if month_int < 1 or month_int > 12:
         return ""
     return f"{year_int:04d}-{month_int:02d}"
+
+
+def _normalize_start_month(value: str | None):
+    return _normalize_month(value)
 
 
 def _month_bucket(value: str | None):
@@ -347,13 +365,57 @@ def _month_label(value: str):
 
 
 def _row_on_or_after_month(value: str | None, start_month: str):
-    normalized_start = _normalize_start_month(start_month)
+    normalized_start = _normalize_month(start_month)
     if not normalized_start:
         return True
     bucket = _month_bucket(value)
     if not bucket:
         return False
     return bucket >= normalized_start
+
+
+def _row_in_month_range(value: str | None, start_month: str, end_month: str):
+    normalized_start = _normalize_month(start_month)
+    normalized_end = _normalize_month(end_month)
+    if not normalized_start and not normalized_end:
+        return True
+    bucket = _month_bucket(value)
+    if not bucket:
+        return False
+    if normalized_start and bucket < normalized_start:
+        return False
+    if normalized_end and bucket > normalized_end:
+        return False
+    return True
+
+
+def _normalize_odoo_state(value):
+    return str(value or "").strip()
+
+
+def _normalize_odoo_states(value):
+    if value is None:
+        raw_values = []
+    elif isinstance(value, str):
+        raw_values = value.split(",")
+    else:
+        raw_values = value
+    states = []
+    seen = set()
+    for raw_value in raw_values:
+        state = _normalize_odoo_state(raw_value)
+        if not state or state in seen:
+            continue
+        seen.add(state)
+        states.append(state)
+    return states
+
+
+def _row_matches_odoo_states(row, odoo_states, *, filter_active: bool = False):
+    if not filter_active:
+        return True
+    selected_states = set(_normalize_odoo_states(odoo_states))
+    return str(row.get("state") or "").strip() in selected_states
 
 
 def _share_text(numerator: int, denominator: int, scope_label: str):
@@ -410,8 +472,47 @@ def _collect_start_month_options(dataset):
         bucket = _month_bucket(row.get("business_datetime"))
         if bucket:
             months.add(bucket)
-    ordered = sorted(months)
+    ordered = sorted(months, reverse=True)
     return [{"value": value, "label": _month_label(value)} for value in ordered]
+
+
+def _format_count(value: int):
+    return f"{int(value):,}"
+
+
+def _collect_odoo_state_options_from_rows(rows):
+    counts = Counter(
+        state
+        for row in rows
+        for state in (_normalize_odoo_state(row.get("state")),)
+        if state
+    )
+    return [
+        {
+            "value": value,
+            "label": value,
+            "count": count,
+            "count_text": _format_count(count),
+        }
+        for value, count in sorted(counts.items())
+    ]
+
+
+def _collect_odoo_state_options(dataset, odoo_rows=None):
+    return _collect_odoo_state_options_from_rows(
+        dataset.get("_odoo_rows", []) if odoo_rows is None else odoo_rows
+    )
+
+
+def _select_odoo_states(dataset, requested_states, explicit_filter: bool, available_states=None):
+    if available_states is None:
+        available_states = [item["value"] for item in _collect_odoo_state_options(dataset)]
+    if not explicit_filter:
+        return available_states, False
+    requested = _normalize_odoo_states(requested_states)
+    available_set = set(available_states)
+    selected = [state for state in requested if state in available_set]
+    return selected, set(selected) != available_set
 
 
 def _build_dataset_view(
@@ -425,6 +526,8 @@ def _build_dataset_view(
     all_odoo_rows=None,
     pod_index_by_key=None,
     pod_index_meta=None,
+    storage_root: str | None = None,
+    include_rows: bool = True,
 ):
     labels = _status_labels(config)
     pod_docs_by_key = defaultdict(list)
@@ -434,45 +537,51 @@ def _build_dataset_view(
             pod_docs_by_key[normalized_key].append(row)
 
     odoo_to_pod_rows = []
-    for row in odoo_rows:
-        raw_key = row.get("match_key")
-        normalized_key = row.get("normalized_match_key")
-        pod_matches = pod_docs_by_key.get(normalized_key, []) if normalized_key else []
-        if not normalized_key:
-            compare_status = "no_match_key"
-        elif pod_matches:
-            compare_status = "matched_pod"
-        else:
-            compare_status = "pod_not_found"
-        odoo_to_pod_rows.append(
-            {
-                "odoo_picking_id": row.get("odoo_picking_id"),
-                "picking_name": row.get("picking_name"),
-                "state": row.get("state"),
-                "business_datetime": row.get("business_datetime"),
-                "match_key": raw_key,
-                "compare_status": compare_status,
-                "compare_status_label": labels["odoo_to_pod"][compare_status],
-                "pod_file_count": len(pod_matches),
-                "sample_pod_files": " | ".join(
-                    doc.get("file_name") or "" for doc in pod_matches[:10] if doc.get("file_name")
-                ),
-                "sample_pod_paths": " | ".join(
-                    doc.get("source_path") or "" for doc in pod_matches[:10] if doc.get("source_path")
-                ),
-                "sample_documents": [doc.get("sample_document") for doc in pod_matches[:5] if doc.get("sample_document")],
-                "search_blob": " ".join(
-                    str(value or "")
-                    for value in (
-                        row.get("picking_name"),
-                        raw_key,
-                        row.get("state"),
-                        " ".join(doc.get("file_name") or "" for doc in pod_matches[:10]),
-                        " ".join(doc.get("source_path") or "" for doc in pod_matches[:10]),
-                    )
-                ).lower(),
-            }
-        )
+    if include_rows:
+        for row in odoo_rows:
+            raw_key = row.get("match_key")
+            normalized_key = row.get("normalized_match_key")
+            pod_matches = pod_docs_by_key.get(normalized_key, []) if normalized_key else []
+            if not normalized_key:
+                compare_status = "no_match_key"
+            elif pod_matches:
+                compare_status = "matched_pod"
+            else:
+                compare_status = "pod_not_found"
+            odoo_to_pod_rows.append(
+                {
+                    "odoo_picking_id": row.get("odoo_picking_id"),
+                    "picking_name": row.get("picking_name"),
+                    "state": row.get("state"),
+                    "business_datetime": row.get("business_datetime"),
+                    "match_key": raw_key,
+                    "compare_status": compare_status,
+                    "compare_status_label": labels["odoo_to_pod"][compare_status],
+                    "pod_file_count": len(pod_matches),
+                    "sample_pod_files": " | ".join(
+                        doc.get("file_name") or "" for doc in pod_matches[:10] if doc.get("file_name")
+                    ),
+                    "sample_pod_paths": " | ".join(
+                        doc.get("source_path") or "" for doc in pod_matches[:10] if doc.get("source_path")
+                    ),
+                    "sample_documents": [
+                        sample
+                        for doc in pod_matches[:5]
+                        for sample in (_resolve_sample_document(doc, storage_root),)
+                        if sample
+                    ],
+                    "search_blob": " ".join(
+                        str(value or "")
+                        for value in (
+                            row.get("picking_name"),
+                            raw_key,
+                            row.get("state"),
+                            " ".join(doc.get("file_name") or "" for doc in pod_matches[:10]),
+                            " ".join(doc.get("source_path") or "" for doc in pod_matches[:10]),
+                        )
+                    ).lower(),
+                }
+            )
 
     filtered_odoo_by_key = defaultdict(list)
     for row in odoo_rows:
@@ -488,6 +597,7 @@ def _build_dataset_view(
 
     pod_index_by_key = pod_index_by_key or {}
     pod_to_odoo_rows = []
+    pod_found_in_odoo_count = 0
     for row in pod_docs:
         normalized_key = row.get("normalized_match_key")
         matches = filtered_odoo_by_key.get(normalized_key, []) if normalized_key else []
@@ -507,6 +617,10 @@ def _build_dataset_view(
             status = "found_other_carrier"
         else:
             status = "not_found_in_odoo"
+        if status in POD_FOUND_IN_ODOO_STATUSES:
+            pod_found_in_odoo_count += 1
+        if not include_rows:
+            continue
 
         display_matches = matches or other_carrier_matches
         matched_count = len(display_matches)
@@ -541,7 +655,7 @@ def _build_dataset_view(
                 "matched_odoo_states": matched_states,
                 "odoo_pod_index_count": len(pod_index_matches),
                 "odoo_pod_index_links": _join_index_values(pod_index_matches[:10], "pod_link"),
-                "sample_document": row.get("sample_document"),
+                "sample_document": _resolve_sample_document(row, storage_root),
                 "reason_code": row.get("reason_code"),
                 "search_blob": " ".join(
                     str(value or "")
@@ -559,29 +673,30 @@ def _build_dataset_view(
         )
 
     odoo_with_key_count = sum(1 for row in odoo_rows if row.get("normalized_match_key"))
-    odoo_matched_pod_count = sum(1 for row in odoo_to_pod_rows if row.get("compare_status") == "matched_pod")
-    pod_parseable_count = sum(1 for row in pod_docs if row.get("normalized_match_key"))
-    pod_found_in_odoo_count = sum(
-        1 for row in pod_to_odoo_rows
-        if row.get("compare_status") in POD_FOUND_IN_ODOO_STATUSES
+    odoo_matched_pod_count = sum(
+        1
+        for row in odoo_rows
+        if row.get("normalized_match_key") and pod_docs_by_key.get(row.get("normalized_match_key"))
     )
+    pod_parseable_count = sum(1 for row in pod_docs if row.get("normalized_match_key"))
     odoo_total = len(odoo_rows)
     pod_total = len(pod_docs)
 
-    odoo_to_pod_rows.sort(
-        key=lambda row: (
-            ODOO_TO_POD_STATUS_ORDER.get(row.get("compare_status"), 99),
-            -_timestamp_sort_value(row.get("business_datetime")),
-            -_safe_int(row.get("odoo_picking_id")),
+    if include_rows:
+        odoo_to_pod_rows.sort(
+            key=lambda row: (
+                ODOO_TO_POD_STATUS_ORDER.get(row.get("compare_status"), 99),
+                -_timestamp_sort_value(row.get("business_datetime")),
+                -_safe_int(row.get("odoo_picking_id")),
+            )
         )
-    )
-    pod_to_odoo_rows.sort(
-        key=lambda row: (
-            POD_TO_ODOO_STATUS_ORDER.get(row.get("compare_status"), 99),
-            -_timestamp_sort_value(row.get("source_modified_at")),
-            row.get("file_name") or "",
+        pod_to_odoo_rows.sort(
+            key=lambda row: (
+                POD_TO_ODOO_STATUS_ORDER.get(row.get("compare_status"), 99),
+                -_timestamp_sort_value(row.get("source_modified_at")),
+                row.get("file_name") or "",
+            )
         )
-    )
 
     return {
         "generated_at": generated_at,
@@ -593,8 +708,10 @@ def _build_dataset_view(
         "_pod_docs": pod_docs,
         "_pod_index_by_key": pod_index_by_key,
         "_pod_index_meta": pod_index_meta or {},
+        "_storage_root": storage_root,
         "odoo_pod_index_fetched_at": (pod_index_meta or {}).get("fetched_at"),
         "odoo_pod_index_updated_at": (pod_index_meta or {}).get("updated_at"),
+        "detail_rows_loaded": include_rows,
         "odoo_summary": {
             "total_count": odoo_total,
             "total_share_text": _share_text(odoo_total, odoo_total, "当前 Odoo 单池"),
@@ -624,19 +741,46 @@ def _build_dataset_view(
     }
 
 
-def _apply_start_month_filter(dataset, start_month: str | None):
-    normalized_start = _normalize_start_month(start_month)
+def _apply_start_month_filter(
+    dataset,
+    start_month: str | None,
+    end_month: str | None = "",
+    odoo_state=None,
+    odoo_state_filter: bool = False,
+    *,
+    include_rows: bool = True,
+):
+    normalized_start = _normalize_month(start_month)
+    normalized_end = _normalize_month(end_month)
     odoo_rows = dataset.get("_odoo_rows", [])
     all_odoo_rows = dataset.get("_all_odoo_rows", odoo_rows)
     pod_docs = dataset.get("_pod_docs", [])
-    if normalized_start:
+
+    month_filtered_odoo_rows = [
+        row for row in odoo_rows
+        if _row_in_month_range(row.get("business_datetime"), normalized_start, normalized_end)
+    ]
+    month_filtered_all_odoo_rows = [
+        row for row in all_odoo_rows
+        if _row_in_month_range(row.get("business_datetime"), normalized_start, normalized_end)
+    ]
+    odoo_state_options = _collect_odoo_state_options(dataset, month_filtered_odoo_rows)
+    selected_odoo_states, odoo_state_filter_active = _select_odoo_states(
+        dataset,
+        odoo_state,
+        bool(odoo_state_filter) or odoo_state is not None,
+        [item["value"] for item in odoo_state_options],
+    )
+    odoo_rows = month_filtered_odoo_rows
+    all_odoo_rows = month_filtered_all_odoo_rows
+    if odoo_state_filter_active:
         odoo_rows = [
             row for row in odoo_rows
-            if _row_on_or_after_month(row.get("business_datetime"), normalized_start)
+            if _row_matches_odoo_states(row, selected_odoo_states, filter_active=odoo_state_filter_active)
         ]
         all_odoo_rows = [
             row for row in all_odoo_rows
-            if _row_on_or_after_month(row.get("business_datetime"), normalized_start)
+            if _row_matches_odoo_states(row, selected_odoo_states, filter_active=odoo_state_filter_active)
         ]
     filtered = _build_dataset_view(
         dataset["source_config"],
@@ -648,10 +792,49 @@ def _apply_start_month_filter(dataset, start_month: str | None):
         all_odoo_rows=all_odoo_rows,
         pod_index_by_key=dataset.get("_pod_index_by_key"),
         pod_index_meta=dataset.get("_pod_index_meta"),
+        storage_root=dataset.get("_storage_root"),
+        include_rows=include_rows,
     )
     filtered["selected_start_month"] = normalized_start
+    filtered["selected_end_month"] = normalized_end
+    filtered["selected_odoo_states"] = selected_odoo_states
+    filtered["selected_odoo_state"] = selected_odoo_states[0] if len(selected_odoo_states) == 1 else ""
+    filtered["odoo_state_filter_active"] = odoo_state_filter_active
     filtered["start_month_options"] = _collect_start_month_options(dataset)
+    filtered["end_month_options"] = filtered["start_month_options"]
+    filtered["odoo_state_options"] = odoo_state_options
     return filtered
+
+
+def _build_dataset_base(
+    config,
+    odoo_rows,
+    pod_docs,
+    *,
+    generated_at: str | None,
+    run_name: str,
+    phase1a_generated_at: str | None,
+    all_odoo_rows=None,
+    pod_index_by_key=None,
+    pod_index_meta=None,
+    storage_root: str | None = None,
+):
+    pod_index_meta = pod_index_meta or {}
+    return {
+        "generated_at": generated_at,
+        "phase1a_run_name": run_name,
+        "phase1a_generated_at": phase1a_generated_at,
+        "source_config": config,
+        "_odoo_rows": odoo_rows,
+        "_all_odoo_rows": list(all_odoo_rows or odoo_rows),
+        "_pod_docs": pod_docs,
+        "_pod_index_by_key": pod_index_by_key or {},
+        "_pod_index_meta": pod_index_meta,
+        "_storage_root": storage_root,
+        "odoo_pod_index_fetched_at": pod_index_meta.get("fetched_at"),
+        "odoo_pod_index_updated_at": pod_index_meta.get("updated_at"),
+        "detail_rows_loaded": False,
+    }
 
 
 @lru_cache(maxsize=8)
@@ -677,12 +860,9 @@ def _load_reconcile_dataset_cached(
         return None
 
     parsed_rows = list(_read_json(parsed_path) or [])
-    storage_dir = Path(storage_root)
     pod_index_by_key, pod_index_meta = _load_pod_index_by_key(config)
-    labels = _status_labels(config)
     odoo_rows = []
     all_odoo_rows = []
-    odoo_by_key = defaultdict(list)
     for row in odoo_snapshot.get("total_detail_rows") or []:
         raw_key, normalized_key = _extract_odoo_match_key(row, config)
         normalized_row = dict(row)
@@ -691,56 +871,26 @@ def _load_reconcile_dataset_cached(
         all_odoo_rows.append(normalized_row)
         if row.get("carrier_id") == config["carrier_id"]:
             odoo_rows.append(normalized_row)
-            if normalized_key:
-                odoo_by_key[normalized_key].append(normalized_row)
 
     pod_docs = []
     for row in parsed_rows:
         if not _matches_source_name(row.get("source_name"), config["source_name"]):
             continue
         raw_key, normalized_key = _extract_pod_match_key(row, config)
-        matches = odoo_by_key.get(normalized_key, []) if normalized_key else []
-        status = (
-            "found_in_odoo"
-            if normalized_key and matches
-            else ("not_found_in_odoo" if normalized_key else "no_match_key")
-        )
         item = {
             "document_uid": row.get("document_uid"),
             "file_name": row.get("file_name"),
             "source_path": row.get("source_path"),
+            "file_url": row.get("file_url"),
+            "local_path": row.get("local_path"),
             "source_modified_at": row.get("source_modified_at"),
             "match_key": raw_key,
             "normalized_match_key": normalized_key,
-            "compare_status": status,
-            "compare_status_label": labels["pod_to_odoo"][status],
             "reason_code": row.get("reason_code"),
-            "sample_document": _build_sample_document(row, storage_dir),
-            "matched_odoo_count": len(matches),
-            "matched_odoo_picking_names": " | ".join(
-                str(match.get("picking_name") or "")
-                for match in matches[:10]
-                if match.get("picking_name")
-            ),
-            "matched_odoo_states": " | ".join(
-                str(match.get("state") or "")
-                for match in matches[:10]
-                if match.get("state")
-            ),
-            "search_blob": " ".join(
-                str(value or "")
-                for value in (
-                    row.get("file_name"),
-                    row.get("source_path"),
-                    raw_key,
-                    " ".join(str(match.get("picking_name") or "") for match in matches[:10]),
-                    " ".join(str(match.get("state") or "") for match in matches[:10]),
-                )
-            ).lower(),
         }
         pod_docs.append(item)
 
-    return _build_dataset_view(
+    return _build_dataset_base(
         config,
         odoo_rows,
         pod_docs,
@@ -750,10 +900,11 @@ def _load_reconcile_dataset_cached(
         all_odoo_rows=all_odoo_rows,
         pod_index_by_key=pod_index_by_key,
         pod_index_meta=pod_index_meta,
+        storage_root=storage_root,
     )
 
 
-def load_reconcile_dataset(kind: str = DEFAULT_RECONCILE_KIND):
+def _load_reconcile_base_dataset(kind: str = DEFAULT_RECONCILE_KIND):
     source_config = _resolve_reconcile_source(kind)
     run = get_latest_phase1a_run()
     if not run:
@@ -771,11 +922,51 @@ def load_reconcile_dataset(kind: str = DEFAULT_RECONCILE_KIND):
     )
 
 
-def load_filtered_reconcile_dataset(kind: str = DEFAULT_RECONCILE_KIND, start_month: str = ""):
-    dataset = load_reconcile_dataset(kind)
+def load_reconcile_dataset(kind: str = DEFAULT_RECONCILE_KIND):
+    dataset = _load_reconcile_base_dataset(kind)
     if not dataset:
         return None
-    return _apply_start_month_filter(dataset, start_month)
+    return _apply_start_month_filter(dataset, "", "", None, False, include_rows=True)
+
+
+def load_filtered_reconcile_dataset(
+    kind: str = DEFAULT_RECONCILE_KIND,
+    start_month: str = "",
+    end_month: str = "",
+    odoo_state=None,
+    odoo_state_filter: bool = False,
+):
+    dataset = _load_reconcile_base_dataset(kind)
+    if not dataset:
+        return None
+    return _apply_start_month_filter(
+        dataset,
+        start_month,
+        end_month,
+        odoo_state,
+        odoo_state_filter,
+        include_rows=True,
+    )
+
+
+def load_filtered_reconcile_summary(
+    kind: str = DEFAULT_RECONCILE_KIND,
+    start_month: str = "",
+    end_month: str = "",
+    odoo_state=None,
+    odoo_state_filter: bool = False,
+):
+    dataset = _load_reconcile_base_dataset(kind)
+    if not dataset:
+        return None
+    return _apply_start_month_filter(
+        dataset,
+        start_month,
+        end_month,
+        odoo_state,
+        odoo_state_filter,
+        include_rows=False,
+    )
 
 
 def _paginate(rows, *, page: int, page_size: int):
@@ -802,12 +993,15 @@ def build_reconcile_odoo_to_pod_listing(
     *,
     kind: str = DEFAULT_RECONCILE_KIND,
     start_month: str = "",
+    end_month: str = "",
+    odoo_state=None,
+    odoo_state_filter: bool = False,
     query: str = "",
     status: str = "",
     page: int = 1,
     page_size: int = 25,
 ):
-    dataset = load_filtered_reconcile_dataset(kind, start_month)
+    dataset = load_filtered_reconcile_dataset(kind, start_month, end_month, odoo_state, odoo_state_filter)
     if not dataset:
         return None
     query_text = (query or "").strip().lower()
@@ -824,7 +1018,14 @@ def build_reconcile_odoo_to_pod_listing(
         {
             "generated_at": dataset["generated_at"],
             "kind": config["slug"],
-            "filters": {"query": query, "status": status, "start_month": dataset.get("selected_start_month") or ""},
+            "filters": {
+                "query": query,
+                "status": status,
+                "start_month": dataset.get("selected_start_month") or "",
+                "end_month": dataset.get("selected_end_month") or "",
+                "odoo_states": dataset.get("selected_odoo_states") or [],
+                "odoo_state_filter_active": bool(dataset.get("odoo_state_filter_active")),
+            },
             "status_options": [
                 {"value": "", "label": "全部状态"},
                 {"value": "matched_pod", "label": "命中 POD"},
@@ -840,12 +1041,15 @@ def build_reconcile_pod_to_odoo_listing(
     *,
     kind: str = DEFAULT_RECONCILE_KIND,
     start_month: str = "",
+    end_month: str = "",
+    odoo_state=None,
+    odoo_state_filter: bool = False,
     query: str = "",
     status: str = "",
     page: int = 1,
     page_size: int = 25,
 ):
-    dataset = load_filtered_reconcile_dataset(kind, start_month)
+    dataset = load_filtered_reconcile_dataset(kind, start_month, end_month, odoo_state, odoo_state_filter)
     if not dataset:
         return None
     query_text = (query or "").strip().lower()
@@ -862,7 +1066,14 @@ def build_reconcile_pod_to_odoo_listing(
         {
             "generated_at": dataset["generated_at"],
             "kind": config["slug"],
-            "filters": {"query": query, "status": status, "start_month": dataset.get("selected_start_month") or ""},
+            "filters": {
+                "query": query,
+                "status": status,
+                "start_month": dataset.get("selected_start_month") or "",
+                "end_month": dataset.get("selected_end_month") or "",
+                "odoo_states": dataset.get("selected_odoo_states") or [],
+                "odoo_state_filter_active": bool(dataset.get("odoo_state_filter_active")),
+            },
             "status_options": [
                 {"value": "", "label": "全部状态"},
                 {"value": "found_in_odoo", "label": "在 Odoo 中找到"},
@@ -980,7 +1191,32 @@ def _export_sheet_rows(dataset):
 
 def _reconcile_export_suffix(dataset):
     selected_start_month = str(dataset.get("selected_start_month") or "").strip()
-    return selected_start_month.replace("-", "") if selected_start_month else "all"
+    selected_end_month = str(dataset.get("selected_end_month") or "").strip()
+    selected_odoo_states = _normalize_odoo_states(
+        dataset.get("selected_odoo_states") or dataset.get("selected_odoo_state")
+    )
+    if selected_start_month and selected_end_month:
+        if selected_start_month == selected_end_month:
+            parts = [selected_start_month.replace("-", "")]
+        else:
+            parts = [f"{selected_start_month.replace('-', '')}_{selected_end_month.replace('-', '')}"]
+    elif selected_start_month:
+        parts = [selected_start_month.replace("-", "")]
+    elif selected_end_month:
+        parts = [f"to_{selected_end_month.replace('-', '')}"]
+    else:
+        parts = []
+    if dataset.get("odoo_state_filter_active") and selected_odoo_states:
+        state_tokens = [
+            re.sub(r"[^A-Za-z0-9]+", "_", state).strip("_").lower() or "selected"
+            for state in selected_odoo_states
+        ]
+        parts.append(f"states_{'_'.join(state_tokens)}")
+    elif dataset.get("odoo_state_filter_active"):
+        parts.append("states_none")
+    if parts:
+        return "_".join(parts)
+    return "all"
 
 
 def _reconcile_export_stamp(dataset):
@@ -1067,8 +1303,14 @@ def _build_pod_export_rows(config, rows):
     return export_rows
 
 
-def build_reconcile_export_workbook(kind: str = DEFAULT_RECONCILE_KIND, start_month: str = ""):
-    dataset = load_filtered_reconcile_dataset(kind, start_month)
+def build_reconcile_export_workbook(
+    kind: str = DEFAULT_RECONCILE_KIND,
+    start_month: str = "",
+    end_month: str = "",
+    odoo_state=None,
+    odoo_state_filter: bool = False,
+):
+    dataset = load_filtered_reconcile_dataset(kind, start_month, end_month, odoo_state, odoo_state_filter)
     if not dataset:
         return None
     config = dataset["source_config"]
@@ -1086,8 +1328,14 @@ def build_reconcile_export_workbook(kind: str = DEFAULT_RECONCILE_KIND, start_mo
     }
 
 
-def build_reconcile_odoo_export_workbook(kind: str = DEFAULT_RECONCILE_KIND, start_month: str = ""):
-    dataset = load_filtered_reconcile_dataset(kind, start_month)
+def build_reconcile_odoo_export_workbook(
+    kind: str = DEFAULT_RECONCILE_KIND,
+    start_month: str = "",
+    end_month: str = "",
+    odoo_state=None,
+    odoo_state_filter: bool = False,
+):
+    dataset = load_filtered_reconcile_dataset(kind, start_month, end_month, odoo_state, odoo_state_filter)
     if not dataset:
         return None
     config = dataset["source_config"]
@@ -1099,8 +1347,14 @@ def build_reconcile_odoo_export_workbook(kind: str = DEFAULT_RECONCILE_KIND, sta
     }
 
 
-def build_reconcile_pod_export_workbook(kind: str = DEFAULT_RECONCILE_KIND, start_month: str = ""):
-    dataset = load_filtered_reconcile_dataset(kind, start_month)
+def build_reconcile_pod_export_workbook(
+    kind: str = DEFAULT_RECONCILE_KIND,
+    start_month: str = "",
+    end_month: str = "",
+    odoo_state=None,
+    odoo_state_filter: bool = False,
+):
+    dataset = load_filtered_reconcile_dataset(kind, start_month, end_month, odoo_state, odoo_state_filter)
     if not dataset:
         return None
     config = dataset["source_config"]
@@ -1115,11 +1369,14 @@ def build_reconcile_pod_export_workbook(kind: str = DEFAULT_RECONCILE_KIND, star
 def build_reconcile_metric_export_workbook(
     kind: str = DEFAULT_RECONCILE_KIND,
     start_month: str = "",
+    end_month: str = "",
+    odoo_state=None,
+    odoo_state_filter: bool = False,
     *,
     scope: str,
     metric: str,
 ):
-    dataset = load_filtered_reconcile_dataset(kind, start_month)
+    dataset = load_filtered_reconcile_dataset(kind, start_month, end_month, odoo_state, odoo_state_filter)
     if not dataset:
         return None
     config = dataset["source_config"]

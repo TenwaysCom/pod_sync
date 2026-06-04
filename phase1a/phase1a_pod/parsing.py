@@ -22,7 +22,8 @@ Core rules used by the current Phase 1A / POD recognition pipeline:
     e.g. `WCB2BOUT19782A` -> `WCB2B/OUT/19782`.
   - Pure numeric file names like `23735.pdf` are also restored to
     `WCB2B/OUT/23735`.
-  - Numeric page suffixes such as `23735-1.pdf` or `EU22114-2.pdf` are
+  - Numeric page suffixes such as `23735-1.pdf`, `23735_1.pdf`,
+    `EU22114-2.pdf`, or `EU22114_2.pdf` are
     treated as extra pages of the same POD, not separate orders.
   - Explicit picking keys like `WCB2BOUT20655`, `WCB2C-OUT-23898`,
     and `WHOUT15504` are used directly.
@@ -59,13 +60,13 @@ PICKING_PATTERNS = [
 
 # CMC shorthand file names.
 PREFIX_GROUP_PATTERNS = {
-    "EU": re.compile(r"(?i)\bEU[-_ ]?(\d+[A-Z]?(?:-\d+[A-Z]?){0,12})\b"),
-    "HK": re.compile(r"(?i)\bHK[-_ ]?(\d+[A-Z]?(?:-\d+[A-Z]?){0,12})\b"),
+    "EU": re.compile(r"(?i)\bEU[-_ ]?(\d+[A-Z]?(?:[-_]\d+[A-Z]?){0,12})\b"),
+    "HK": re.compile(r"(?i)\bHK[-_ ]?(\d+[A-Z]?(?:[-_]\d+[A-Z]?){0,12})\b"),
 }
 
 # Some CMC files are stored as bare order numbers like `23735.pdf` or
 # paginated variants such as `23735-1.pdf`.
-CMC_NUMERIC_STEM_PATTERN = re.compile(r"^(?P<base>\d{4,})(?P<pages>(?:-\d{1,2}){0,12})$")
+CMC_NUMERIC_STEM_PATTERN = re.compile(r"^(?P<base>\d{4,})(?P<pages>(?:[-_]\d{1,2}){0,12})$")
 
 
 def canonicalize_key(value):
@@ -128,7 +129,7 @@ def _strip_trailing_alpha(value):
 
 
 def _expand_prefixed_groups(prefix, group_text):
-    parts = [part for part in group_text.upper().split("-") if part]
+    parts = [part for part in re.split(r"[-_]", group_text.upper()) if part]
     if not parts:
         return []
 
@@ -196,7 +197,7 @@ def _extract_cmc_numeric_filename_candidates(file_name):
     if not match:
         return []
 
-    trailing_parts = [part for part in match.group("pages").split("-") if part]
+    trailing_parts = [part for part in re.split(r"[-_]", match.group("pages")) if part]
     if trailing_parts and not all(int(part) <= 9 for part in trailing_parts):
         return []
 

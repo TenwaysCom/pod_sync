@@ -24,6 +24,10 @@ class Phase1APipelineTests(unittest.TestCase):
         candidates = parsing.extract_picking_candidates("EU21916-1.png")
         self.assertEqual(candidates, ["EU21916"])
 
+    def test_treats_single_digit_eu_underscore_suffix_as_page_marker(self):
+        candidates = parsing.extract_picking_candidates("EU35666_1.pdf")
+        self.assertEqual(candidates, ["EU35666"])
+
     def test_extracts_whout_and_tracking(self):
         doc = parsing.infer_document_fields(
             {
@@ -169,6 +173,33 @@ class Phase1APipelineTests(unittest.TestCase):
             }
         )
         self.assertEqual(doc["inferred_picking_names"], ["WCB2BOUT23735"])
+
+    def test_restores_cmc_numeric_underscore_page_filename_to_single_picking(self):
+        doc = parsing.infer_document_fields(
+            {
+                "source": "onedrive",
+                "warehouse": "CMC",
+                "source_file_id": "c8",
+                "source_path": "CMC/2025 POD/23735_2.pdf",
+                "file_name": "23735_2.pdf",
+                "source_url": "https://example.test/file.pdf",
+            }
+        )
+        self.assertEqual(doc["inferred_picking_names"], ["WCB2BOUT23735"])
+
+    def test_restores_cmc_eu_underscore_page_filename_to_wcb2bout_picking(self):
+        doc = parsing.infer_document_fields(
+            {
+                "source": "onedrive",
+                "warehouse": "CMC",
+                "source_file_id": "c9",
+                "source_path": "CMC/2026 POD/EU35666_1.pdf",
+                "file_name": "EU35666_1.pdf",
+                "source_url": "https://example.test/file.pdf",
+            }
+        )
+        self.assertEqual(doc["inferred_picking_names"][0], "WCB2BOUT35666")
+        self.assertIn("EU35666", doc["inferred_picking_names"])
 
     def test_run_phase1a_parse_only_treats_hk_and_restored_wcb2cout_as_single_picking(self):
         with tempfile.TemporaryDirectory() as tmpdir:
