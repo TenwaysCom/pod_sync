@@ -55,6 +55,18 @@ class WebAppSecurityTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"POD_SYNC_FILE_URL_SECRET": "x" * 32}):
             self.assertTrue(app_module._storage_requires_signature())
 
+    def test_unsigned_storage_request_is_public_when_no_secret_is_configured(self):
+        request = FakeRequest(path="/storage/files/Westerman/proof.pdf")
+        downstream = SimpleNamespace(status_code=200)
+
+        async def call_next(_request):
+            return downstream
+
+        with mock.patch.object(app_module, "_storage_requires_signature", return_value=False):
+            response = asyncio.run(app_module.auth_middleware(request, call_next))
+
+        self.assertIs(response, downstream)
+
     def test_normalize_redirect_target_rejects_external_urls(self):
         self.assertEqual(app_module.normalize_redirect_target("https://evil.test", "/"), "/")
         self.assertEqual(app_module.normalize_redirect_target("//evil.test/path", "/"), "/")

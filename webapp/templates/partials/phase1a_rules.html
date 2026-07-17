@@ -47,9 +47,9 @@
   <section class="phase-rule-block">
     <h3>Westerman API</h3>
     <ul>
-      <li>当前没有 Westerman 专属 picking 还原规则。</li>
-      <li>如果文件名或路径中出现通用 picking/tracking 模式，会按通用规则识别。</li>
-      <li>Westerman 下载通常按 tracking 查询，因此正常情况下应以 tracking number 作为主键。</li>
+      <li>按 Westerman shipment reference 查询，例如 <code>WDB2B/OUT/01358</code>。</li>
+      <li>仅下载配置为 POD 类型的文档，manifest 以 document ID 作为唯一来源标识。</li>
+      <li>shipment reference 会写入来源路径，并按 <code>WDB2B/OUT/xxxxx</code> 规则识别 Odoo 出库单。</li>
     </ul>
   </section>
 

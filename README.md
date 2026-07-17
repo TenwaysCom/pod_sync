@@ -83,6 +83,17 @@ python3 clients/cmc_onedrive/probe.py --config config.local.json --limit 1
 python3 clients/emtc_gdrive/probe.py --config config.local.json --limit 1
 ```
 
+Westerman 正式同步由 Odoo 候选清单和本地待拉取池驱动：
+
+```bash
+python3 clients/westerman_api/sync.py --config config.local.json --limit 100 --workers 3
+```
+
+池状态保存在 `runtime/westerman/pod_pull_pool.sqlite3`，有附件才下载到
+`storage/pod/Westerman`；暂时无附件的出库单会按计划重查。
+完整流水线会先执行 Westerman，再执行 CMC/EMTC，因此其他云盘故障不会阻止
+Westerman 本轮候选搜索和下载。
+
 再看 Phase 1A：
 
 ```bash

@@ -50,7 +50,7 @@
       <div>
         <p class="eyebrow">操作台</p>
         <h2>刷新、核对、推送</h2>
-        <p>按顺序操作：先刷新 Odoo 已有 POD 索引，再只推送缺失记录。</p>
+        <p>按顺序操作：先刷新 Odoo 已有 POD 索引，再写入缺失链接或更新不同的旧链接。</p>
       </div>
     </div>
 
@@ -60,7 +60,7 @@
           <span class="odoo-push-step-index">1</span>
           <div>
             <h3>刷新 Odoo POD 索引</h3>
-            <p class="muted">从 Odoo 拉取已有 POD 记录，用来判断哪些 payload 已经写过。</p>
+            <p class="muted">从 Odoo 拉取已有 POD 记录，用来判断目标 POD URL 是否已经完全一致。</p>
           </div>
         </div>
 
@@ -76,11 +76,11 @@
               <strong>{{ comparison.total_ready }}</strong>
             </div>
             <div>
-              <span>Odoo 已有</span>
+              <span>目标 URL 已一致</span>
               <strong class="metric-success">{{ comparison.existing_count }}</strong>
             </div>
             <div>
-              <span>Odoo 缺失</span>
+              <span>待写入/更新</span>
               <strong class="{% if comparison.missing_count > 0 %}metric-warn{% else %}metric-success{% endif %}">{{ comparison.missing_count }}</strong>
             </div>
           </div>
@@ -90,7 +90,7 @@
         {% else %}
           <div class="odoo-push-callout odoo-push-callout-warn">
             <strong>还没有可用索引</strong>
-            <p>请先刷新 Odoo POD 索引。刷新完成后，页面会显示已有和缺失数量。</p>
+            <p>请先刷新 Odoo POD 索引。刷新完成后，页面会显示已一致和待写入/更新数量。</p>
           </div>
         {% endif %}
       </article>
@@ -100,7 +100,7 @@
           <span class="odoo-push-step-index">2</span>
           <div>
             <h3>执行推送</h3>
-            <p class="muted">默认只推送 Odoo 中缺失的记录。</p>
+            <p class="muted">默认跳过目标 URL 完全一致的记录；不同旧 URL 会执行更新。</p>
           </div>
         </div>
 
@@ -116,8 +116,8 @@
           </div>
         {% elif comparison.missing_count <= 0 %}
           <div class="odoo-push-callout odoo-push-callout-ok">
-            <strong>暂无缺失记录</strong>
-            <p>当前 payload 中可推送的 POD 已经存在于 Odoo，无需执行写入。</p>
+            <strong>全部目标 URL 已一致</strong>
+            <p>当前 payload 的目标 POD URL 与 Odoo 完全一致，无需执行写入。</p>
           </div>
         {% else %}
           <form method="post" action="{{ request.url_for('action_odoo_push') }}" class="form-grid odoo-push-form" data-submit-state data-pending-notice="推送任务已提交，正在后台执行...">
@@ -133,6 +133,7 @@
                   <option value="">全部来源</option>
                   <option value="CMC">CMC</option>
                   <option value="EMTC">EMTC</option>
+                  <option value="Westerman">Westerman</option>
                 </select>
               </label>
               <label>最大数量
@@ -144,7 +145,7 @@
             <div class="odoo-push-options">
               <label class="toggle">
                 <input type="checkbox" name="missing_only" value="on" checked>
-                <span>仅推送缺失记录</span>
+                <span>跳过目标 URL 已完全一致的记录</span>
               </label>
               <label class="toggle">
                 <input type="checkbox" name="dry_run" value="on">
@@ -152,7 +153,7 @@
               </label>
             </div>
 
-            <button type="submit" class="action-button" data-loading-text="提交中...">开始推送 {{ comparison.missing_count }} 条缺失记录</button>
+            <button type="submit" class="action-button" data-loading-text="提交中...">开始写入/更新 {{ comparison.missing_count }} 条记录</button>
           </form>
         {% endif %}
 
@@ -162,7 +163,7 @@
             <li>只写入 pod_sync 生成的本地 POD 链接。</li>
             <li>目标模型为 <code>stock.tracking</code>。</li>
             <li>不再写 <code>stock.picking.x_studio_pod_link</code>。</li>
-            <li>如果 Odoo 已有不同 POD 链接，自动跳过等待人工确认。</li>
+            <li>Odoo 中仅 URL 完全一致时跳过；不同旧 URL 会自动 UPDATE。</li>
           </ul>
         </div>
       </article>

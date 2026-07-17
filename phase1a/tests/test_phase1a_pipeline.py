@@ -1,9 +1,10 @@
 import json
 import re
+import sqlite3
 import sys
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -16,6 +17,440 @@ from phase1a_pod import parsing, pipeline
 
 
 class Phase1APipelineTests(unittest.TestCase):
+    @staticmethod
+    def _utc_iso(value=None):
+        value = value or datetime.now(timezone.utc)
+        return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace(
+            "+00:00", "Z"
+        )
+
+    def test_westerman_manifest_is_gated_by_downloaded_pending_pool_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            manifest_path = tmp / "westerman.jsonl"
+            records = [
+                {
+                    "source": "westerman_api",
+                    "warehouse": "Westerman",
+                    "source_file_id": "active-doc",
+                    "shipment_reference": "WDB2B/OUT/01391",
+                    "source_path": "WDB2B/OUT/01391/active.pdf",
+                    "file_name": "active.pdf",
+                },
+                {
+                    "source": "westerman_api",
+                    "warehouse": "Westerman",
+                    "source_file_id": "expired-doc",
+                    "shipment_reference": "WDB2B/OUT/01436",
+                    "source_path": "WDB2B/OUT/01436/expired.pdf",
+                    "file_name": "expired.pdf",
+                },
+            ]
+            manifest_path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+            pool_path = tmp / "pool.sqlite3"
+            with sqlite3.connect(pool_path) as connection:
+                connection.execute(
+                    "CREATE TABLE pod_pull_pool "
+                    "(shipment_reference TEXT, pull_state TEXT, push_state TEXT)"
+                )
+                connection.execute(
+                    "CREATE TABLE pod_pool_meta "
+                    "(meta_key TEXT PRIMARY KEY, meta_value TEXT, updated_at TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO pod_pool_meta VALUES (?, ?, ?)",
+                    ("candidate_refresh_status", "complete", self._utc_iso()),
+                )
+                connection.executemany(
+                    "INSERT INTO pod_pull_pool VALUES (?, ?, ?)",
+                    [
+                        ("WDB2B/OUT/01391", "downloaded", "pending"),
+                        ("WDB2B/OUT/01436", "expired", "needs_review"),
+                    ],
+                )
+
+            documents, statuses = pipeline.load_documents(
+                {
+                    "sources": [
+                        {
+                            "manifest_path": str(manifest_path),
+                            "source_name": "Westerman",
+                            "source_type": "westerman_api",
+                            "pool_path": str(pool_path),
+                        }
+                    ]
+                }
+            )
+
+            self.assertEqual([doc["source_file_id"] for doc in documents], ["active-doc"])
+            self.assertEqual(statuses[0]["pool_gate_status"], "ok")
+            self.assertEqual(statuses[0]["pool_filtered_record_count"], 1)
+
+    def test_westerman_manifest_without_pool_path_is_blocked(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = Path(tmpdir) / "westerman.jsonl"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "source": "westerman_api",
+                        "warehouse": "Westerman",
+                        "source_file_id": "doc-1",
+                        "shipment_reference": "WDB2B/OUT/01391",
+                        "file_name": "proof.pdf",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            documents, statuses = pipeline.load_documents(
+                {
+                    "sources": [
+                        {
+                            "manifest_path": str(manifest_path),
+                            "source_name": "Westerman",
+                            "source_type": "westerman_api",
+                        }
+                    ]
+                }
+            )
+
+            self.assertEqual(documents, [])
+            self.assertEqual(statuses[0]["status"], "pool_gate_blocked")
+            self.assertEqual(statuses[0]["pool_gate_status"], "missing_pool_path")
+
+    def test_westerman_manifest_is_blocked_after_truncated_candidate_refresh(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            manifest_path = tmp / "westerman.jsonl"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "source": "westerman_api",
+                        "warehouse": "Westerman",
+                        "source_file_id": "doc-1",
+                        "shipment_reference": "WDB2B/OUT/01391",
+                        "file_name": "proof.pdf",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            pool_path = tmp / "pool.sqlite3"
+            with sqlite3.connect(pool_path) as connection:
+                connection.execute(
+                    "CREATE TABLE pod_pull_pool "
+                    "(shipment_reference TEXT, pull_state TEXT, push_state TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO pod_pull_pool VALUES (?, ?, ?)",
+                    ("WDB2B/OUT/01391", "downloaded", "pending"),
+                )
+                connection.execute(
+                    "CREATE TABLE pod_pool_meta "
+                    "(meta_key TEXT PRIMARY KEY, meta_value TEXT, updated_at TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO pod_pool_meta VALUES (?, ?, ?)",
+                    ("candidate_refresh_status", "truncated", self._utc_iso()),
+                )
+
+            documents, statuses = pipeline.load_documents(
+                {
+                    "sources": [
+                        {
+                            "manifest_path": str(manifest_path),
+                            "source_name": "Westerman",
+                            "source_type": "westerman_api",
+                            "pool_path": str(pool_path),
+                        }
+                    ]
+                }
+            )
+
+            self.assertEqual(documents, [])
+            self.assertEqual(statuses[0]["status"], "pool_gate_blocked")
+            self.assertEqual(
+                statuses[0]["pool_gate_status"],
+                "candidate_refresh_incomplete",
+            )
+            self.assertEqual(statuses[0]["candidate_refresh_status"], "truncated")
+
+    def test_westerman_manifest_is_blocked_when_complete_refresh_is_stale(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            manifest_path = tmp / "westerman.jsonl"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "source": "westerman_api",
+                        "warehouse": "Westerman",
+                        "source_file_id": "doc-stale",
+                        "shipment_reference": "WDB2B/OUT/01391",
+                        "file_name": "proof.pdf",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            pool_path = tmp / "pool.sqlite3"
+            with sqlite3.connect(pool_path) as connection:
+                connection.execute(
+                    "CREATE TABLE pod_pull_pool "
+                    "(shipment_reference TEXT, pull_state TEXT, push_state TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO pod_pull_pool VALUES (?, ?, ?)",
+                    ("WDB2B/OUT/01391", "downloaded", "pending"),
+                )
+                connection.execute(
+                    "CREATE TABLE pod_pool_meta "
+                    "(meta_key TEXT PRIMARY KEY, meta_value TEXT, updated_at TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO pod_pool_meta VALUES (?, ?, ?)",
+                    (
+                        "candidate_refresh_status",
+                        "complete",
+                        self._utc_iso(datetime.now(timezone.utc) - timedelta(hours=49)),
+                    ),
+                )
+
+            documents, statuses = pipeline.load_documents(
+                {
+                    "sources": [
+                        {
+                            "manifest_path": str(manifest_path),
+                            "source_name": "Westerman",
+                            "source_type": "westerman_api",
+                            "pool_path": str(pool_path),
+                            "candidate_refresh_max_age_hours": 48,
+                        }
+                    ]
+                }
+            )
+
+            self.assertEqual(documents, [])
+            self.assertEqual(statuses[0]["status"], "pool_gate_blocked")
+            self.assertEqual(
+                statuses[0]["pool_gate_status"], "candidate_refresh_stale"
+            )
+            self.assertGreaterEqual(
+                statuses[0]["candidate_refresh_age_seconds"], 49 * 60 * 60
+            )
+
+    def test_westerman_gate_parses_offsets_and_fails_closed_on_bad_timestamp(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pool_path = Path(tmpdir) / "pool.sqlite3"
+            with sqlite3.connect(pool_path) as connection:
+                connection.execute(
+                    "CREATE TABLE pod_pull_pool "
+                    "(shipment_reference TEXT, pull_state TEXT, push_state TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO pod_pull_pool VALUES (?, ?, ?)",
+                    ("WDB2B/OUT/01391", "downloaded", "pending"),
+                )
+                connection.execute(
+                    "CREATE TABLE pod_pool_meta "
+                    "(meta_key TEXT PRIMARY KEY, meta_value TEXT, updated_at TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO pod_pool_meta VALUES (?, ?, ?)",
+                    (
+                        "candidate_refresh_status",
+                        "complete",
+                        "2026-07-17T11:00:00+02:00",
+                    ),
+                )
+
+            gate = pipeline.evaluate_westerman_pool_gate(
+                pool_path,
+                max_age_hours=48,
+                now="2026-07-17T10:00:00Z",
+            )
+            self.assertEqual(gate["status"], "ok")
+            self.assertEqual(gate["candidate_refresh_age_seconds"], 3600)
+
+            with sqlite3.connect(pool_path) as connection:
+                connection.execute(
+                    "UPDATE pod_pool_meta SET updated_at = 'not-a-timestamp'"
+                )
+            gate = pipeline.evaluate_westerman_pool_gate(pool_path)
+            self.assertEqual(gate["status"], "candidate_refresh_stale")
+            self.assertEqual(gate["eligible_references"], set())
+
+            gate = pipeline.evaluate_westerman_pool_gate(
+                pool_path,
+                max_age_hours=float("nan"),
+            )
+            self.assertEqual(gate["status"], "invalid_freshness_config")
+
+    def test_corrupt_westerman_pool_does_not_block_cmc_documents(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            westerman_manifest = tmp / "westerman.jsonl"
+            westerman_manifest.write_text(
+                json.dumps(
+                    {
+                        "source": "westerman_api",
+                        "warehouse": "Westerman",
+                        "source_file_id": "westerman-doc",
+                        "shipment_reference": "WDB2B/OUT/01391",
+                        "file_name": "proof.pdf",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            cmc_manifest = tmp / "cmc.jsonl"
+            cmc_manifest.write_text(
+                json.dumps(
+                    {
+                        "source": "onedrive",
+                        "warehouse": "CMC",
+                        "source_file_id": "cmc-doc",
+                        "source_path": "CMC/2026 POD/EU35666.pdf",
+                        "file_name": "EU35666.pdf",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            corrupt_pool = tmp / "pool.sqlite3"
+            corrupt_pool.write_bytes(b"not a sqlite database")
+
+            documents, statuses = pipeline.load_documents(
+                {
+                    "sources": [
+                        {
+                            "manifest_path": str(westerman_manifest),
+                            "source_name": "Westerman",
+                            "source_type": "westerman_api",
+                            "pool_path": str(corrupt_pool),
+                        },
+                        {
+                            "manifest_path": str(cmc_manifest),
+                            "source_name": "CMC",
+                            "source_type": "onedrive",
+                        },
+                    ]
+                }
+            )
+
+            self.assertEqual([doc["source_file_id"] for doc in documents], ["cmc-doc"])
+            self.assertEqual(statuses[0]["pool_gate_status"], "pool_unavailable")
+            self.assertEqual(statuses[0]["status"], "pool_gate_blocked")
+            self.assertEqual(statuses[1]["status"], "ok")
+
+            config_path = tmp / "phase1a.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "processing_mode": "parse_only",
+                        "output_dir": str(tmp / "out"),
+                        "sources": [
+                            {
+                                "manifest_path": str(westerman_manifest),
+                                "source_name": "Westerman",
+                                "source_type": "westerman_api",
+                                "pool_path": str(corrupt_pool),
+                            },
+                            {
+                                "manifest_path": str(cmc_manifest),
+                                "source_name": "CMC",
+                                "source_type": "onedrive",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            summary = pipeline.run_phase1a(config_path)
+            persisted_summary = json.loads(
+                (tmp / "out" / "phase1a_summary.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+            self.assertEqual(summary["payload_item_count"], 1)
+            self.assertEqual(
+                persisted_summary["westerman_source_gate"]["status"],
+                "pool_unavailable",
+            )
+            self.assertEqual(
+                persisted_summary["westerman_source_gate"][
+                    "filtered_record_count"
+                ],
+                1,
+            )
+            self.assertEqual(
+                persisted_summary["source_statuses"][0]["status"],
+                "pool_gate_blocked",
+            )
+
+    def test_one_valid_westerman_pod_is_allowed_after_partial_document_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            manifest_path = tmp / "westerman.jsonl"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "source": "westerman_api",
+                        "warehouse": "Westerman",
+                        "source_file_id": "valid-pod",
+                        "shipment_reference": "WDB2B/OUT/01391",
+                        "file_name": "proof.pdf",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            pool_path = tmp / "pool.sqlite3"
+            with sqlite3.connect(pool_path) as connection:
+                connection.execute(
+                    "CREATE TABLE pod_pull_pool "
+                    "(shipment_reference TEXT, pull_state TEXT, push_state TEXT, "
+                    "last_error_code TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO pod_pull_pool VALUES (?, ?, ?, ?)",
+                    (
+                        "WDB2B/OUT/01391",
+                        "downloaded",
+                        "pending",
+                        "PARTIAL_DOCUMENT_FAILURE",
+                    ),
+                )
+                connection.execute(
+                    "CREATE TABLE pod_pool_meta "
+                    "(meta_key TEXT PRIMARY KEY, meta_value TEXT, updated_at TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO pod_pool_meta VALUES (?, ?, ?)",
+                    ("candidate_refresh_status", "complete", self._utc_iso()),
+                )
+
+            documents, statuses = pipeline.load_documents(
+                {
+                    "sources": [
+                        {
+                            "manifest_path": str(manifest_path),
+                            "source_name": "Westerman",
+                            "source_type": "westerman_api",
+                            "pool_path": str(pool_path),
+                        }
+                    ]
+                }
+            )
+
+            self.assertEqual([doc["source_file_id"] for doc in documents], ["valid-pod"])
+            self.assertEqual(statuses[0]["pool_gate_status"], "ok")
+
     def test_extracts_multiple_eu_candidates(self):
         candidates = parsing.extract_picking_candidates("EU22080-82-83.pdf")
         self.assertEqual(candidates, ["EU22080", "EU22082", "EU22083"])
@@ -54,6 +489,169 @@ class Phase1APipelineTests(unittest.TestCase):
             }
         )
         self.assertEqual(doc["inferred_tracking_numbers"], ["3SYZXG8293874"])
+
+    def test_extracts_westerman_shipment_reference_as_picking(self):
+        doc = parsing.infer_document_fields(
+            {
+                "source": "westerman_api",
+                "warehouse": "Westerman",
+                "source_file_id": "document-1",
+                "source_path": "WDB2B/OUT/01358/proof.pdf",
+                "file_name": "proof.pdf",
+                "shipment_reference": "WDB2B/OUT/01358",
+                "tracking_number": "U260201855",
+                "source_url": "https://example.test/download_document",
+            }
+        )
+        self.assertEqual(doc["inferred_picking_names"], ["WDB2BOUT01358"])
+        self.assertEqual(doc["inferred_tracking_numbers"], ["U260201855"])
+
+    def test_westerman_explicit_tracking_overrides_numeric_file_candidates(self):
+        doc = parsing.infer_document_fields(
+            {
+                "source": "westerman_api",
+                "warehouse": "Westerman",
+                "source_file_id": "2827075",
+                "source_path": "WDB2B/OUT/01391/10094961_897878.pdf",
+                "file_name": "10094961_897878.pdf",
+                "shipment_reference": "WDB2B/OUT/01391",
+                "tracking_number": "U260203465",
+                "source_url": "https://example.test/download_document",
+            }
+        )
+        self.assertEqual(doc["inferred_picking_names"], ["WDB2BOUT01391"])
+        self.assertEqual(doc["inferred_tracking_numbers"], ["U260203465"])
+
+    def test_westerman_without_explicit_tracking_uses_generic_candidates(self):
+        doc = parsing.infer_document_fields(
+            {
+                "source": "westerman_api",
+                "warehouse": "Westerman",
+                "source_file_id": "2827075",
+                "source_path": "WDB2B/OUT/01391/10094961_897878.pdf",
+                "file_name": "10094961_897878.pdf",
+                "shipment_reference": "WDB2B/OUT/01391",
+                "tracking_number": "",
+                "source_url": "https://example.test/download_document",
+            }
+        )
+        self.assertEqual(doc["inferred_tracking_numbers"], ["10094961"])
+
+    def test_keeps_multiple_westerman_pickings_in_wdb2b_namespace(self):
+        split_pickings = pipeline._resolve_direct_split_pickings(
+            {
+                "inferred_picking_names": ["WDB2BOUT01358", "WDB2BOUT01359"],
+                "inferred_tracking_numbers": [],
+            }
+        )
+        self.assertEqual(split_pickings, ["WDB2BOUT01358", "WDB2BOUT01359"])
+
+    def test_westerman_manifest_matches_scope_and_builds_payload(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            local_file = (
+                tmp
+                / "Westerman"
+                / "WDB2B"
+                / "OUT"
+                / "01391"
+                / "2827075_10094961_897878.pdf"
+            )
+            local_file.parent.mkdir(parents=True)
+            local_file.write_bytes(b"%PDF-1.4\n%%EOF")
+            manifest_path = tmp / "westerman.jsonl"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "source": "westerman_api",
+                        "warehouse": "Westerman",
+                        "source_file_id": "2827075",
+                        "source_path": "WDB2B/OUT/01391/10094961_897878.pdf",
+                        "file_name": "10094961_897878.pdf",
+                        "source_url": "https://example.test/download_document",
+                        "local_path": str(local_file),
+                        "mime_type": "application/pdf",
+                        "shipment_reference": "WDB2B/OUT/01391",
+                        "tracking_number": "U260203465",
+                        "document_type": "POD",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            scope_path = tmp / "scope.json"
+            scope_path.write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "odoo_picking_id": 1391,
+                                "picking_name": "WDB2B/OUT/01391",
+                                "tracking_numbers": ["U260203465"],
+                                "eligible": True,
+                                "in_scope": True,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            pool_path = tmp / "pool.sqlite3"
+            with sqlite3.connect(pool_path) as connection:
+                connection.execute(
+                    "CREATE TABLE pod_pull_pool "
+                    "(shipment_reference TEXT, pull_state TEXT, push_state TEXT)"
+                )
+                connection.execute(
+                    "CREATE TABLE pod_pool_meta "
+                    "(meta_key TEXT PRIMARY KEY, meta_value TEXT, updated_at TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO pod_pool_meta VALUES (?, ?, ?)",
+                    ("candidate_refresh_status", "complete", self._utc_iso()),
+                )
+                connection.execute(
+                    "INSERT INTO pod_pull_pool VALUES (?, ?, ?)",
+                    ("WDB2B/OUT/01391", "downloaded", "pending"),
+                )
+            config_path = tmp / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "job_id": "job-westerman-e2e",
+                        "output_dir": str(tmp / "out"),
+                        "odoo_scope_path": str(scope_path),
+                        "sources": [
+                            {
+                                "manifest_path": str(manifest_path),
+                                "source_name": "Westerman",
+                                "source_type": "westerman_api",
+                                "pool_path": str(pool_path),
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            summary = pipeline.run_phase1a(config_path)
+            payload = json.loads(
+                (tmp / "out" / "odoo_backfill_payload.json").read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(summary["matched_document_count"], 1)
+            self.assertEqual(len(payload["items"]), 1)
+            payload_item = payload["items"][0]
+            self.assertEqual(payload_item["identifier_status"], "ready")
+            self.assertEqual(payload_item["preferred_key_type"], "picking_name")
+            self.assertEqual(payload_item["preferred_key"], "WDB2BOUT01391")
+            self.assertEqual(payload_item["picking_name"], "WDB2B/OUT/01391")
+            self.assertEqual(payload_item["tracking_number"], "U260203465")
+            self.assertEqual(payload_item["local_path"], str(local_file))
+            document = payload_item["documents"][0]
+            self.assertEqual(document["source_file_id"], "2827075")
+            self.assertEqual(document["tracking_number"], "U260203465")
+            self.assertEqual(document["local_path"], str(local_file))
 
     def test_restores_cmc_eu_filename_to_wcb2bout_picking(self):
         doc = parsing.infer_document_fields(
@@ -685,6 +1283,37 @@ class Phase1APipelineTests(unittest.TestCase):
             summary = pipeline.run_phase1a(config_path)
             self.assertEqual(summary["matched_document_count"], 1)
             self.assertEqual(summary["sync_config_path"], str(sync_config_path.resolve()))
+
+    def test_sync_config_requires_explicit_westerman_opt_in(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "sync.json"
+
+            config_path.write_text(
+                json.dumps({"westerman_api": {"warehouse": "Westerman"}}),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                pipeline._build_sources_from_sync_config(config_path),
+                [],
+            )
+
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "westerman_api": {
+                            "enabled": True,
+                            "warehouse": "Westerman",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            sources = pipeline._build_sources_from_sync_config(config_path)
+
+            self.assertEqual(len(sources), 1)
+            self.assertEqual(sources[0]["source_type"], "westerman_api")
+            self.assertEqual(sources[0]["candidate_refresh_max_age_hours"], 48)
 
     def test_auto_run_dir_generates_daily_sequence(self):
         with tempfile.TemporaryDirectory() as tmpdir:

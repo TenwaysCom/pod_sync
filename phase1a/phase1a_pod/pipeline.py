@@ -7,6 +7,10 @@ from .dashboard import build_dashboard_payload, write_dashboard_artifacts
 from .io_utils import ensure_directory, read_json, read_jsonl, write_csv, write_json
 from .matching import build_scope_index, match_document, utc_now
 from .parsing import infer_document_fields
+from .westerman_gate import (
+    DEFAULT_CANDIDATE_REFRESH_MAX_AGE_HOURS,
+    evaluate_westerman_pool_gate,
+)
 
 
 MATCHED_REPORT_FIELDS = [
@@ -147,16 +151,35 @@ def _build_sources_from_sync_config(sync_config_path):
             if key in sync_config:
                 source_cfg = sync_config[key]
                 break
-        if not source_cfg or not source_cfg.get("enabled", True):
+        if not source_cfg:
+            continue
+        if source_type == "westerman_api":
+            if source_cfg.get("enabled") is not True:
+                continue
+        elif not source_cfg.get("enabled", True):
             continue
         source_name = source_cfg.get("warehouse") or definition["default_label"]
-        sources.append(
-            {
-                "manifest_path": str((integrity_root / source_name / f"{source_type}.jsonl").resolve()),
-                "source_name": source_name,
-                "source_type": source_type,
-            }
-        )
+        source = {
+            "manifest_path": str((integrity_root / source_name / f"{source_type}.jsonl").resolve()),
+            "source_name": source_name,
+            "source_type": source_type,
+        }
+        if source_type == "westerman_api":
+            raw_pool_path = source_cfg.get("pool_path") or (
+                Path("runtime") / "westerman" / "pod_pull_pool.sqlite3"
+            )
+            try:
+                pool_path = Path(raw_pool_path)
+                if not pool_path.is_absolute():
+                    pool_path = (sync_config_dir / pool_path).resolve()
+                source["pool_path"] = str(pool_path)
+            except (OSError, TypeError, ValueError):
+                source["pool_path"] = raw_pool_path
+            source["candidate_refresh_max_age_hours"] = source_cfg.get(
+                "candidate_refresh_max_age_hours",
+                DEFAULT_CANDIDATE_REFRESH_MAX_AGE_HOURS,
+            )
+        sources.append(source)
     return sources
 
 
@@ -186,6 +209,32 @@ def _dedupe_manifest_records(records):
     deduped = list(latest_by_identity.values())
     deduped.sort(key=lambda row: (row.get("downloaded_at") or "", row.get("source_modified_time") or "", row.get("_line_number") or 0))
     return deduped
+
+
+def _westerman_allowed_references(source, status):
+    """Fail closed to pool rows that completed a full, approved download."""
+
+    if source.get("source_type") != "westerman_api":
+        return None
+    status["pool_filtered_record_count"] = 0
+    gate = evaluate_westerman_pool_gate(
+        source.get("pool_path"),
+        max_age_hours=source.get("candidate_refresh_max_age_hours"),
+    )
+    status["pool_gate_status"] = gate["status"]
+    for key in (
+        "pool_path",
+        "candidate_refresh_status",
+        "candidate_refresh_updated_at",
+        "candidate_refresh_age_seconds",
+        "candidate_refresh_max_age_hours",
+    ):
+        if key in gate:
+            status[key] = gate[key]
+    if gate["status"] != "ok":
+        status["status"] = "pool_gate_blocked"
+        return set()
+    return gate["eligible_references"]
 
 
 def _next_run_name(output_root):
@@ -250,7 +299,13 @@ def load_documents(config):
         deduped_records = _dedupe_manifest_records(records)
         status["unique_record_count"] = len(deduped_records)
         status["duplicate_record_count"] = len(records) - len(deduped_records)
+        allowed_westerman_references = _westerman_allowed_references(source, status)
         for record in deduped_records:
+            if allowed_westerman_references is not None:
+                shipment_reference = str(record.get("shipment_reference") or "").strip()
+                if shipment_reference not in allowed_westerman_references:
+                    status["pool_filtered_record_count"] += 1
+                    continue
             documents.append(
                 infer_document_fields(
                     record,
@@ -260,6 +315,64 @@ def load_documents(config):
             )
         source_statuses.append(status)
     return documents, source_statuses
+
+
+def summarize_westerman_source_gate(source_statuses):
+    """Expose the Phase-side Westerman gate even when it filtered all items."""
+
+    westerman_statuses = [
+        status
+        for status in source_statuses
+        if status.get("source_type") == "westerman_api"
+    ]
+    if not westerman_statuses:
+        return {
+            "status": "not_applicable",
+            "filtered_record_count": 0,
+            "source_count": 0,
+        }
+
+    gate_statuses = [
+        str(status.get("pool_gate_status") or "not_evaluated")
+        for status in westerman_statuses
+    ]
+    gate_status = next(
+        (status for status in gate_statuses if status != "ok"),
+        gate_statuses[0],
+    )
+    filtered_record_count = 0
+    for status in westerman_statuses:
+        try:
+            filtered_record_count += int(
+                status.get("pool_filtered_record_count") or 0
+            )
+        except (TypeError, ValueError):
+            continue
+
+    result = {
+        "status": gate_status,
+        "filtered_record_count": filtered_record_count,
+        "source_count": len(westerman_statuses),
+    }
+    evidence = next(
+        (
+            status
+            for status in westerman_statuses
+            if str(status.get("pool_gate_status") or "not_evaluated")
+            == gate_status
+        ),
+        westerman_statuses[0],
+    )
+    for key in (
+        "pool_path",
+        "candidate_refresh_status",
+        "candidate_refresh_updated_at",
+        "candidate_refresh_age_seconds",
+        "candidate_refresh_max_age_hours",
+    ):
+        if key in evidence:
+            result[key] = evidence[key]
+    return result
 
 
 def build_report_row(job_id, doc, decision):
@@ -326,6 +439,8 @@ def _picking_alias_suffix(value):
         return value[len("WCB2BOUT"):]
     if value.startswith("WCB2COUT"):
         return value[len("WCB2COUT"):]
+    if value.startswith("WDB2BOUT"):
+        return value[len("WDB2BOUT"):]
     if value.startswith("WBB2BRET"):
         return value[len("WBB2BRET"):]
     if value.startswith("OTHER"):
@@ -345,7 +460,11 @@ def _resolve_primary_picking_name(candidates):
     alias_suffixes.discard(None)
     if len(alias_suffixes) == 1 and all(suffix is not None for suffix in suffixes):
         for candidate in candidates:
-            if candidate.startswith("WCB2BOUT") or candidate.startswith("WCB2COUT"):
+            if (
+                candidate.startswith("WCB2BOUT")
+                or candidate.startswith("WCB2COUT")
+                or candidate.startswith("WDB2BOUT")
+            ):
                 return candidate
         return candidates[0]
     return None
@@ -362,6 +481,8 @@ def _canonical_direct_split_picking(candidate):
     if candidate.startswith("WBB2BRET") or candidate.startswith("OTHER"):
         return candidate
     if candidate.startswith("WCB2COUT"):
+        return candidate
+    if candidate.startswith("WDB2BOUT"):
         return candidate
     suffix = _picking_alias_suffix(candidate)
     if suffix is not None:
@@ -435,6 +556,9 @@ def build_payload_item(picking, documents):
     primary_document = documents[0]
     payload_documents = []
     for index, document in enumerate(documents):
+        tracking_number = document["selected_tracking_number"]
+        if not tracking_number and len(document["inferred_tracking_numbers"]) == 1:
+            tracking_number = document["inferred_tracking_numbers"][0]
         payload_documents.append(
             {
                 "document_uid": document["document_uid"],
@@ -444,13 +568,15 @@ def build_payload_item(picking, documents):
                 "source_name": document["source_name"],
                 "source_type": document["source_type"],
                 "source_file_id": document["source_file_id"],
+                "shipment_reference": document.get("shipment_reference"),
                 "source_path": document["source_path"],
                 "match_level": "document",
                 "match_key_type": document["match_key_type"],
                 "match_key": document["match_key"],
-                "tracking_number": document["selected_tracking_number"],
+                "tracking_number": tracking_number,
                 "file_name": document["file_name"],
                 "file_url": document["file_url"],
+                "local_path": document["local_path"],
                 "mime_type": document["mime_type"],
                 "file_ext": document["file_ext"],
                 "source_modified_at": document["source_modified_at"],
@@ -459,9 +585,35 @@ def build_payload_item(picking, documents):
             }
         )
 
+    primary_payload_document = payload_documents[0]
+    preferred_key_type = primary_document["match_key_type"]
+    preferred_key = primary_document["match_key"]
     return {
+        "payload_item_id": f"{primary_document['document_uid']}::{preferred_key or picking.picking_name}",
+        "identifier_status": "ready",
+        "preferred_key_type": preferred_key_type,
+        "preferred_key": preferred_key,
+        "primary_picking_name": picking.picking_name,
+        "primary_tracking_number": primary_payload_document["tracking_number"],
+        "candidate_picking_names": primary_document["inferred_picking_names"],
+        "candidate_tracking_numbers": primary_document["inferred_tracking_numbers"],
+        "display_label": picking.picking_name,
         "odoo_picking_id": picking.odoo_picking_id,
         "picking_name": picking.picking_name,
+        "tracking_number": primary_payload_document["tracking_number"],
+        "shipment_reference": primary_document.get("shipment_reference"),
+        "source_name": primary_payload_document["source_name"],
+        "source_type": primary_payload_document["source_type"],
+        "source_file_id": primary_payload_document["source_file_id"],
+        "source_path": primary_payload_document["source_path"],
+        "file_name": primary_payload_document["file_name"],
+        "file_url": primary_payload_document["file_url"],
+        "local_path": primary_payload_document["local_path"],
+        "mime_type": primary_payload_document["mime_type"],
+        "file_ext": primary_payload_document["file_ext"],
+        "source_modified_at": primary_payload_document["source_modified_at"],
+        "first_seen_at": primary_payload_document["first_seen_at"],
+        "last_seen_at": primary_payload_document["last_seen_at"],
         "pod_state": "found",
         "pod_sync_status": "ok",
         "document_count": len(payload_documents),
@@ -493,6 +645,7 @@ def build_direct_payload_item(
         "source_name": document["source_name"],
         "source_type": document["source_type"],
         "source_file_id": document["source_file_id"],
+        "shipment_reference": document.get("shipment_reference"),
         "source_path": document["source_path"],
         "preferred_key_type": preferred_key_type,
         "preferred_key": preferred_key,
@@ -522,6 +675,7 @@ def build_direct_payload_item(
         "display_label": primary_label,
         "picking_name": primary_picking_name,
         "tracking_number": primary_tracking_number,
+        "shipment_reference": document.get("shipment_reference"),
         "source_name": document["source_name"],
         "source_type": document["source_type"],
         "source_file_id": document["source_file_id"],
@@ -734,6 +888,10 @@ def run_phase1a(config_path):
         "unmatched_document_count": len(unmatched_rows),
         "matched_picking_count": len(payload_items),
         "source_count": len(config.get("sources", [])),
+        "source_statuses": source_statuses,
+        "westerman_source_gate": summarize_westerman_source_gate(
+            source_statuses
+        ),
         "odoo_scope_path": str(Path(config["odoo_scope_path"]).resolve()) if config.get("odoo_scope_path") else None,
         "sync_config_path": str(Path(config["sync_config_path"]).resolve()) if config.get("sync_config_path") else None,
         "artifacts": {

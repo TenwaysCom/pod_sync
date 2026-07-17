@@ -10,6 +10,8 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+from webapp.signed_urls import redact_sensitive_data, redact_sensitive_text
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 HISTORY_DIR = PROJECT_ROOT / "runtime" / "odoo_push"
 HISTORY_FILE = HISTORY_DIR / "history.json"
@@ -34,26 +36,32 @@ def load_history() -> list[dict]:
         if not HISTORY_FILE.exists():
             return []
         try:
-            return json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+            records = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+            return redact_sensitive_data(records) if isinstance(records, list) else []
         except (json.JSONDecodeError, OSError):
             return []
 
 
 def _save_history(records: list[dict]):
+    safe_records = redact_sensitive_data(records)
     tmp = HISTORY_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(records, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.write_text(
+        json.dumps(safe_records, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     tmp.replace(HISTORY_FILE)
 
 
 def append_record(record: dict) -> dict:
     with _lock:
         _ensure_dir()
+        safe_record = redact_sensitive_data(record)
         records = load_history()
-        records.insert(0, record)
+        records.insert(0, safe_record)
         # Keep last 500 records
         records = records[:500]
         _save_history(records)
-        return record
+        return safe_record
 
 
 def start_push_run(
@@ -96,6 +104,7 @@ def finish_push_run(
     result: dict,
 ) -> dict | None:
     with _lock:
+        result = redact_sensitive_data(result)
         records = load_history()
         for rec in records:
             if rec.get("push_id") == push_id:
@@ -167,6 +176,6 @@ def get_log_content(push_id: str) -> str | None:
     if not log_path.exists():
         return None
     try:
-        return log_path.read_text(encoding="utf-8")
+        return redact_sensitive_text(log_path.read_text(encoding="utf-8"))
     except OSError:
         return None

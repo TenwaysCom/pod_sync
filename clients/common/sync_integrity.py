@@ -1,13 +1,31 @@
 #!/usr/bin/env python3
+import fcntl
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 
 DEFAULT_PROJECT_STORAGE = Path("storage") / "pod"
 DEFAULT_MAX_DOWNLOAD_BYTES = int(os.environ.get("POD_SYNC_MAX_DOWNLOAD_BYTES", str(200 * 1024 * 1024)))
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+ODOO_MUTATION_LOCK_PATH = PROJECT_ROOT / "runtime" / "odoo_push" / "push.lock"
+
+
+@contextmanager
+def exclusive_file_lock(lock_path):
+    """Hold an advisory cross-process lock for the duration of a mutation."""
+
+    path = Path(lock_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def sanitize_path_component(name, default):
@@ -188,21 +206,34 @@ def append_manifest_entry(manifest_path, entry):
     manifest_path = Path(manifest_path)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     with manifest_path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(entry, ensure_ascii=False))
-        fh.write("\n")
+        # Multiple source workers share one JSONL manifest.  Keep each record
+        # intact across both threads and processes before another worker can
+        # append its line.
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            fh.flush()
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
 def load_manifest_entries(manifest_path):
     manifest_path = Path(manifest_path)
     entries = []
     with manifest_path.open("r", encoding="utf-8") as fh:
-        for line_number, line in enumerate(fh, start=1):
-            stripped = line.strip()
-            if not stripped:
-                continue
-            entry = json.loads(stripped)
-            entry["_manifest_line"] = line_number
-            entries.append(entry)
+        # Pair the writer's exclusive lock with a shared read lock so a worker
+        # cannot observe a partially flushed JSONL record.
+        fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
+        try:
+            for line_number, line in enumerate(fh, start=1):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                entry = json.loads(stripped)
+                entry["_manifest_line"] = line_number
+                entries.append(entry)
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
     return entries
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from urllib.parse import unquote, urlencode, urlsplit
 
@@ -27,7 +28,10 @@ from .actions import (
     build_status_check_command,
     build_verify_integrity_command,
     build_westerman_api_command,
+    ensure_existing_file,
     load_runtime_config_snapshot,
+    load_westerman_pool_snapshot,
+    resolve_project_path,
     resolve_storage_dir,
 )
 from .file_browser import build_storage_listing, resolve_storage_file
@@ -81,7 +85,11 @@ from .phase1a_runs import (
 from .remote_counts import load_remote_count_snapshot
 from .reporting import build_report_context
 from .scheduler import Scheduler
-from .signed_urls import is_valid_file_url_secret, verify_storage_path_token
+from .signed_urls import (
+    is_valid_file_url_secret,
+    select_file_url_secret,
+    verify_storage_path_token,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -235,16 +243,17 @@ async def _is_valid_csrf(request: Request) -> bool:
 
 def _get_storage_file_secret() -> str:
     env_secret = os.environ.get("POD_SYNC_FILE_URL_SECRET", "")
-    if env_secret:
-        return env_secret
+    configured_secret = ""
     try:
         cfg_path = PROJECT_ROOT / "config.local.json"
         if cfg_path.exists():
             cfg = _json_lib.loads(cfg_path.read_text(encoding="utf-8"))
-            return str((cfg.get("pod_sync") or {}).get("file_url_secret") or "")
+            configured_secret = str(
+                (cfg.get("pod_sync") or {}).get("file_url_secret") or ""
+            )
     except Exception:
-        return ""
-    return ""
+        configured_secret = ""
+    return select_file_url_secret(env_secret, configured_secret)
 
 
 def _storage_relative_path_from_request(request: Request) -> str:
@@ -336,6 +345,7 @@ METADATA_LABELS = {
     "workers": "并发数",
     "incremental": "增量模式",
     "export_mime_type": "导出 MIME 类型",
+    "shipment_reference": "shipment reference",
     "tracking_number": "tracking number",
     "skip_sha256": "跳过 SHA256",
     "quick": "快速模式",
@@ -490,6 +500,8 @@ def normalize_redirect_target(target: str | None, fallback: str):
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
     if path == "/storage/files" or path.startswith("/storage/files/"):
+        if not _storage_requires_signature():
+            return await call_next(request)
         if _is_authenticated(request) or _has_valid_storage_signature(request):
             return await call_next(request)
         return RedirectResponse(url=f"/login?{urlencode({'next': path})}", status_code=303)
@@ -608,6 +620,7 @@ async def sync_page(request: Request):
     recent_jobs = job_store.list_jobs(limit=10)
     config_snapshot = load_runtime_config_snapshot()
     remote_count_snapshot = load_remote_count_snapshot()
+    westerman_pool = load_westerman_pool_snapshot()
     running_jobs = [job for job in recent_jobs if job.get("status") in {"queued", "running"}]
     enabled_sources = [source for source in config_snapshot.get("sources", []) if source.get("enabled")]
     remote_sources = remote_count_snapshot.get("sources", [])
@@ -643,6 +656,7 @@ async def sync_page(request: Request):
         remote_count_snapshot=remote_count_snapshot,
         scheduler_status=scheduler.status(),
         sync_dashboard=sync_dashboard,
+        westerman_pool=westerman_pool,
     )
 
 
@@ -676,25 +690,20 @@ async def odoo_push_page(request: Request):
                 # Compare with saved index
                 saved_index = load_saved_index()
                 if saved_index:
-                    from .odoo_push import _display_picking_name_for_search
+                    from .odoo_push import (
+                        load_config as load_odoo_push_config,
+                        payload_item_has_same_target_pod_url,
+                    )
+                    full_cfg = load_odoo_push_config("config.local.json")
                     existing_items = []
                     missing_items = []
                     for item in payload.get("items", []):
                         if item.get("identifier_status") != "ready":
                             continue
-                        key_value = item.get("preferred_key", "")
-                        key_type = item.get("preferred_key_type", "")
-                        # For picking_name, convert canonical format back to display format
-                        # so it matches the picking names stored in the Odoo index
-                        lookup_tracking = key_value if key_type == "tracking_number" else None
-                        lookup_picking = key_value if key_type == "picking_name" else None
-                        if lookup_picking:
-                            display_picking = _display_picking_name_for_search(lookup_picking)
-                            if display_picking:
-                                lookup_picking = display_picking
-                        if saved_index.has_pod(
-                            tracking_number=lookup_tracking,
-                            picking_name=lookup_picking,
+                        if payload_item_has_same_target_pod_url(
+                            item,
+                            saved_index,
+                            full_cfg,
                         ):
                             existing_items.append(item)
                         else:
@@ -1321,6 +1330,7 @@ async def action_emtc_gdrive(
 @app.post("/actions/westerman-api")
 async def action_westerman_api(
     config_path: str = Form(DEFAULT_SYNC_CONFIG_REL),
+    shipment_reference: str = Form(""),
     tracking_number: str = Form(""),
     mode: str = Form("lookup"),
     output_dir: str = Form(""),
@@ -1328,13 +1338,61 @@ async def action_westerman_api(
     try:
         label, command, metadata = build_westerman_api_command(
             config_path=config_path,
-            tracking_number=tracking_number,
+            shipment_reference=shipment_reference or tracking_number,
             mode=mode,
             output_dir=output_dir,
         )
     except ValueError as exc:
         return redirect_with_error("/sync", str(exc))
     job = job_store.start_job(action="westerman_api", label=label, command=command, metadata=metadata)
+    return RedirectResponse(url=f"/jobs/{job['job_id']}", status_code=303)
+
+
+@app.post("/actions/westerman-pool")
+async def action_westerman_pool(
+    config_path: str = Form(DEFAULT_SYNC_CONFIG_REL),
+    limit: int = Form(0),
+    workers: int = Form(3),
+):
+    try:
+        resolved_config = ensure_existing_file(
+            resolve_project_path(config_path, DEFAULT_SYNC_CONFIG_REL),
+            "同步配置文件",
+        )
+        if limit < 0:
+            raise ValueError("Westerman 拉取上限必须大于等于 0。")
+        if workers < 1 or workers > 12:
+            raise ValueError("Westerman 并发数必须在 1 到 12 之间。")
+        sync_script = ensure_existing_file(
+            PROJECT_ROOT / "clients" / "westerman_api" / "sync.py",
+            "Westerman 批量同步脚本",
+        )
+        command = [
+            sys.executable,
+            str(sync_script),
+            "--config",
+            str(resolved_config),
+            "--limit",
+            str(limit),
+            "--workers",
+            str(workers),
+        ]
+    except ValueError as exc:
+        return redirect_with_error("/sync", str(exc))
+
+    metadata = {
+        "source": "westerman_api",
+        "mode": "pool_sync",
+        "config_path": str(resolved_config),
+        "limit": limit,
+        "workers": workers,
+    }
+    job = job_store.start_job(
+        action="westerman_pool",
+        label="Westerman 待拉取池同步",
+        command=command,
+        metadata=metadata,
+    )
     return RedirectResponse(url=f"/jobs/{job['job_id']}", status_code=303)
 
 
@@ -1443,12 +1501,26 @@ async def action_run_pipeline(
     emtc_limit: int = Form(0),
     cmc_workers: int = Form(3),
     emtc_workers: int = Form(3),
+    westerman_limit: int | None = Form(None),
+    westerman_workers: int | None = Form(None),
+    skip_westerman: bool = Form(False),
     redirect_to: str = Form("/scheduler"),
 ):
     safe_redirect_to = normalize_redirect_target(redirect_to, "/scheduler")
     # Read current scheduler steps config
     scheduler_cfg = scheduler.load_config()
     steps = scheduler_cfg.get("steps", {})
+    pipeline_options = scheduler_cfg.get("pipeline_options", {})
+    effective_westerman_limit = (
+        westerman_limit
+        if westerman_limit is not None
+        else int(pipeline_options.get("westerman_limit", 0) or 0)
+    )
+    effective_westerman_workers = (
+        westerman_workers
+        if westerman_workers is not None
+        else int(pipeline_options.get("westerman_workers", 3) or 3)
+    )
     try:
         label, command, metadata = build_pipeline_command(
             config_path=config_path,
@@ -1459,8 +1531,11 @@ async def action_run_pipeline(
             emtc_limit=emtc_limit,
             cmc_workers=cmc_workers,
             emtc_workers=emtc_workers,
+            westerman_limit=effective_westerman_limit,
+            westerman_workers=effective_westerman_workers,
             skip_cmc=not steps.get("cmc_sync", True),
             skip_emtc=not steps.get("emtc_sync", True),
+            skip_westerman=skip_westerman or not steps.get("westerman_sync", False),
             skip_phase1a=not steps.get("phase1a", True),
             skip_reports=not steps.get("refresh_reports", True),
             skip_odoo_push=not steps.get("odoo_push", False),
@@ -1483,32 +1558,42 @@ async def action_update_scheduler(
     pipeline_emtc_limit: int = Form(0),
     pipeline_cmc_workers: int = Form(3),
     pipeline_emtc_workers: int = Form(3),
+    pipeline_westerman_limit: int | None = Form(None),
+    pipeline_westerman_workers: int | None = Form(None),
     step_cmc_sync: bool = Form(False),
     step_emtc_sync: bool = Form(False),
+    step_westerman_sync: bool = Form(False),
     step_phase1a: bool = Form(False),
     step_refresh_reports: bool = Form(False),
     step_odoo_push: bool = Form(False),
 ):
+    pipeline_options = {
+        "config_path": pipeline_config_path,
+        "phase1a_config_path": pipeline_phase1a_config_path,
+        "cmc_incremental": pipeline_cmc_incremental,
+        "emtc_incremental": pipeline_emtc_incremental,
+        "cmc_limit": pipeline_cmc_limit,
+        "emtc_limit": pipeline_emtc_limit,
+        "cmc_workers": pipeline_cmc_workers,
+        "emtc_workers": pipeline_emtc_workers,
+    }
+    if pipeline_westerman_limit is not None:
+        pipeline_options["westerman_limit"] = max(0, pipeline_westerman_limit)
+    if pipeline_westerman_workers is not None:
+        pipeline_options["westerman_workers"] = max(1, min(12, pipeline_westerman_workers))
+
     patch = {
         "enabled": enabled in ("1", "on", "true", "yes"),
         "interval_hours": max(1, min(168, interval_hours)),
         "steps": {
             "cmc_sync": step_cmc_sync,
             "emtc_sync": step_emtc_sync,
+            "westerman_sync": step_westerman_sync,
             "phase1a": step_phase1a,
             "refresh_reports": step_refresh_reports,
             "odoo_push": step_odoo_push,
         },
-        "pipeline_options": {
-            "config_path": pipeline_config_path,
-            "phase1a_config_path": pipeline_phase1a_config_path,
-            "cmc_incremental": pipeline_cmc_incremental,
-            "emtc_incremental": pipeline_emtc_incremental,
-            "cmc_limit": pipeline_cmc_limit,
-            "emtc_limit": pipeline_emtc_limit,
-            "cmc_workers": pipeline_cmc_workers,
-            "emtc_workers": pipeline_emtc_workers,
-        },
+        "pipeline_options": pipeline_options,
     }
     scheduler.update_config(patch)
     return redirect_with_notice("/scheduler", "定时任务配置已保存。")

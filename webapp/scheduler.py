@@ -36,6 +36,7 @@ def _parse_iso(value: str | None) -> datetime | None:
 
 
 DEFAULT_STEPS = [
+    {"key": "westerman_sync", "label": "Westerman API 同步", "default": False},
     {"key": "cmc_sync", "label": "CMC OneDrive 同步", "default": True},
     {"key": "emtc_sync", "label": "EMTC Google Drive 同步", "default": True},
     {"key": "phase1a", "label": "Phase 1A 识别", "default": True},
@@ -63,8 +64,28 @@ def _default_config():
             "emtc_limit": 0,
             "cmc_workers": 3,
             "emtc_workers": 3,
+            "westerman_limit": 0,
+            "westerman_workers": 3,
         },
     }
+
+
+def _normalize_config(cfg: dict) -> dict:
+    """Add newly introduced scheduler options without discarding saved values."""
+    defaults = _default_config()
+    normalized = {**defaults, **cfg}
+    saved_steps = cfg.get("steps") if isinstance(cfg.get("steps"), dict) else {}
+    saved_options = (
+        cfg.get("pipeline_options")
+        if isinstance(cfg.get("pipeline_options"), dict)
+        else {}
+    )
+    normalized["steps"] = {**defaults["steps"], **saved_steps}
+    normalized["pipeline_options"] = {
+        **defaults["pipeline_options"],
+        **saved_options,
+    }
+    return normalized
 
 
 class Scheduler:
@@ -100,7 +121,10 @@ class Scheduler:
                 self._save_config_raw(cfg)
                 return cfg
             try:
-                return json.loads(self.config_path.read_text(encoding="utf-8"))
+                cfg = json.loads(self.config_path.read_text(encoding="utf-8"))
+                if not isinstance(cfg, dict):
+                    return _default_config()
+                return _normalize_config(cfg)
             except (OSError, json.JSONDecodeError):
                 return _default_config()
 
@@ -155,8 +179,11 @@ class Scheduler:
                 emtc_limit=int(opts.get("emtc_limit", 0) or 0),
                 cmc_workers=int(opts.get("cmc_workers", 3) or 3),
                 emtc_workers=int(opts.get("emtc_workers", 3) or 3),
+                westerman_limit=int(opts.get("westerman_limit", 0) or 0),
+                westerman_workers=int(opts.get("westerman_workers", 3) or 3),
                 skip_cmc=not steps.get("cmc_sync", True),
                 skip_emtc=not steps.get("emtc_sync", True),
+                skip_westerman=not steps.get("westerman_sync", False),
                 skip_phase1a=not steps.get("phase1a", True),
                 skip_reports=not steps.get("refresh_reports", True),
                 skip_odoo_push=not steps.get("odoo_push", False),

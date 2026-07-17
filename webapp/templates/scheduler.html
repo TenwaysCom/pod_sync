@@ -114,6 +114,15 @@
                 <input type="number" name="pipeline_emtc_workers" value="{{ scheduler_status.pipeline_options.emtc_workers or 3 }}" min="1" max="12">
               </label>
             </div>
+            <div class="scheduler-form-row">
+              <label>Westerman 每批上限
+                <input type="number" name="pipeline_westerman_limit" value="{{ scheduler_status.pipeline_options.westerman_limit or 0 }}" min="0" max="5000">
+                <span class="field-hint">0 表示使用 westerman_api.pool_batch_limit，默认 100。</span>
+              </label>
+              <label>Westerman 并发数
+                <input type="number" name="pipeline_westerman_workers" value="{{ scheduler_status.pipeline_options.westerman_workers or 3 }}" min="1" max="12">
+              </label>
+            </div>
           </div>
 
           <input type="hidden" name="pipeline_cmc_limit" value="0">
@@ -138,6 +147,8 @@
             <input type="hidden" name="emtc_limit" value="0">
             <input type="hidden" name="cmc_workers" value="{{ scheduler_status.pipeline_options.cmc_workers or 3 }}">
             <input type="hidden" name="emtc_workers" value="{{ scheduler_status.pipeline_options.emtc_workers or 3 }}">
+            <input type="hidden" name="westerman_limit" value="{{ scheduler_status.pipeline_options.westerman_limit or 0 }}">
+            <input type="hidden" name="westerman_workers" value="{{ scheduler_status.pipeline_options.westerman_workers or 3 }}">
             <button type="submit" class="action-button" data-loading-text="提交中...">立即执行一次流水线</button>
           </form>
         </article>
@@ -155,7 +166,11 @@
             </div>
             <div>
               <span>并发</span>
-              <strong>CMC {{ scheduler_status.pipeline_options.cmc_workers or 3 }} · EMTC {{ scheduler_status.pipeline_options.emtc_workers or 3 }}</strong>
+              <strong>CMC {{ scheduler_status.pipeline_options.cmc_workers or 3 }} · EMTC {{ scheduler_status.pipeline_options.emtc_workers or 3 }} · Westerman {{ scheduler_status.pipeline_options.westerman_workers or 3 }}</strong>
+            </div>
+            <div>
+              <span>Westerman 每批</span>
+              <strong>{{ scheduler_status.pipeline_options.westerman_limit or '配置默认（100）' }}</strong>
             </div>
           </div>
         </article>

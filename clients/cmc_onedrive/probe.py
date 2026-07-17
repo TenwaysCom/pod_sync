@@ -4,6 +4,7 @@ import base64
 import concurrent.futures
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path, PurePosixPath
@@ -32,6 +33,31 @@ CONFIG_SECTION_KEY = "cmc_onedrive"
 LEGACY_CONFIG_SECTION_KEY = "onedrive"
 GRAPH_COLLECTION_RETRY_STATUSES = {408, 409, 429, 500, 502, 503, 504}
 GRAPH_COLLECTION_MAX_RETRIES = 5
+GRAPH_COLLECTION_MAX_CURSOR_RESTARTS = 2
+GRAPH_COLLECTION_CURSOR_RESTART_DELAY_SECONDS = 5.0
+HTTP_URL_PATTERN = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
+SENSITIVE_QUERY_VALUE_PATTERN = re.compile(
+    r"(?i)(?:(?:\$|%24)?skiptoken|tempauth)\s*=\s*[^\s&,]+"
+)
+SENSITIVE_QUERY_NAME_PATTERN = re.compile(r"(?i)(?:\$|%24)?skiptoken|tempauth")
+
+
+class SafeRequestError(requests.HTTPError):
+    """An HTTP/network failure whose message never contains a request URL."""
+
+    def __init__(self, operation: str, response=None):
+        status_code = getattr(response, "status_code", None)
+        message = f"{operation} failed"
+        if status_code is not None:
+            message += f" (HTTP {status_code})"
+        super().__init__(message + ".", response=response)
+
+
+class GraphCollectionCursorError(SafeRequestError):
+    """A Graph continuation cursor stayed invalid after page-level retries."""
+
+    def __init__(self, response):
+        super().__init__("Microsoft Graph continuation cursor", response=response)
 
 
 def get_onedrive_config_section(full_cfg):
@@ -169,12 +195,18 @@ class RefreshingGraphSession:
         if self.cfg.get("client_secret"):
             payload["client_secret"] = self.cfg["client_secret"]
 
-        response = self.raw_session.post(
-            build_token_url(self.cfg),
-            data=payload,
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
+        try:
+            response = self.raw_session.post(
+                build_token_url(self.cfg),
+                data=payload,
+                timeout=self.timeout,
+            )
+        except requests.RequestException as exc:
+            raise SafeRequestError(
+                "OneDrive OAuth token refresh",
+                response=getattr(exc, "response", None),
+            ) from None
+        _raise_for_status_safely(response, "OneDrive OAuth token refresh")
         payload = response.json()
         access_token = payload.get("access_token")
         if not access_token:
@@ -342,6 +374,149 @@ def _has_graph_skiptoken(url: str) -> bool:
     return "$skiptoken=" in url or "%24skiptoken=" in url.lower()
 
 
+def new_collection_cursor_stats() -> dict[str, int]:
+    return {
+        "cursor_restart_count": 0,
+        "cursor_recovered_count": 0,
+        "cursor_failure_count": 0,
+    }
+
+
+def _increment_cursor_stat(cursor_stats, key: str, amount: int = 1) -> None:
+    if cursor_stats is not None:
+        cursor_stats[key] = int(cursor_stats.get(key, 0)) + amount
+
+
+def _safe_diagnostic_value(value, max_chars: int = 160) -> str:
+    normalized = " ".join(str(value or "").split())[:max_chars]
+    return re.sub(r"[^A-Za-z0-9_.!:@-]", "?", normalized)
+
+
+def _collection_item_id(url: str) -> str:
+    parts = [part for part in urlparse(url).path.split("/") if part]
+    try:
+        item_index = parts.index("items")
+    except ValueError:
+        return ""
+    if item_index + 1 >= len(parts):
+        return ""
+    return _safe_diagnostic_value(parts[item_index + 1])
+
+
+def _graph_error_diagnostics(response) -> dict:
+    diagnostics = {}
+    headers = getattr(response, "headers", {}) or {}
+    request_id = (
+        headers.get("request-id")
+        or headers.get("x-ms-request-id")
+        or headers.get("client-request-id")
+    )
+    if request_id:
+        diagnostics["request_id"] = _safe_diagnostic_value(request_id)
+
+    try:
+        payload = response.json()
+    except (TypeError, ValueError):
+        payload = {}
+    error = payload.get("error", {}) if isinstance(payload, dict) else {}
+    if isinstance(error, dict):
+        if error.get("code"):
+            diagnostics["error_code"] = _safe_diagnostic_value(error["code"])
+        if error.get("message"):
+            # Graph may echo an opaque continuation token without labelling it
+            # as a skiptoken. Never copy the provider's raw message to logs.
+            diagnostics["error_message"] = "Microsoft Graph rejected the continuation cursor."
+    return diagnostics
+
+
+def _raise_for_status_safely(response, operation: str) -> None:
+    if getattr(response, "status_code", 0) >= 400:
+        raise SafeRequestError(operation, response=response)
+
+
+def _safe_get(session, url: str, operation: str, **kwargs):
+    try:
+        response = session.get(url, **kwargs)
+    except requests.RequestException as exc:
+        raise SafeRequestError(operation, response=getattr(exc, "response", None)) from None
+    _raise_for_status_safely(response, operation)
+    return response
+
+
+def _redact_exception_text(value, max_chars: int = 300) -> str:
+    text = " ".join(str(value or "").split())
+    text = HTTP_URL_PATTERN.sub("[redacted-url]", text)
+    text = SENSITIVE_QUERY_VALUE_PATTERN.sub("[redacted-parameter]", text)
+    text = SENSITIVE_QUERY_NAME_PATTERN.sub("[redacted-parameter]", text)
+    return text[:max_chars]
+
+
+def _safe_exception_summary(exc: BaseException) -> str:
+    if isinstance(exc, SafeRequestError):
+        return str(exc)
+    if isinstance(exc, requests.RequestException):
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+        message = type(exc).__name__
+        if status_code is not None:
+            message += f" (HTTP {status_code})"
+        return message
+    return _redact_exception_text(exc) or type(exc).__name__
+
+
+def _collection_item_version(item: dict) -> tuple:
+    """Return stable metadata used to distinguish a changed item after restart.
+
+    The temporary download URL is deliberately excluded because Graph may mint
+    a different signed URL for an otherwise unchanged driveItem.
+    """
+
+    parent_reference = item.get("parentReference", {}) or {}
+    file_info = item.get("file", {}) or {}
+    return (
+        item.get("eTag"),
+        item.get("cTag"),
+        item.get("lastModifiedDateTime"),
+        item.get("size"),
+        item.get("name"),
+        parent_reference.get("driveId"),
+        parent_reference.get("id"),
+        parent_reference.get("path"),
+        file_info.get("mimeType"),
+        "folder" in item,
+    )
+
+
+def _emit_cursor_event(
+    event: str,
+    base_url: str,
+    response,
+    restart_count: int,
+    *,
+    delay_seconds: float | None = None,
+    duplicate_items_skipped: int | None = None,
+    changed_items_replayed: int | None = None,
+) -> None:
+    payload = {
+        "event": event,
+        "source": "onedrive",
+        "http_status": getattr(response, "status_code", None),
+        "restart_count": restart_count,
+        "max_restarts": GRAPH_COLLECTION_MAX_CURSOR_RESTARTS,
+    }
+    item_id = _collection_item_id(base_url)
+    if item_id:
+        payload["collection_item_id"] = item_id
+    if delay_seconds is not None:
+        payload["delay_seconds"] = delay_seconds
+    if duplicate_items_skipped is not None:
+        payload["duplicate_items_skipped"] = duplicate_items_skipped
+    if changed_items_replayed is not None:
+        payload["changed_items_replayed"] = changed_items_replayed
+    payload.update(_graph_error_diagnostics(response))
+    print(json.dumps(payload, ensure_ascii=False))
+
+
 def _retry_after_seconds(response, attempt: int) -> float:
     raw_value = response.headers.get("Retry-After", "")
     try:
@@ -363,32 +538,119 @@ def _get_collection_page(session, url, headers, timeout):
     while True:
         try:
             response = session.get(url, headers=headers, timeout=timeout)
-        except requests.RequestException:
+        except requests.RequestException as exc:
             if attempt >= GRAPH_COLLECTION_MAX_RETRIES:
-                raise
+                raise SafeRequestError(
+                    "Microsoft Graph collection request",
+                    response=getattr(exc, "response", None),
+                ) from None
             time.sleep(min(30.0, float(2 ** attempt)))
             attempt += 1
             continue
 
         if not _is_retryable_collection_response(response, url):
-            response.raise_for_status()
+            _raise_for_status_safely(response, "Microsoft Graph collection request")
             return response
         if attempt >= GRAPH_COLLECTION_MAX_RETRIES:
-            response.raise_for_status()
+            if response.status_code == 400 and _has_graph_skiptoken(url):
+                raise GraphCollectionCursorError(response)
+            _raise_for_status_safely(response, "Microsoft Graph collection request")
             return response
 
         time.sleep(_retry_after_seconds(response, attempt))
         attempt += 1
 
 
-def iter_collection(session, url, headers, timeout):
+def iter_collection(session, url, headers, timeout, cursor_stats=None):
+    base_url = url
     next_url = url
-    while next_url:
-        response = _get_collection_page(session, next_url, headers, timeout)
-        payload = response.json()
-        for item in payload.get("value", []):
-            yield item
-        next_url = payload.get("@odata.nextLink")
+    seen_item_versions = {}
+    restart_count = 0
+    duplicate_items_skipped = 0
+    changed_items_replayed = 0
+    last_cursor_response = None
+    restart_succeeded = False
+    recovery_recorded = False
+
+    def _record_recovery():
+        nonlocal recovery_recorded
+        if not restart_count or recovery_recorded:
+            return
+        recovery_recorded = True
+        _increment_cursor_stat(cursor_stats, "cursor_recovered_count")
+        _emit_cursor_event(
+            "collection_cursor_recovered",
+            base_url,
+            last_cursor_response,
+            restart_count,
+            duplicate_items_skipped=duplicate_items_skipped,
+            changed_items_replayed=changed_items_replayed,
+        )
+
+    try:
+        while next_url:
+            try:
+                response = _get_collection_page(session, next_url, headers, timeout)
+            except GraphCollectionCursorError as exc:
+                last_cursor_response = exc.response
+                if restart_count >= GRAPH_COLLECTION_MAX_CURSOR_RESTARTS:
+                    _increment_cursor_stat(cursor_stats, "cursor_failure_count")
+                    _emit_cursor_event(
+                        "collection_cursor_failed",
+                        base_url,
+                        exc.response,
+                        restart_count,
+                        duplicate_items_skipped=duplicate_items_skipped,
+                        changed_items_replayed=changed_items_replayed,
+                    )
+                    raise
+
+                restart_count += 1
+                restart_succeeded = False
+                _increment_cursor_stat(cursor_stats, "cursor_restart_count")
+                delay_seconds = min(
+                    30.0,
+                    GRAPH_COLLECTION_CURSOR_RESTART_DELAY_SECONDS * (2 ** (restart_count - 1)),
+                )
+                _emit_cursor_event(
+                    "collection_cursor_restart",
+                    base_url,
+                    exc.response,
+                    restart_count,
+                    delay_seconds=delay_seconds,
+                    duplicate_items_skipped=duplicate_items_skipped,
+                    changed_items_replayed=changed_items_replayed,
+                )
+                time.sleep(delay_seconds)
+                next_url = base_url
+                continue
+
+            if restart_count:
+                restart_succeeded = True
+            payload = response.json()
+            for item in payload.get("value", []):
+                item_id = item.get("id")
+                item_version = _collection_item_version(item)
+                if item_id and item_id in seen_item_versions:
+                    if seen_item_versions[item_id] == item_version:
+                        duplicate_items_skipped += 1
+                        continue
+                    changed_items_replayed += 1
+                    item = dict(item)
+                    item["_cursor_replayed_changed"] = True
+                if item_id:
+                    seen_item_versions[item_id] = item_version
+                yield item
+            next_url = payload.get("@odata.nextLink")
+
+        _record_recovery()
+    except GeneratorExit:
+        # A max_items boundary closes this child generator before its normal
+        # epilogue. If the restarted page already succeeded, preserve the
+        # recovery signal instead of reporting restart=1/recovered=0.
+        if restart_succeeded:
+            _record_recovery()
+        raise
 
 
 def normalize_parent_path(parent_path):
@@ -423,12 +685,14 @@ def serialize_item(item, full_path=None, share_root=False):
         "parent_reference": item.get("parentReference", {}),
         "drive_id": get_item_drive_id(item),
         "share_root": share_root,
+        "_cursor_replayed_changed": bool(item.get("_cursor_replayed_changed")),
     }
 
 
 def public_item_output(item):
     output = dict(item)
     output.pop("download_url", None)
+    output.pop("_cursor_replayed_changed", None)
     return output
 
 
@@ -459,12 +723,13 @@ def walk(session, drive_id, headers, timeout, root_path, recursive, max_items, s
 
 
 def walk_from_item_id(session, drive_id, item_id, headers, timeout, recursive, max_items, shared_access=None):
-    root_response = session.get(
+    root_response = _safe_get(
+        session,
         build_item_metadata_url(drive_id, item_id, shared_access=shared_access),
+        "Microsoft Graph item metadata request",
         headers=headers,
         timeout=timeout,
     )
-    root_response.raise_for_status()
     root_item = root_response.json()
     root_path = root_item.get("name") or f"[item:{item_id}]"
 
@@ -491,12 +756,13 @@ def walk_from_item_id(session, drive_id, item_id, headers, timeout, recursive, m
 
 
 def walk_shared_link(session, shared_url, headers, timeout, recursive, max_items, shared_access=None):
-    root_response = session.get(
+    root_response = _safe_get(
+        session,
         build_share_item_url(shared_url, shared_access=shared_access),
+        "Microsoft Graph shared item request",
         headers=headers,
         timeout=timeout,
     )
-    root_response.raise_for_status()
     root_item = root_response.json()
     shared_root_path = str(PurePosixPath("[shared]") / root_item["name"])
 
@@ -525,12 +791,13 @@ def walk_shared_link(session, shared_url, headers, timeout, recursive, max_items
 
 
 def fetch_item(session, headers, timeout, drive_id, item_id, shared_access=None):
-    response = session.get(
+    response = _safe_get(
+        session,
         build_item_metadata_url(drive_id, item_id, shared_access=shared_access),
+        "Microsoft Graph item metadata request",
         headers=headers,
         timeout=timeout,
     )
-    response.raise_for_status()
     return serialize_item(response.json())
 
 
@@ -560,12 +827,23 @@ def limit_reached(seen, max_items):
     return max_items is not None and seen >= max_items
 
 
-def iter_root_items(session, drive_id, headers, timeout, root_path, recursive, max_items, emit=True, shared_access=None):
+def iter_root_items(
+    session,
+    drive_id,
+    headers,
+    timeout,
+    root_path,
+    recursive,
+    max_items,
+    emit=True,
+    shared_access=None,
+    cursor_stats=None,
+):
     queue = [(root_path, build_root_children_url(drive_id, root_path, shared_access=shared_access))]
     seen = 0
     while queue and not limit_reached(seen, max_items):
         current_path, url = queue.pop(0)
-        for item in iter_collection(session, url, headers, timeout):
+        for item in iter_collection(session, url, headers, timeout, cursor_stats=cursor_stats):
             full_path = str(PurePosixPath(current_path) / item["name"])
             output = serialize_item(item, full_path=full_path)
             if emit:
@@ -579,13 +857,25 @@ def iter_root_items(session, drive_id, headers, timeout, root_path, recursive, m
                 queue.append((full_path, build_children_url(child_drive_id, item["id"], shared_access=shared_access)))
 
 
-def iter_root_item_children(session, drive_id, item_id, headers, timeout, recursive, max_items, emit=True, shared_access=None):
-    root_response = session.get(
+def iter_root_item_children(
+    session,
+    drive_id,
+    item_id,
+    headers,
+    timeout,
+    recursive,
+    max_items,
+    emit=True,
+    shared_access=None,
+    cursor_stats=None,
+):
+    root_response = _safe_get(
+        session,
         build_item_metadata_url(drive_id, item_id, shared_access=shared_access),
+        "Microsoft Graph item metadata request",
         headers=headers,
         timeout=timeout,
     )
-    root_response.raise_for_status()
     root_item = root_response.json()
     root_path = root_item.get("name") or f"[item:{item_id}]"
 
@@ -600,7 +890,7 @@ def iter_root_item_children(session, drive_id, item_id, headers, timeout, recurs
     seen = 0
     while queue and not limit_reached(seen, max_items):
         current_path, url = queue.pop(0)
-        for item in iter_collection(session, url, headers, timeout):
+        for item in iter_collection(session, url, headers, timeout, cursor_stats=cursor_stats):
             full_path = str(PurePosixPath(current_path) / item["name"])
             output = serialize_item(item, full_path=full_path)
             if emit:
@@ -614,13 +904,24 @@ def iter_root_item_children(session, drive_id, item_id, headers, timeout, recurs
                 queue.append((full_path, build_children_url(child_drive_id, item["id"], shared_access=shared_access)))
 
 
-def iter_shared_items(session, shared_url, headers, timeout, recursive, max_items, emit=True, shared_access=None):
-    root_response = session.get(
+def iter_shared_items(
+    session,
+    shared_url,
+    headers,
+    timeout,
+    recursive,
+    max_items,
+    emit=True,
+    shared_access=None,
+    cursor_stats=None,
+):
+    root_response = _safe_get(
+        session,
         build_share_item_url(shared_url, shared_access=shared_access),
+        "Microsoft Graph shared item request",
         headers=headers,
         timeout=timeout,
     )
-    root_response.raise_for_status()
     root_item = root_response.json()
     shared_root_path = str(PurePosixPath("[shared]") / root_item["name"])
 
@@ -635,7 +936,7 @@ def iter_shared_items(session, shared_url, headers, timeout, recursive, max_item
     seen = 0
     while queue and not limit_reached(seen, max_items):
         current_path, url = queue.pop(0)
-        for item in iter_collection(session, url, headers, timeout):
+        for item in iter_collection(session, url, headers, timeout, cursor_stats=cursor_stats):
             full_path = str(PurePosixPath(current_path) / item["name"])
             output = serialize_item(item, full_path=full_path)
             if emit:
@@ -651,7 +952,17 @@ def iter_shared_items(session, shared_url, headers, timeout, recursive, max_item
                 queue.append((full_path, build_children_url(child_drive_id, item["id"], shared_access=shared_access)))
 
 
-def iter_all_items(session, cfg, headers, timeout, recursive, max_items, emit=True, shared_access=None):
+def iter_all_items(
+    session,
+    cfg,
+    headers,
+    timeout,
+    recursive,
+    max_items,
+    emit=True,
+    shared_access=None,
+    cursor_stats=None,
+):
     drive_id = cfg.get("drive_id") or ""
     if cfg.get("shared_url"):
         yield from iter_shared_items(
@@ -663,6 +974,7 @@ def iter_all_items(session, cfg, headers, timeout, recursive, max_items, emit=Tr
             max_items,
             emit=emit,
             shared_access=shared_access,
+            cursor_stats=cursor_stats,
         )
     elif cfg.get("root_item_id"):
         if not drive_id:
@@ -677,6 +989,7 @@ def iter_all_items(session, cfg, headers, timeout, recursive, max_items, emit=Tr
             max_items,
             emit=emit,
             shared_access=shared_access,
+            cursor_stats=cursor_stats,
         )
     elif cfg.get("root_path"):
         yield from iter_root_items(
@@ -689,6 +1002,7 @@ def iter_all_items(session, cfg, headers, timeout, recursive, max_items, emit=Tr
             max_items,
             emit=emit,
             shared_access=shared_access,
+            cursor_stats=cursor_stats,
         )
 
 
@@ -740,7 +1054,13 @@ def download_and_record_file(
     )
     target_path = relative_path or Path(sanitize_filename(item["name"]))
     destination = output_dir / target_path
-    write_result = save_stream_to_file(response, destination)
+    try:
+        write_result = save_stream_to_file(response, destination)
+    except requests.RequestException as exc:
+        raise SafeRequestError(
+            "OneDrive file download stream",
+            response=getattr(exc, "response", None),
+        ) from None
     manifest_path = resolve_manifest_path("onedrive", cfg, download_cfg, explicit_output_dir=explicit_output_dir)
     manifest_entry = build_manifest_entry(
         source_name="onedrive",
@@ -832,7 +1152,7 @@ def sync_all_files(session, cfg, download_cfg, headers, timeout, items, explicit
                         "source": "onedrive",
                         "file_id": item.get("id"),
                         "source_file": item.get("path"),
-                        "error": str(exc),
+                        "error": _safe_exception_summary(exc),
                     },
                     ensure_ascii=False,
                 )
@@ -851,7 +1171,7 @@ def sync_all_files(session, cfg, download_cfg, headers, timeout, items, explicit
                 continue
             total_seen += 1
             file_id = item.get("id")
-            if incremental and file_id in skip_index:
+            if incremental and not item.get("_cursor_replayed_changed") and file_id in skip_index:
                 mtime, local_path = skip_index[file_id]
                 if mtime == item.get("modified_time") and local_path and Path(local_path).exists():
                     summary["skipped_files"] += 1
@@ -865,27 +1185,43 @@ def sync_all_files(session, cfg, download_cfg, headers, timeout, items, explicit
         import threading
         manifest_lock = threading.Lock()
         futures_map = {}
+        active_future_by_file_id = {}
+
+        def _consume_future(future, item):
+            try:
+                result = future.result()
+                _handle_result(item, result)
+            except Exception as exc:
+                _handle_result(item, None, exc=exc)
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             for item in items:
                 if item.get("is_folder"):
                     continue
                 total_seen += 1
                 file_id = item.get("id")
-                if incremental and file_id in skip_index:
+                if incremental and not item.get("_cursor_replayed_changed") and file_id in skip_index:
                     mtime, local_path = skip_index[file_id]
                     if mtime == item.get("modified_time") and local_path and Path(local_path).exists():
                         summary["skipped_files"] += 1
                         continue
+
+                # A cursor restart can replay the same item id with newer
+                # metadata. Serialize those versions so two workers never
+                # overwrite the same destination or append manifests out of
+                # order. Unchanged replays are filtered by iter_collection.
+                previous_future = active_future_by_file_id.pop(file_id, None) if file_id else None
+                if previous_future is not None:
+                    previous_item = futures_map.pop(previous_future)
+                    _consume_future(previous_future, previous_item)
                 future = executor.submit(_download_one, item)
                 futures_map[future] = item
+                if file_id:
+                    active_future_by_file_id[file_id] = future
 
             for future in concurrent.futures.as_completed(futures_map):
                 item = futures_map[future]
-                try:
-                    result = future.result()
-                    _handle_result(item, result)
-                except Exception as exc:
-                    _handle_result(item, None, exc=exc)
+                _consume_future(future, item)
 
     summary["total_files_seen"] = total_seen
     return summary
@@ -893,32 +1229,36 @@ def sync_all_files(session, cfg, download_cfg, headers, timeout, items, explicit
 
 def download_file(session, headers, timeout, default_drive_id, item, shared_url=None, shared_access=None):
     if item.get("download_url"):
-        response = session.get(item["download_url"], timeout=timeout, stream=True)
-        response.raise_for_status()
-        return response
+        return _safe_get(
+            session,
+            item["download_url"],
+            "OneDrive file download",
+            timeout=timeout,
+            stream=True,
+        )
 
     if shared_url and item.get("share_root"):
-        response = session.get(
+        return _safe_get(
+            session,
             build_share_content_url(shared_url, shared_access=shared_access),
+            "OneDrive shared file download",
             headers=headers,
             timeout=timeout,
             stream=True,
         )
-        response.raise_for_status()
-        return response
 
     drive_id = item.get("drive_id") or default_drive_id
     if not drive_id:
         raise SystemExit(f"Cannot resolve drive_id for OneDrive item {item.get('id')}.")
 
-    response = session.get(
+    return _safe_get(
+        session,
         build_content_url(drive_id, item["id"], shared_access=shared_access),
+        "Microsoft Graph file download",
         headers=headers,
         timeout=timeout,
         stream=True,
     )
-    response.raise_for_status()
-    return response
 
 
 def main():
@@ -957,6 +1297,7 @@ def main():
 
         first_file = None
         if not args.download_file_id:
+            cursor_stats = new_collection_cursor_stats()
             listed_items = iter_all_items(
                 session=session,
                 cfg=cfg,
@@ -966,6 +1307,7 @@ def main():
                 max_items=max_items,
                 emit=True,
                 shared_access=shared_access,
+                cursor_stats=cursor_stats,
             )
             if args.download_all_files:
                 summary = sync_all_files(
@@ -980,6 +1322,7 @@ def main():
                     workers=args.workers,
                     incremental=args.incremental,
                 )
+                summary.update(cursor_stats)
                 print(json.dumps(summary, ensure_ascii=False))
                 if summary["failed_files"]:
                     raise SystemExit("OneDrive batch sync completed with failures.")

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import xmlrpc.client
@@ -24,10 +25,22 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from webapp.actions import resolve_project_path
-from webapp.signed_urls import build_signed_storage_url, is_valid_file_url_secret
+from clients.common.sync_integrity import ODOO_MUTATION_LOCK_PATH, exclusive_file_lock
+from phase1a.phase1a_pod.westerman_gate import (
+    DEFAULT_CANDIDATE_REFRESH_MAX_AGE_HOURS,
+    evaluate_westerman_pool_gate,
+)
+from webapp.signed_urls import (
+    build_signed_storage_url,
+    is_valid_file_url_secret,
+    redact_sensitive_data,
+    redact_sensitive_text,
+    select_file_url_secret,
+)
 
 
 POD_INDEX_SUCCESS_STATUSES = {"pushed_tracking", "created_tracking", "skipped_same"}
+ODOO_PUSH_LOCK_PATH = ODOO_MUTATION_LOCK_PATH
 
 
 class TimeoutTransport(xmlrpc.client.Transport):
@@ -50,6 +63,25 @@ class TimeoutSafeTransport(xmlrpc.client.SafeTransport):
         connection = super().make_connection(host)
         connection.timeout = self.timeout
         return connection
+
+
+class _RedactingTee:
+    """Mirror stdout to a file without persisting signed URL credentials."""
+
+    def __init__(self, stdout, fh):
+        self.stdout = stdout
+        self.fh = fh
+
+    def write(self, data):
+        safe_data = redact_sensitive_text(data)
+        result = self.stdout.write(safe_data)
+        self.fh.write(safe_data)
+        self.fh.flush()
+        return result
+
+    def flush(self):
+        self.stdout.flush()
+        self.fh.flush()
 
 
 def load_config(config_path: str) -> dict:
@@ -88,7 +120,10 @@ def get_local_file_url(full_cfg: dict, local_path: str) -> str | None:
     if not local.is_file():
         return None
 
-    file_url_secret = pod_sync_cfg.get("file_url_secret", "")
+    file_url_secret = select_file_url_secret(
+        os.environ.get("POD_SYNC_FILE_URL_SECRET", ""),
+        pod_sync_cfg.get("file_url_secret", ""),
+    )
     if is_valid_file_url_secret(file_url_secret):
         return build_signed_storage_url(base_url, rel.as_posix(), file_url_secret)
 
@@ -259,6 +294,8 @@ def _display_picking_name_for_search(value: str | None) -> str | None:
         return f"WCB2B/OUT/{normalized[len('WCB2BOUT'):]}"
     if normalized.startswith("WCB2COUT"):
         return f"WCB2C/OUT/{normalized[len('WCB2COUT'):]}"
+    if normalized.startswith("WDB2BOUT"):
+        return f"WDB2B/OUT/{normalized[len('WDB2BOUT'):]}"
     if normalized.startswith("WBB2BRET"):
         return f"WBB2B/RET/{normalized[len('WBB2BRET'):]}"
     if normalized.startswith("WCB2BRET"):
@@ -272,6 +309,224 @@ def _display_picking_name_for_search(value: str | None) -> str | None:
     return value
 
 
+def _westerman_payload_reference(item: dict) -> str | None:
+    explicit = str(item.get("shipment_reference") or "").strip()
+    if explicit:
+        return explicit
+    picking_value = (
+        item.get("picking_name")
+        or item.get("primary_picking_name")
+        or (
+            item.get("preferred_key")
+            if item.get("preferred_key_type") == "picking_name"
+            else None
+        )
+    )
+    display = _display_picking_name_for_search(picking_value)
+    if display and str(display).startswith("WDB2B/OUT/"):
+        return str(display)
+    return None
+
+
+def _looks_like_westerman_single_push(
+    *,
+    source_name: str | None,
+    local_path: str | None,
+    match_key_type: str,
+    match_key: str,
+) -> bool:
+    normalized_source = re.sub(r"[^a-z0-9]", "", str(source_name or "").casefold())
+    if normalized_source.startswith("westerman"):
+        return True
+    if local_path and "westerman" in {
+        part.casefold() for part in Path(local_path).resolve().parts
+    }:
+        return True
+    if match_key_type == "picking_name":
+        normalized_key = re.sub(r"[^A-Z0-9]", "", str(match_key or "").upper())
+        return normalized_key.startswith("WDB2BOUT")
+    return False
+
+
+def _filter_westerman_items_by_pool(items, full_cfg, config_path):
+    """Revalidate pool state immediately before any Odoo mutation."""
+
+    westerman_items = [item for item in items if item.get("source_type") == "westerman_api"]
+    if not westerman_items:
+        return items, 0, {"status": "not_applicable"}
+
+    non_westerman_items = [
+        item for item in items if item.get("source_type") != "westerman_api"
+    ]
+    source_cfg = full_cfg.get("westerman_api")
+    if not isinstance(source_cfg, dict) or source_cfg.get("enabled") is not True:
+        return non_westerman_items, len(westerman_items), {
+            "status": "source_not_enabled"
+        }
+
+    raw_pool_path = source_cfg.get("pool_path") or "runtime/westerman/pod_pull_pool.sqlite3"
+    try:
+        pool_path = Path(raw_pool_path)
+        if not pool_path.is_absolute():
+            resolved_config = resolve_project_path(config_path, "config.local.json")
+            pool_path = (resolved_config.parent / pool_path).resolve()
+    except (OSError, TypeError, ValueError):
+        pool_path = raw_pool_path
+    gate = evaluate_westerman_pool_gate(
+        pool_path,
+        max_age_hours=source_cfg.get(
+            "candidate_refresh_max_age_hours",
+            DEFAULT_CANDIDATE_REFRESH_MAX_AGE_HOURS,
+        ),
+    )
+    if gate["status"] != "ok":
+        return non_westerman_items, len(westerman_items), gate
+
+    eligible = gate["eligible_references"]
+    filtered_items = []
+    filtered_count = 0
+    for item in items:
+        if item.get("source_type") != "westerman_api":
+            filtered_items.append(item)
+        elif _westerman_payload_reference(item) in eligible:
+            filtered_items.append(item)
+        else:
+            filtered_count += 1
+    return filtered_items, filtered_count, gate
+
+
+def _phase_westerman_gate_evidence(payload_path: str) -> dict | None:
+    """Read the sibling Phase summary when Phase removed every Westerman item."""
+
+    try:
+        summary_path = Path(payload_path).resolve().parent / "phase1a_summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+    gate = summary.get("westerman_source_gate")
+    if isinstance(gate, dict):
+        return dict(gate)
+
+    westerman_statuses = [
+        status
+        for status in summary.get("source_statuses", [])
+        if isinstance(status, dict)
+        and status.get("source_type") == "westerman_api"
+    ]
+    if not westerman_statuses:
+        return None
+    gate_statuses = [
+        str(status.get("pool_gate_status") or "not_evaluated")
+        for status in westerman_statuses
+    ]
+    status = next(
+        (value for value in gate_statuses if value != "ok"),
+        gate_statuses[0],
+    )
+    try:
+        filtered_count = sum(
+            int(item.get("pool_filtered_record_count") or 0)
+            for item in westerman_statuses
+        )
+    except (TypeError, ValueError):
+        filtered_count = 0
+    result = {
+        "status": status,
+        "filtered_record_count": filtered_count,
+    }
+    evidence = next(
+        (
+            item
+            for item in westerman_statuses
+            if str(item.get("pool_gate_status") or "not_evaluated") == status
+        ),
+        westerman_statuses[0],
+    )
+    for key in (
+        "candidate_refresh_status",
+        "candidate_refresh_updated_at",
+        "candidate_refresh_age_seconds",
+        "candidate_refresh_max_age_hours",
+    ):
+        if key in evidence:
+            result[key] = evidence[key]
+    return result
+
+
+def _merge_phase_westerman_gate_evidence(
+    *,
+    payload_path: str,
+    filtered_count: int,
+    gate: dict,
+) -> tuple[int, dict]:
+    """Preserve a Phase gate failure after it removed all provider payload rows."""
+
+    if filtered_count or gate.get("status") != "not_applicable":
+        return filtered_count, gate
+    evidence = _phase_westerman_gate_evidence(payload_path)
+    if not evidence:
+        return filtered_count, gate
+    try:
+        phase_filtered_count = int(evidence.get("filtered_record_count") or 0)
+    except (TypeError, ValueError):
+        phase_filtered_count = 0
+    if phase_filtered_count <= 0:
+        return filtered_count, gate
+    merged_gate = {
+        key: value
+        for key, value in evidence.items()
+        if key
+        in {
+            "status",
+            "candidate_refresh_status",
+            "candidate_refresh_updated_at",
+            "candidate_refresh_age_seconds",
+            "candidate_refresh_max_age_hours",
+        }
+    }
+    merged_gate.setdefault("status", "unknown")
+    return phase_filtered_count, merged_gate
+
+
+def _new_push_results(total, westerman_pool_filtered, westerman_gate):
+    results = {
+        "total": total,
+        "westerman_pool_gate_status": westerman_gate.get("status", "unknown"),
+        "westerman_pool_filtered": westerman_pool_filtered,
+        "skipped_existing": 0,
+        "tracking_pushed": 0,
+        "tracking_skipped_same": 0,
+        "tracking_not_found": 0,
+        "picking_pushed": 0,
+        "picking_skipped_same": 0,
+        "picking_not_found": 0,
+        "ambiguous": 0,
+        "needs_review": 0,
+        "failed": 0,
+        "by_source": defaultdict(
+            lambda: {
+                "tracking_pushed": 0,
+                "picking_pushed": 0,
+                "not_found": 0,
+                "ambiguous": 0,
+                "needs_review": 0,
+                "failed": 0,
+            }
+        ),
+        "details": [],
+    }
+    for key in (
+        "candidate_refresh_status",
+        "candidate_refresh_updated_at",
+        "candidate_refresh_age_seconds",
+        "candidate_refresh_max_age_hours",
+    ):
+        if key in westerman_gate:
+            results[f"westerman_{key}"] = westerman_gate[key]
+    return results
+
+
 def _payload_lookup_key(item: dict) -> tuple[str, str]:
     key_type = item.get("preferred_key_type", "")
     key_value = item.get("preferred_key", "")
@@ -280,6 +535,33 @@ def _payload_lookup_key(item: dict) -> tuple[str, str]:
         if display_key:
             key_value = display_key
     return key_type, key_value
+
+
+def payload_item_has_same_target_pod_url(
+    item: dict,
+    existing_index,
+    full_cfg: dict,
+) -> bool:
+    """Return true only when Odoo already has this exact resolved target URL."""
+
+    if existing_index is None:
+        return False
+    key_type, key_value = _payload_lookup_key(item)
+    existing_info = existing_index.get_pod_info(
+        tracking_number=key_value if key_type == "tracking_number" else None,
+        picking_name=key_value if key_type == "picking_name" else None,
+    )
+    if not existing_info:
+        return False
+    target_url, _, _ = resolve_push_file_url(
+        full_cfg,
+        local_path=item.get("local_path"),
+        source_file_url=item.get("file_url"),
+    )
+    return bool(
+        target_url
+        and str(existing_info.get("pod_link") or "") == target_url
+    )
 
 
 def search_picking(models, odoo_cfg: dict, key_type: str, key_value: str):
@@ -378,19 +660,14 @@ def create_stock_tracking(models, odoo_cfg: dict, picking_id: int, tracking_numb
     return models.execute_kw(db, uid, password, "stock.tracking", "create", [vals])
 
 
-def _pod_link_overwrite_error(current_pod_link: str | None, target_pod_link: str) -> str | None:
-    if current_pod_link and str(current_pod_link) != target_pod_link:
-        return "stock.tracking already has a different pod_link; skip automatic overwrite"
-    return None
-
-
-def push_payload(
+def _push_payload_unlocked(
     *,
     config_path: str,
     payload_path: str,
     dry_run: bool = False,
     limit: int = 0,
     source_filter: str | None = None,
+    excluded_source_types: set[str] | None = None,
     skip_existing: bool = True,
     missing_only: bool = False,
 ):
@@ -408,8 +685,23 @@ def push_payload(
     items = [item for item in payload.get("items", []) if item.get("identifier_status") == "ready"]
     if source_filter:
         items = [item for item in items if item.get("source_name") == source_filter]
+    if excluded_source_types:
+        excluded = {str(value).strip() for value in excluded_source_types if str(value).strip()}
+        items = [item for item in items if item.get("source_type") not in excluded]
+
+    items, westerman_pool_filtered, westerman_gate = (
+        _filter_westerman_items_by_pool(items, full_cfg, config_path)
+    )
+    westerman_pool_filtered, westerman_gate = (
+        _merge_phase_westerman_gate_evidence(
+            payload_path=payload_path,
+            filtered_count=westerman_pool_filtered,
+            gate=westerman_gate,
+        )
+    )
 
     # Pre-filter to missing-only if requested
+    missing_only_skipped = 0
     if missing_only:
         try:
             try:
@@ -419,36 +711,34 @@ def push_payload(
             existing_index = get_index(config_path)
             filtered_items = []
             for item in items:
-                key_type, key_value = _payload_lookup_key(item)
-                lookup_tracking = key_value if key_type == "tracking_number" else None
-                lookup_picking = key_value if key_type == "picking_name" else None
-                if not existing_index.has_pod(
-                    tracking_number=lookup_tracking,
-                    picking_name=lookup_picking,
+                if payload_item_has_same_target_pod_url(
+                    item,
+                    existing_index,
+                    full_cfg,
                 ):
-                    filtered_items.append(item)
+                    missing_only_skipped += 1
+                    continue
+                filtered_items.append(item)
             items = filtered_items
-            print(f"[MISSING_ONLY] Filtered to {len(items)} missing records")
+            print(
+                "[MISSING_ONLY] "
+                f"Filtered to {len(items)} records requiring write/update"
+            )
         except Exception as exc:
             print(f"[MISSING_ONLY] Warning: failed to filter: {exc}")
 
     if limit > 0:
         items = items[:limit]
 
-    # Load existing POD index for deduplication
-    existing_index = None
-    skipped_existing = 0
-    if skip_existing:
-        try:
-            try:
-                from .odoo_pull import get_index
-            except ImportError:
-                from webapp.odoo_pull import get_index
-            print("[DEDUP] Loading existing POD index ...")
-            existing_index = get_index(config_path)
-            print(f"[DEDUP] Indexed: {existing_index.summary()}")
-        except Exception as exc:
-            print(f"[DEDUP] Warning: failed to load index: {exc}")
+    results = _new_push_results(
+        len(items),
+        westerman_pool_filtered,
+        westerman_gate,
+    )
+    results["skipped_existing"] = missing_only_skipped
+    if not items:
+        results["by_source"] = {}
+        return {"ok": True, **results}
 
     common, models = connect_odoo(odoo_cfg)
 
@@ -459,36 +749,12 @@ def push_payload(
     except Exception as exc:
         return {"ok": False, "error": f"Odoo connection failed: {exc}"}
 
-    results = {
-        "total": len(items),
-        "skipped_existing": 0,
-        "tracking_pushed": 0,
-        "tracking_skipped_same": 0,
-        "tracking_not_found": 0,
-        "picking_pushed": 0,
-        "picking_skipped_same": 0,
-        "picking_not_found": 0,
-        "ambiguous": 0,
-        "needs_review": 0,
-        "failed": 0,
-        "by_source": defaultdict(
-            lambda: {
-                "tracking_pushed": 0,
-                "picking_pushed": 0,
-                "not_found": 0,
-                "ambiguous": 0,
-                "needs_review": 0,
-                "failed": 0,
-            }
-        ),
-        "details": [],
-    }
-
     for item in items:
         key_type, key_value = _payload_lookup_key(item)
         source_file_url = item.get("file_url", "")
         local_path = item.get("local_path", "")
         source = item.get("source_name", "unknown")
+        source_type = item.get("source_type", "")
         payload_item_id = item.get("payload_item_id", "")
         source_modified_at = item.get("source_modified_at", "")
 
@@ -516,22 +782,6 @@ def push_payload(
             "target_name": None,
             "error": None,
         }
-
-        # Deduplication: skip if Odoo already has POD for this key
-        if existing_index and existing_index.has_pod(
-            tracking_number=key_value if key_type == "tracking_number" else None,
-            picking_name=key_value if key_type == "picking_name" else None,
-        ):
-            existing_info = existing_index.get_pod_info(
-                tracking_number=key_value if key_type == "tracking_number" else None,
-                picking_name=key_value if key_type == "picking_name" else None,
-            )
-            detail["status"] = "skipped_existing"
-            detail["target_model"] = existing_info.get("source_model") if existing_info else None
-            detail["error"] = f"already has pod: {existing_info.get('pod_link', '')[:60]}..." if existing_info else "already has pod"
-            results["skipped_existing"] += 1
-            results["details"].append(detail)
-            continue
 
         if not key_value or not file_url:
             detail["status"] = "skipped"
@@ -576,15 +826,8 @@ def push_payload(
                     results["tracking_skipped_same"] += 1
                     results["details"].append(detail)
                     continue
-                overwrite_error = _pod_link_overwrite_error(current_pod_link, file_url)
-                if overwrite_error:
-                    detail["status"] = "needs_review"
-                    detail["error"] = overwrite_error
-                    detail["existing_pod_link"] = str(current_pod_link)
-                    results["needs_review"] += 1
-                    results["by_source"][source]["needs_review"] += 1
-                    results["details"].append(detail)
-                    continue
+                if current_pod_link:
+                    detail["pod_link_replaced"] = True
 
                 if dry_run:
                     detail["status"] = "dry_run_tracking"
@@ -675,15 +918,8 @@ def push_payload(
                 results["tracking_skipped_same"] += 1
                 results["details"].append(detail)
                 continue
-            overwrite_error = _pod_link_overwrite_error(current_pod_link, file_url)
-            if overwrite_error:
-                detail["status"] = "needs_review"
-                detail["error"] = overwrite_error
-                detail["existing_pod_link"] = str(current_pod_link)
-                results["needs_review"] += 1
-                results["by_source"][source]["needs_review"] += 1
-                results["details"].append(detail)
-                continue
+            if current_pod_link:
+                detail["pod_link_replaced"] = True
 
             if dry_run:
                 detail["status"] = "dry_run_tracking"
@@ -706,7 +942,11 @@ def push_payload(
             results["details"].append(detail)
             continue
 
-        if key_type != "tracking_number":
+        tracking_number_for_create = key_value if key_type == "tracking_number" else ""
+        if not tracking_number_for_create and source_type == "westerman_api":
+            tracking_number_for_create = str(item.get("tracking_number") or "").strip()
+
+        if not tracking_number_for_create:
             detail["status"] = "needs_review"
             detail["error"] = "picking matched but no stock.tracking exists; tracking_number is required before creating stock.tracking"
             detail["target_id"] = picking_id
@@ -725,7 +965,7 @@ def push_payload(
 
         try:
             new_tracking_id = create_stock_tracking(
-                models, odoo_cfg, picking_id, key_value, file_url, pod_time
+                models, odoo_cfg, picking_id, tracking_number_for_create, file_url, pod_time
             )
             detail["status"] = "created_tracking"
             detail["target_id"] = new_tracking_id
@@ -744,7 +984,58 @@ def push_payload(
     return {"ok": True, **results}
 
 
+def push_payload(
+    *,
+    config_path: str,
+    payload_path: str,
+    dry_run: bool = False,
+    limit: int = 0,
+    source_filter: str | None = None,
+    excluded_source_types: set[str] | None = None,
+    skip_existing: bool = True,
+    missing_only: bool = False,
+):
+    """Serialize payload pushes so concurrent jobs cannot create duplicates."""
+
+    with exclusive_file_lock(ODOO_PUSH_LOCK_PATH):
+        result = _push_payload_unlocked(
+            config_path=config_path,
+            payload_path=payload_path,
+            dry_run=dry_run,
+            limit=limit,
+            source_filter=source_filter,
+            excluded_source_types=excluded_source_types,
+            skip_existing=skip_existing,
+            missing_only=missing_only,
+        )
+    return redact_sensitive_data(result)
+
+
 def push_single_item(
+    *,
+    config_path: str,
+    match_key: str,
+    match_key_type: str,
+    file_url: str,
+    local_path: str | None = None,
+    source_name: str = "unknown",
+    dry_run: bool = False,
+):
+    """Serialize a single POD mutation with every other Odoo push."""
+
+    with exclusive_file_lock(ODOO_PUSH_LOCK_PATH):
+        return _push_single_item_unlocked(
+            config_path=config_path,
+            match_key=match_key,
+            match_key_type=match_key_type,
+            file_url=file_url,
+            local_path=local_path,
+            source_name=source_name,
+            dry_run=dry_run,
+        )
+
+
+def _push_single_item_unlocked(
     *,
     config_path: str,
     match_key: str,
@@ -765,13 +1056,29 @@ def push_single_item(
     if missing:
         return {"ok": False, "error": f"Missing Odoo config keys: {missing}"}
 
+    if _looks_like_westerman_single_push(
+        source_name=source_name,
+        local_path=local_path,
+        match_key_type=match_key_type,
+        match_key=match_key,
+    ):
+        return {
+            "ok": False,
+            "status": "blocked",
+            "error_code": "WESTERMAN_SINGLE_PUSH_REQUIRES_POOL_PAYLOAD",
+            "error": (
+                "Westerman POD must use the pool-backed Phase payload; "
+                "single-item Odoo push is not permitted."
+            ),
+        }
+
     final_url, file_url_error, file_url_source = resolve_push_file_url(
         full_cfg,
         local_path=local_path,
         source_file_url=file_url,
     )
     if not final_url:
-        return {
+        return redact_sensitive_data({
             "ok": False,
             "match_key": match_key,
             "match_key_type": match_key_type,
@@ -784,13 +1091,15 @@ def push_single_item(
             "target_id": None,
             "target_name": None,
             "error": file_url_error or "missing local file_url",
-        }
+        })
 
     common, models = connect_odoo(odoo_cfg)
     try:
         version = common.version()
     except Exception as exc:
-        return {"ok": False, "error": f"Odoo connection failed: {exc}"}
+        return redact_sensitive_data(
+            {"ok": False, "error": f"Odoo connection failed: {exc}"}
+        )
 
     key_type = match_key_type
     key_value = match_key
@@ -819,7 +1128,7 @@ def push_single_item(
             match_key_type=key_type,
             file_url=final_url,
         )
-        return result
+        return redact_sensitive_data(result)
 
     # PRIMARY: Try stock.tracking by tracking_number
     if key_type == "tracking_number":
@@ -847,12 +1156,8 @@ def push_single_item(
             if current_pod_link and str(current_pod_link) == final_url:
                 result["status"] = "skipped_same"
                 return finish()
-            overwrite_error = _pod_link_overwrite_error(current_pod_link, final_url)
-            if overwrite_error:
-                result["status"] = "needs_review"
-                result["error"] = overwrite_error
-                result["existing_pod_link"] = str(current_pod_link)
-                return finish()
+            if current_pod_link:
+                result["pod_link_replaced"] = True
 
             if dry_run:
                 result["status"] = "dry_run_tracking"
@@ -914,12 +1219,8 @@ def push_single_item(
         if current_pod_link and str(current_pod_link) == final_url:
             result["status"] = "skipped_same"
             return finish()
-        overwrite_error = _pod_link_overwrite_error(current_pod_link, final_url)
-        if overwrite_error:
-            result["status"] = "needs_review"
-            result["error"] = overwrite_error
-            result["existing_pod_link"] = str(current_pod_link)
-            return finish()
+        if current_pod_link:
+            result["pod_link_replaced"] = True
 
         if dry_run:
             result["status"] = "dry_run_tracking"
@@ -956,7 +1257,7 @@ def push_single_item(
     return finish()
 
 
-def preflight_payload(
+def _preflight_payload_unredacted(
     *,
     config_path: str,
     payload_path: str,
@@ -986,6 +1287,16 @@ def preflight_payload(
     items = [item for item in payload.get("items", []) if item.get("identifier_status") == "ready"]
     if source_filter:
         items = [item for item in items if item.get("source_name") == source_filter]
+    items, westerman_pool_filtered, westerman_gate = (
+        _filter_westerman_items_by_pool(items, full_cfg, config_path)
+    )
+    westerman_pool_filtered, westerman_gate = (
+        _merge_phase_westerman_gate_evidence(
+            payload_path=payload_path,
+            filtered_count=westerman_pool_filtered,
+            gate=westerman_gate,
+        )
+    )
 
     # Pre-filter to missing-only if requested
     if missing_only:
@@ -997,10 +1308,10 @@ def preflight_payload(
             existing_index = get_index(config_path)
             filtered_items = []
             for item in items:
-                key_type, key_value = _payload_lookup_key(item)
-                if not existing_index.has_pod(
-                    tracking_number=key_value if key_type == "tracking_number" else None,
-                    picking_name=key_value if key_type == "picking_name" else None,
+                if not payload_item_has_same_target_pod_url(
+                    item,
+                    existing_index,
+                    full_cfg,
                 ):
                     filtered_items.append(item)
             items = filtered_items
@@ -1009,6 +1320,25 @@ def preflight_payload(
 
     if limit > 0:
         items = items[:limit]
+
+    if not items:
+        return {
+            "ok": True,
+            "server_version": "not_checked",
+            "total": 0,
+            "westerman_pool_gate_status": westerman_gate.get(
+                "status", "unknown"
+            ),
+            "westerman_pool_filtered": westerman_pool_filtered,
+            "ready_to_push_count": 0,
+            "already_has_pod_count": 0,
+            "not_found_count": 0,
+            "invalid_count": 0,
+            "ready_to_push": [],
+            "already_has_pod": [],
+            "not_found": [],
+            "invalid": [],
+        }
 
     # Load existing POD index for deduplication
     existing_index = None
@@ -1065,10 +1395,13 @@ def preflight_payload(
             continue
 
         # Check existing POD
-        if existing_index and existing_index.has_pod(
-            tracking_number=key_value if key_type == "tracking_number" else None,
-            picking_name=key_value if key_type == "picking_name" else None,
-        ):
+        existing_info = None
+        if existing_index:
+            existing_info = existing_index.get_pod_info(
+                tracking_number=key_value if key_type == "tracking_number" else None,
+                picking_name=key_value if key_type == "picking_name" else None,
+            )
+        if existing_info and str(existing_info.get("pod_link") or "") == file_url:
             already_has_pod.append(entry)
             continue
 
@@ -1099,6 +1432,8 @@ def preflight_payload(
         "ok": True,
         "server_version": version.get("server_version", "unknown"),
         "total": len(items),
+        "westerman_pool_gate_status": westerman_gate.get("status", "unknown"),
+        "westerman_pool_filtered": westerman_pool_filtered,
         "ready_to_push_count": len(ready_to_push),
         "already_has_pod_count": len(already_has_pod),
         "not_found_count": len(not_found),
@@ -1108,6 +1443,27 @@ def preflight_payload(
         "not_found": not_found,
         "invalid": invalid,
     }
+
+
+def preflight_payload(
+    *,
+    config_path: str,
+    payload_path: str,
+    limit: int = 0,
+    source_filter: str | None = None,
+    missing_only: bool = False,
+):
+    """Return preflight data with all signed credentials removed."""
+
+    return redact_sensitive_data(
+        _preflight_payload_unredacted(
+            config_path=config_path,
+            payload_path=payload_path,
+            limit=limit,
+            source_filter=source_filter,
+            missing_only=missing_only,
+        )
+    )
 
 
 def main():
@@ -1134,19 +1490,7 @@ def main():
             source_filter=args.source,
         )
         log_fh = log_path.open("a", encoding="utf-8")
-        # Tee stdout to log file
-        class Tee:
-            def __init__(self, stdout, fh):
-                self.stdout = stdout
-                self.fh = fh
-            def write(self, data):
-                self.stdout.write(data)
-                self.fh.write(data)
-                self.fh.flush()
-            def flush(self):
-                self.stdout.flush()
-                self.fh.flush()
-        sys.stdout = Tee(sys.stdout, log_fh)
+        sys.stdout = _RedactingTee(sys.stdout, log_fh)
         print(f"[PUSH START] {push_id}")
         print(f"Config: {args.config}")
         print(f"Payload: {args.payload}")
@@ -1163,7 +1507,13 @@ def main():
         missing_only=args.missing_only,
         source_filter=args.source,
     )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            redact_sensitive_data(result),
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
     if push_id:
         status = "success" if result.get("ok") else "failed"

@@ -8,6 +8,7 @@
         <h2>日常 POD 同步</h2>
         <div class="sync-step-row" aria-label="流水线步骤">
           {% for step_key, step_label in [
+            ("westerman_sync", "Westerman"),
             ("cmc_sync", "CMC"),
             ("emtc_sync", "EMTC"),
             ("phase1a", "识别"),
@@ -29,6 +30,12 @@
         <input type="hidden" name="emtc_limit" value="0">
         <label>CMC 并发<input type="number" name="cmc_workers" value="{{ ui_defaults.cmc_workers }}" min="1" max="12"></label>
         <label>EMTC 并发<input type="number" name="emtc_workers" value="{{ ui_defaults.emtc_workers }}" min="1" max="12"></label>
+        <label>Westerman 每批
+          <input type="number" name="westerman_limit" value="{{ scheduler_status.pipeline_options.get('westerman_limit', 0) }}" min="0">
+        </label>
+        <label>Westerman 并发
+          <input type="number" name="westerman_workers" value="{{ scheduler_status.pipeline_options.get('westerman_workers', 3) }}" min="1" max="12">
+        </label>
         <button type="submit" class="action-button" data-loading-text="提交中...">启动日常同步</button>
       </form>
     </div>
@@ -63,6 +70,24 @@
         {% else %}
           <strong>暂无</strong>
           <span class="muted">-</span>
+        {% endif %}
+      </article>
+      <article class="sync-status-tile">
+        <span class="sync-status-label">Westerman 待拉取池</span>
+        {% if westerman_pool.error_code %}
+          <strong>不可读</strong>
+          <span class="badge badge-failed">{{ westerman_pool.error_code }}</span>
+        {% elif westerman_pool.exists %}
+          <strong>{{ westerman_pool.total }} 条</strong>
+          <span class="badge {% if westerman_pool.due_count %}badge-running{% else %}badge-ok{% endif %}">
+            {{ westerman_pool.due_count }} 条到期 · {{ westerman_pool.leased_count }} 条处理中
+          </span>
+          <span class="badge {% if westerman_pool.candidate_refresh.status == 'complete' %}badge-ok{% else %}badge-failed{% endif %}">
+            候选刷新 {{ westerman_pool.candidate_refresh.status }}
+          </span>
+        {% else %}
+          <strong>尚未创建</strong>
+          <span class="badge badge-muted">首次批量运行后生成</span>
         {% endif %}
       </article>
     </div>
@@ -202,20 +227,46 @@
       </details>
 
       <details class="details-card sync-tool-card">
-        <summary>Westerman API</summary>
-        <form method="post" action="{{ request.url_for('action_westerman_api') }}" class="form-grid" data-submit-state data-pending-notice="Westerman 任务已提交...">
-          <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
-          <label>模式
-            <select name="mode">
-              {% for value, label in westerman_mode_options %}
-                <option value="{{ value }}">{{ label }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label>Tracking number<input name="tracking_number" placeholder="必填"></label>
-          <label>输出目录<input name="output_dir" placeholder="./storage/pod/Westerman"></label>
-          <button type="submit" data-loading-text="提交中...">执行 Westerman API</button>
-        </form>
+        <summary>Westerman API 与待拉取池</summary>
+        <div class="sync-inspection-grid">
+          <form method="post" action="{{ request.url_for('action_westerman_pool') }}" class="form-grid" data-submit-state data-pending-notice="Westerman 待拉取池任务已提交...">
+            <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
+            <p class="muted">从 Odoo 刷新候选出库单，并查询到期项目；尚无 POD 的项目会留在池中等待下次定时检查。</p>
+            {% if westerman_pool.exists and not westerman_pool.error_code %}
+              <p class="muted">
+                当前：待查 {{ westerman_pool.pull_states.get('pending', 0) }} · 等待 POD {{ westerman_pool.pull_states.get('waiting_pod', 0) }} ·
+                已下载 {{ westerman_pool.pull_states.get('downloaded', 0) }} · 重试 {{ westerman_pool.pull_states.get('retry', 0) }} ·
+                失败 {{ westerman_pool.pull_states.get('failed', 0) }} · 过期 {{ westerman_pool.pull_states.get('expired', 0) }} ·
+                完成 {{ westerman_pool.pull_states.get('completed', 0) }} ·
+                候选刷新 {{ westerman_pool.candidate_refresh.status }}
+              </p>
+            {% endif %}
+            <div class="form-pair">
+              <label>本批上限
+                <input type="number" name="limit" value="{{ scheduler_status.pipeline_options.get('westerman_limit', 0) }}" min="0">
+              </label>
+              <label>并发数
+                <input type="number" name="workers" value="{{ scheduler_status.pipeline_options.get('westerman_workers', 3) }}" min="1" max="12">
+              </label>
+            </div>
+            <button type="submit" data-loading-text="提交中...">运行 Westerman 待拉取池</button>
+          </form>
+
+          <form method="post" action="{{ request.url_for('action_westerman_api') }}" class="form-grid" data-submit-state data-pending-notice="Westerman 原子任务已提交...">
+            <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
+            <p class="muted">按单个 shipment reference 查询或下载，用于原子排查。</p>
+            <label>模式
+              <select name="mode">
+                {% for value, label in westerman_mode_options %}
+                  <option value="{{ value }}">{{ label }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Shipment reference<input name="shipment_reference" placeholder="例如 WDB2B/OUT/01391，必填"></label>
+            <label>输出目录<input name="output_dir" placeholder="./storage/pod/Westerman"></label>
+            <button type="submit" data-loading-text="提交中...">执行 Westerman 原子测试</button>
+          </form>
+        </div>
       </details>
 
       <details class="details-card sync-tool-card">

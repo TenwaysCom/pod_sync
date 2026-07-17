@@ -6,6 +6,7 @@ import json
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -70,6 +71,26 @@ class FakeSession:
 
 
 class SyncIntegrityTests(unittest.TestCase):
+    def test_manifest_append_is_safe_for_concurrent_workers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = Path(tmpdir) / "westerman_api.jsonl"
+
+            def append(index):
+                sync_integrity.append_manifest_entry(
+                    manifest_path,
+                    {"source_file_id": str(index), "payload": "x" * 2048},
+                )
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                list(executor.map(append, range(64)))
+
+            entries = sync_integrity.load_manifest_entries(manifest_path)
+            self.assertEqual(len(entries), 64)
+            self.assertEqual(
+                {entry["source_file_id"] for entry in entries},
+                {str(index) for index in range(64)},
+            )
+
     def test_normalize_runtime_config_resolves_project_storage(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)

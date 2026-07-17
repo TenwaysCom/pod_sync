@@ -56,8 +56,59 @@ Expected output locations:
 ### API download
 
 ```bash
-python3 clients/westerman_api/probe.py --config config.local.json --tracking-number YOUR_TRACKING --download
+python3 clients/westerman_api/probe.py --config config.local.json --shipment-reference WDB2B/OUT/01358 --download
 ```
+
+Expected output locations:
+
+- `storage/pod/Westerman/{shipment reference}/{document id}_{sha256 prefix}_{file name}`
+- `storage/pod/_integrity/Westerman/westerman_api.jsonl`
+
+单票命令用于原子排障。正式运行由 Odoo 候选清单驱动待拉取池：
+
+```bash
+python3 clients/westerman_api/sync.py \
+  --config config.local.json \
+  --limit 100 \
+  --workers 3
+```
+
+池位于 `runtime/westerman/pod_pull_pool.sqlite3`。正常的无附件响应会显示为
+`waiting_pod`，不是失败；下载结果会写入上面的正式 storage 和 integrity manifest，
+随后可直接进入 Phase 1A。Westerman 是显式 opt-in 来源：新旧 Scheduler 配置均
+默认关闭该步骤，并且 `westerman_api.enabled` 必须明确设为 `true` 才会运行；
+缺失该配置段不会自动启用。
+候选扫描触及安全上限时按降级处理，不清理旧池状态，也不允许本轮 Westerman
+写入 Odoo；扫描顺序优先最新出库单，避免新单长期饥饿。
+候选刷新结果会持久化在池中，只有最近状态为 `complete` 且更新时间不超过
+`candidate_refresh_max_age_hours` 才允许 Phase/Odoo gate 放行；默认门槛为 48
+小时。`running`、`failed`、`truncated`、`skipped`、`unknown`、缺失/损坏池以及
+过期的 `complete` 均 fail closed。时间按带时区的 ISO-8601 值换算为 UTC；时间戳
+缺失、格式错误或无法安全解析时同样 fail closed。
+Phase 1A 会按池状态过滤 Westerman manifest，只有至少一个有效 POD 已通过完整性
+校验并处于待推送状态的记录可进入 payload；同票其他附件失败（包括可重试或鉴权
+失败）会单独标记，不丢弃已经落盘的有效 POD。鉴权失败仍会熔断本批后续供应商
+请求并报告降级；候选刷新为 `complete` 时，逐票池门禁仍可放行有效 POD。候选刷新
+或池门禁失败时只隔离 Westerman，CMC/EMTC
+仍继续识别和推送；执行 Odoo mutation 前还会使用相同的新鲜度门槛再次核验池
+为 `downloaded/pending`，因此旧 payload、缺失池、不可读池或过期池都不能
+绕过限制。
+
+常见结果：
+
+- `downloaded`：POD 已落盘，后续不再访问 Westerman。
+- `waiting_pod`：暂未提供 POD，默认 24 小时后重查。
+- `retry`：429、5xx 或网络异常，等待退避重试。
+- `failed`：文档或响应无法安全处理，默认按 `failed_requeue_hours=24` 冷却后重试
+  （允许范围 1..720 小时）。
+- `completed`：Odoo 的 `stock.tracking` 已有 POD，是终态。
+- `expired`：出库单已离开完整 Odoo 候选范围，不再查询或自动推送。
+
+Westerman 文档内无时区时间按 `document_timezone=Europe/Amsterdam` 解释；该值必须
+是有效 IANA 时区名，无法解析时不应猜测时间。
+
+紧急停用时关闭 Scheduler 的 `Westerman API 同步` 步骤，或将
+`westerman_api.enabled` 设为 `false`；不会删除池或已下载文件。
 
 ## 3. Integrity Checks
 

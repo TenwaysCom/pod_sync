@@ -27,6 +27,9 @@ Core rules used by the current Phase 1A / POD recognition pipeline:
     treated as extra pages of the same POD, not separate orders.
   - Explicit picking keys like `WCB2BOUT20655`, `WCB2C-OUT-23898`,
     and `WHOUT15504` are used directly.
+
+- Westerman API
+  - Shipment references such as `WDB2B/OUT/01358` are treated as picking names.
 """
 
 
@@ -36,6 +39,7 @@ TRACKING_PATTERNS = [
     re.compile(r"(?<![A-Z0-9])WHOUT\d{4,}[A-Z]?(?![A-Z0-9])"),
     re.compile(r"(?<![A-Z0-9])WCB2BOUT\d{4,}[A-Z]?(?![A-Z0-9])"),
     re.compile(r"(?<![A-Z0-9])WCB2COUT\d{4,}[A-Z]?(?![A-Z0-9])"),
+    re.compile(r"(?<![A-Z0-9])WDB2BOUT\d{4,}[A-Z]?(?![A-Z0-9])"),
     re.compile(r"(?<![A-Z0-9])WBB2BRET\d{4,}[A-Z]?(?![A-Z0-9])"),
     re.compile(r"(?i)(?<![A-Z0-9])Other\d{4,}[A-Z]?(?![A-Z0-9])"),
     re.compile(r"(?<![A-Z0-9])3SHOHR\d{6,}(?![A-Z0-9])"),
@@ -52,6 +56,7 @@ PICKING_PATTERNS = [
     re.compile(r"WHOUT\d{4,}[A-Z]?(?![A-Z0-9])"),
     re.compile(r"WCB2B[-_ /]?OUT[-_ /]?\d{4,}[A-Z]?(?![A-Z0-9])"),
     re.compile(r"WCB2C[-_ /]?OUT[-_ /]?\d{4,}[A-Z]?(?![A-Z0-9])"),
+    re.compile(r"WDB2B[-_ /]?OUT[-_ /]?\d{4,}[A-Z]?(?![A-Z0-9])"),
     re.compile(r"WBB2B[-_ /]?RET[-_ /]?\d{4,}[A-Z]?(?![A-Z0-9])"),
     re.compile(r"WCB2B[-_ /]?RET[-_ /]?\d{4,}[A-Z]?(?![A-Z0-9])"),
     re.compile(r"WRB2B[-_ /]?RET[-_ /]?\d{4,}[A-Z]?(?![A-Z0-9])"),
@@ -226,6 +231,8 @@ def _picking_candidate_suffix(candidate):
         return candidate[len("WCB2BOUT"):]
     if candidate.startswith("WCB2COUT"):
         return candidate[len("WCB2COUT"):]
+    if candidate.startswith("WDB2BOUT"):
+        return candidate[len("WDB2BOUT"):]
     if candidate.startswith("WBB2BRET"):
         return candidate[len("WBB2BRET"):]
     if candidate.startswith("Other"):
@@ -286,7 +293,16 @@ def infer_document_fields(record, source_name=None, source_type=None):
     source_path = record.get("source_path") or record.get("local_path") or record.get("file_name") or ""
     file_name = record.get("file_name") or Path(source_path).name
     file_url = record.get("source_url")
-    inferred_picking_names = extract_picking_candidates(file_name, source_path, record.get("local_path"))
+    explicit_picking_name = normalize_picking_name(record.get("shipment_reference"))
+    inferred_picking_names = _merge_unique(
+        [explicit_picking_name] if explicit_picking_name else [],
+        extract_picking_candidates(
+            file_name,
+            source_path,
+            record.get("local_path"),
+            record.get("shipment_reference"),
+        ),
+    )
     if _is_cmc_source(source_name):
         # CMC may encode the same outbound order in several file-name styles:
         # EU/HK shorthand, direct WCB2B/WCB2C keys, or bare numeric names.
@@ -295,9 +311,26 @@ def infer_document_fields(record, source_name=None, source_type=None):
             _restore_cmc_picking_candidates(file_name, source_path, record.get("local_path")),
             inferred_picking_names,
         )
-    inferred_tracking_numbers = [
-        item for item in extract_tracking_candidates(file_name, source_path, record.get("local_path")) if item not in inferred_picking_names
-    ]
+    explicit_tracking_number = normalize_tracking(record.get("tracking_number"))
+    if str(source_type).strip().lower() == "westerman_api" and explicit_tracking_number:
+        # Westerman exposes Shipment.external_id as the authoritative tracking
+        # number. Numeric tokens in its document names are internal references
+        # and must not make an otherwise unambiguous manifest record ambiguous.
+        inferred_tracking_numbers = [explicit_tracking_number]
+    else:
+        inferred_tracking_numbers = [
+            item
+            for item in _merge_unique(
+                [explicit_tracking_number] if explicit_tracking_number else [],
+                extract_tracking_candidates(
+                    file_name,
+                    source_path,
+                    record.get("local_path"),
+                    record.get("tracking_number"),
+                ),
+            )
+            if item not in inferred_picking_names
+        ]
 
     parse_notes = []
     if not inferred_picking_names and not inferred_tracking_numbers:
@@ -317,6 +350,7 @@ def infer_document_fields(record, source_name=None, source_type=None):
         "source_name": source_name,
         "source_type": source_type,
         "source_file_id": record.get("source_file_id"),
+        "shipment_reference": record.get("shipment_reference"),
         "source_path": source_path,
         "file_name": file_name,
         "file_url": file_url,

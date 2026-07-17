@@ -4,6 +4,7 @@ import io
 import json
 import sys
 import tempfile
+import traceback
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -152,6 +153,407 @@ class DriveDownloadTests(unittest.TestCase):
         self.assertIsNone(fake_session.calls[1]["params"])
         self.assertEqual(fake_session.calls[2]["url"], next_link)
         sleep_mock.assert_called_once()
+
+    def test_onedrive_restarts_failed_cursor_and_deduplicates_items(self):
+        base_url = "https://graph.microsoft.com/v1.0/drives/drive/items/folder/children"
+        secret_cursor = "super-secret-cursor"
+        next_link = f"{base_url}?%24skiptoken={secret_cursor}"
+        fresh_next_link = f"{base_url}?%24skiptoken=fresh-secret-cursor"
+        cursor_failures = [
+            FakeResponse(
+                status_code=400,
+                headers={"request-id": "request-123"},
+                json_data={
+                    "error": {
+                        "code": "BadRequest",
+                        "message": f"Invalid continuation cursor value {secret_cursor}",
+                    }
+                },
+            )
+            for _ in range(probe_onedrive.GRAPH_COLLECTION_MAX_RETRIES + 1)
+        ]
+        fake_session = FakeSession(
+            [
+                FakeResponse(
+                    json_data={
+                        "value": [{"id": "file-1", "name": "one.pdf"}],
+                        "@odata.nextLink": next_link,
+                    }
+                ),
+                *cursor_failures,
+                FakeResponse(
+                    json_data={
+                        "value": [
+                            {"id": "file-2", "name": "two.pdf"},
+                            {"id": "file-1", "name": "one.pdf"},
+                        ],
+                        "@odata.nextLink": fresh_next_link,
+                    }
+                ),
+                FakeResponse(
+                    json_data={"value": [{"id": "file-3", "name": "three.pdf"}]}
+                ),
+            ]
+        )
+        cursor_stats = probe_onedrive.new_collection_cursor_stats()
+        stdout = io.StringIO()
+
+        with (
+            mock.patch.object(probe_onedrive.time, "sleep") as sleep_mock,
+            contextlib.redirect_stdout(stdout),
+        ):
+            items = list(
+                probe_onedrive.iter_collection(
+                    fake_session,
+                    base_url,
+                    {"Authorization": "Bearer auth-secret"},
+                    10,
+                    cursor_stats=cursor_stats,
+                )
+            )
+
+        self.assertEqual([item["id"] for item in items], ["file-1", "file-2", "file-3"])
+        self.assertEqual(
+            [call["url"] for call in fake_session.calls],
+            [base_url]
+            + [next_link] * (probe_onedrive.GRAPH_COLLECTION_MAX_RETRIES + 1)
+            + [base_url, fresh_next_link],
+        )
+        self.assertEqual(
+            cursor_stats,
+            {
+                "cursor_restart_count": 1,
+                "cursor_recovered_count": 1,
+                "cursor_failure_count": 0,
+            },
+        )
+        self.assertEqual(sleep_mock.call_count, probe_onedrive.GRAPH_COLLECTION_MAX_RETRIES + 1)
+        self.assertEqual(
+            sleep_mock.call_args,
+            mock.call(probe_onedrive.GRAPH_COLLECTION_CURSOR_RESTART_DELAY_SECONDS),
+        )
+        events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.assertEqual(
+            [event["event"] for event in events],
+            ["collection_cursor_restart", "collection_cursor_recovered"],
+        )
+        self.assertEqual(events[0]["collection_item_id"], "folder")
+        self.assertEqual(events[0]["request_id"], "request-123")
+        self.assertEqual(events[1]["duplicate_items_skipped"], 1)
+        self.assertNotIn(secret_cursor, stdout.getvalue())
+        self.assertNotIn("fresh-secret-cursor", stdout.getvalue())
+        self.assertNotIn("auth-secret", stdout.getvalue())
+        self.assertNotIn(next_link, stdout.getvalue())
+
+    def test_onedrive_cursor_restart_is_bounded_and_failure_is_redacted(self):
+        base_url = "https://graph.microsoft.com/v1.0/drives/drive/items/folder/children"
+        cursor_links = [
+            f"{base_url}?%24skiptoken=secret-{index}"
+            for index in range(1, 4)
+        ]
+        responses = []
+        for cursor_link in cursor_links:
+            responses.extend(
+                [
+                    FakeResponse(
+                        json_data={
+                            "value": [{"id": "file-1", "name": "one.pdf"}],
+                            "@odata.nextLink": cursor_link,
+                        }
+                    ),
+                    FakeResponse(
+                        status_code=400,
+                        headers={"request-id": "request-failed"},
+                        json_data={
+                            "error": {
+                                "code": "BadRequest",
+                                "message": f"Cursor URL {cursor_link} is invalid",
+                            }
+                        },
+                    ),
+                ]
+            )
+        fake_session = FakeSession(responses)
+        cursor_stats = probe_onedrive.new_collection_cursor_stats()
+        stdout = io.StringIO()
+
+        with (
+            mock.patch.object(probe_onedrive, "GRAPH_COLLECTION_MAX_RETRIES", 0),
+            mock.patch.object(probe_onedrive.time, "sleep"),
+            contextlib.redirect_stdout(stdout),
+        ):
+            iterator = probe_onedrive.iter_collection(
+                fake_session,
+                base_url,
+                {"Authorization": "Bearer auth-secret"},
+                10,
+                cursor_stats=cursor_stats,
+            )
+            self.assertEqual(next(iterator)["id"], "file-1")
+            with self.assertRaises(probe_onedrive.GraphCollectionCursorError) as raised:
+                next(iterator)
+
+        self.assertEqual(
+            cursor_stats,
+            {
+                "cursor_restart_count": 2,
+                "cursor_recovered_count": 0,
+                "cursor_failure_count": 1,
+            },
+        )
+        events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.assertEqual(
+            [event["event"] for event in events],
+            [
+                "collection_cursor_restart",
+                "collection_cursor_restart",
+                "collection_cursor_failed",
+            ],
+        )
+        self.assertNotIn("skiptoken", str(raised.exception).lower())
+        self.assertNotIn("secret-", stdout.getvalue())
+        self.assertNotIn("auth-secret", stdout.getvalue())
+
+    def test_onedrive_does_not_restart_non_cursor_bad_request(self):
+        base_url = "https://graph.microsoft.com/v1.0/drives/drive/items/folder/children"
+        fake_session = FakeSession([FakeResponse(status_code=400, text="bad request")])
+        cursor_stats = probe_onedrive.new_collection_cursor_stats()
+
+        with self.assertRaises(requests.HTTPError):
+            list(
+                probe_onedrive.iter_collection(
+                    fake_session,
+                    base_url,
+                    {},
+                    10,
+                    cursor_stats=cursor_stats,
+                )
+            )
+
+        self.assertEqual(len(fake_session.calls), 1)
+        self.assertEqual(cursor_stats, probe_onedrive.new_collection_cursor_stats())
+
+    def test_onedrive_non_400_collection_failure_redacts_cursor_from_traceback(self):
+        next_link = (
+            "https://graph.microsoft.com/v1.0/drives/drive/items/folder/children"
+            "?%24skiptoken=super-secret-cursor"
+        )
+        response = FakeResponse(status_code=503, url=next_link)
+        fake_session = FakeSession([response])
+
+        with mock.patch.object(probe_onedrive, "GRAPH_COLLECTION_MAX_RETRIES", 0):
+            try:
+                probe_onedrive._get_collection_page(fake_session, next_link, {}, 10)
+            except probe_onedrive.SafeRequestError as exc:
+                rendered_traceback = traceback.format_exc()
+                error_text = str(exc)
+            else:
+                self.fail("SafeRequestError was not raised")
+
+        combined = f"{error_text}\n{rendered_traceback}".lower()
+        self.assertIn("http 503", combined)
+        self.assertNotIn("super-secret-cursor", combined)
+        self.assertNotIn("skiptoken", combined)
+        self.assertNotIn(next_link.lower(), combined)
+
+    def test_onedrive_download_failure_redacts_temporary_url(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            response = requests.Response()
+            response.status_code = 500
+            response.reason = "Server Error"
+            response.url = (
+                "https://download.example.test/pod.pdf"
+                "?tempauth=super-secret-download-token"
+            )
+            fake_session = FakeSession([response])
+            item = {
+                "id": "file-1",
+                "name": "pod.pdf",
+                "path": "/POD/pod.pdf",
+                "is_folder": False,
+                "download_url": response.url,
+                "modified_time": "2026-07-17T00:00:00Z",
+            }
+            stdout = io.StringIO()
+
+            with contextlib.redirect_stdout(stdout):
+                summary = probe_onedrive.sync_all_files(
+                    session=fake_session,
+                    cfg={"warehouse": "CMC", "root_path": "/POD"},
+                    download_cfg={},
+                    headers={},
+                    timeout=10,
+                    items=[item],
+                    explicit_output_dir=tmpdir,
+                    workers=1,
+                    incremental=False,
+                )
+
+        output = stdout.getvalue().lower()
+        self.assertEqual(summary["failed_files"], 1)
+        self.assertIn("onedrive file download failed", output)
+        self.assertIn("http 500", output)
+        self.assertNotIn("super-secret-download-token", output)
+        self.assertNotIn("tempauth", output)
+        self.assertNotIn("download.example.test", output)
+
+    def test_onedrive_cursor_restart_replays_changed_item_for_incremental_sync(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            output_dir = tmp_path / "files"
+            output_dir.mkdir()
+            existing_file = output_dir / "pod.pdf"
+            existing_file.write_bytes(b"old")
+            cfg = {"warehouse": "CMC", "root_path": "/POD", "drive_id": "drive"}
+            download_cfg = {}
+            manifest_path = probe_onedrive.resolve_manifest_path(
+                "onedrive",
+                cfg,
+                download_cfg,
+                explicit_output_dir=output_dir,
+            )
+            manifest_path.parent.mkdir(parents=True)
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "source_file_id": "file-1",
+                        "source_modified_time": "2026-07-17T00:00:00Z",
+                        "local_path": str(existing_file),
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            base_url = "https://graph.microsoft.com/v1.0/drives/drive/items/folder/children"
+            next_link = f"{base_url}?%24skiptoken=secret-cursor"
+            old_item = {
+                "id": "file-1",
+                "name": "pod.pdf",
+                "size": 3,
+                "eTag": "old-etag",
+                "lastModifiedDateTime": "2026-07-17T00:00:00Z",
+                "file": {"mimeType": "application/pdf"},
+                "parentReference": {"driveId": "drive", "path": "/drive/root:/POD"},
+            }
+            changed_item = {**old_item, "eTag": "new-etag"}
+            fake_session = FakeSession(
+                [
+                    FakeResponse(
+                        json_data={"value": [old_item], "@odata.nextLink": next_link}
+                    ),
+                    FakeResponse(
+                        status_code=400,
+                        json_data={"error": {"code": "BadRequest"}},
+                    ),
+                    FakeResponse(json_data={"value": [changed_item]}),
+                ]
+            )
+            cursor_stats = probe_onedrive.new_collection_cursor_stats()
+            downloaded_items = []
+
+            def serialized_items():
+                for raw_item in probe_onedrive.iter_collection(
+                    fake_session,
+                    base_url,
+                    {},
+                    10,
+                    cursor_stats=cursor_stats,
+                ):
+                    yield probe_onedrive.serialize_item(
+                        raw_item,
+                        full_path=f"/POD/{raw_item['name']}",
+                    )
+
+            def fake_download_and_record_file(**kwargs):
+                downloaded_items.append(kwargs["item"])
+                return {"local_size": 3}
+
+            with (
+                mock.patch.object(probe_onedrive, "GRAPH_COLLECTION_MAX_RETRIES", 0),
+                mock.patch.object(probe_onedrive.time, "sleep"),
+                mock.patch.object(
+                    probe_onedrive,
+                    "download_and_record_file",
+                    side_effect=fake_download_and_record_file,
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                summary = probe_onedrive.sync_all_files(
+                    session=object(),
+                    cfg=cfg,
+                    download_cfg=download_cfg,
+                    headers={},
+                    timeout=10,
+                    items=serialized_items(),
+                    explicit_output_dir=output_dir,
+                    workers=2,
+                    incremental=True,
+                )
+
+        self.assertEqual(summary["skipped_files"], 1)
+        self.assertEqual(summary["downloaded_files"], 1)
+        self.assertEqual(summary["total_files_seen"], 2)
+        self.assertEqual(len(downloaded_items), 1)
+        self.assertTrue(downloaded_items[0]["_cursor_replayed_changed"])
+        self.assertEqual(cursor_stats["cursor_restart_count"], 1)
+        self.assertEqual(cursor_stats["cursor_recovered_count"], 1)
+
+    def test_onedrive_limit_close_preserves_cursor_recovery_stat(self):
+        base_url = "https://graph.microsoft.com/v1.0/drives/drive/items/folder/children"
+        next_link = f"{base_url}?%24skiptoken=secret-cursor"
+        fake_session = FakeSession(
+            [
+                FakeResponse(
+                    json_data={
+                        "value": [{"id": "file-1", "name": "one.pdf"}],
+                        "@odata.nextLink": next_link,
+                    }
+                ),
+                FakeResponse(
+                    status_code=400,
+                    json_data={"error": {"code": "BadRequest"}},
+                ),
+                FakeResponse(
+                    json_data={
+                        "value": [
+                            {"id": "file-1", "name": "one.pdf"},
+                            {"id": "file-2", "name": "two.pdf"},
+                        ]
+                    }
+                ),
+            ]
+        )
+        cursor_stats = probe_onedrive.new_collection_cursor_stats()
+
+        with (
+            mock.patch.object(probe_onedrive, "GRAPH_COLLECTION_MAX_RETRIES", 0),
+            mock.patch.object(probe_onedrive.time, "sleep"),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            items = list(
+                probe_onedrive.iter_root_items(
+                    fake_session,
+                    "drive",
+                    {},
+                    10,
+                    "/POD",
+                    False,
+                    2,
+                    emit=False,
+                    cursor_stats=cursor_stats,
+                )
+            )
+
+        self.assertEqual([item["id"] for item in items], ["file-1", "file-2"])
+        self.assertEqual(
+            cursor_stats,
+            {
+                "cursor_restart_count": 1,
+                "cursor_recovered_count": 1,
+                "cursor_failure_count": 0,
+            },
+        )
 
     def test_onedrive_emit_redacts_temporary_download_url_from_stdout(self):
         download_url = "https://my.microsoftpersonalcontent.com/file.pdf?tempauth=secret-token"
@@ -1165,13 +1567,19 @@ class DriveDownloadTests(unittest.TestCase):
                 "--download-all-files",
             ]
 
+            stdout = io.StringIO()
             with mock.patch.object(probe_onedrive.requests, "Session", return_value=fake_session):
                 with mock.patch.object(sys, "argv", argv):
-                    with contextlib.redirect_stdout(io.StringIO()):
+                    with contextlib.redirect_stdout(stdout):
                         probe_onedrive.main()
 
             self.assertTrue((tmp_path / "pod" / "CMC" / "top.jpg").exists())
             self.assertTrue((tmp_path / "pod" / "CMC" / "2026" / "nested.pdf").exists())
+            summary = json.loads(stdout.getvalue().strip().splitlines()[-1])
+            self.assertEqual(summary["event"], "sync_summary")
+            self.assertEqual(summary["cursor_restart_count"], 0)
+            self.assertEqual(summary["cursor_recovered_count"], 0)
+            self.assertEqual(summary["cursor_failure_count"], 0)
 
 
 if __name__ == "__main__":

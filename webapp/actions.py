@@ -215,22 +215,39 @@ def build_emtc_gdrive_command(
     return label, command, metadata
 
 
-def build_westerman_api_command(*, config_path: str, tracking_number: str, mode: str, output_dir: str):
+def build_westerman_api_command(
+    *,
+    config_path: str,
+    mode: str,
+    output_dir: str,
+    shipment_reference: str = "",
+    tracking_number: str = "",
+):
     resolved_config = ensure_existing_file(resolve_project_path(config_path, DEFAULT_SYNC_CONFIG_REL), "同步配置文件")
     resolved_output_dir = resolve_optional_project_path(output_dir)
-    tracking = tracking_number.strip()
-    if not tracking:
-        raise ValueError("Westerman API 操作必须填写 tracking number。")
+    reference = (shipment_reference or tracking_number).strip()
+    if not reference:
+        raise ValueError("Westerman API 操作必须填写 shipment reference。")
     if mode not in dict(WESTERMAN_MODE_OPTIONS):
         raise ValueError("未知的 Westerman API 模式。")
+    if mode == "download" and resolved_output_dir is not None:
+        if ".." in Path(output_dir.strip()).parts:
+            raise ValueError("Westerman 输出目录不能包含 .. 路径段。")
+        storage_dir = resolve_storage_dir(str(resolved_config))
+        try:
+            resolved_output_dir.relative_to(storage_dir)
+        except ValueError as exc:
+            raise ValueError(
+                "Westerman 输出目录必须位于 download.base_dir 内。"
+            ) from exc
 
     command = [
         sys.executable,
         str(PROJECT_ROOT / "clients" / "westerman_api" / "probe.py"),
         "--config",
         str(resolved_config),
-        "--tracking-number",
-        tracking,
+        "--shipment-reference",
+        reference,
     ]
     if mode == "download":
         command.append("--download")
@@ -243,7 +260,7 @@ def build_westerman_api_command(*, config_path: str, tracking_number: str, mode:
         "source": "westerman_api",
         "config_path": str(resolved_config),
         "mode": mode,
-        "tracking_number": tracking,
+        "shipment_reference": reference,
         "output_dir": str(resolved_output_dir) if resolved_output_dir else None,
     }
     return label, command, metadata
@@ -343,8 +360,11 @@ def build_pipeline_command(
     emtc_limit: int,
     cmc_workers: int,
     emtc_workers: int,
+    westerman_limit: int = 0,
+    westerman_workers: int = 3,
     skip_cmc: bool = False,
     skip_emtc: bool = False,
+    skip_westerman: bool = False,
     skip_phase1a: bool = False,
     skip_reports: bool = False,
     skip_odoo_push: bool = False,
@@ -352,6 +372,19 @@ def build_pipeline_command(
 ):
     resolved_config = ensure_existing_file(resolve_project_path(config_path, DEFAULT_SYNC_CONFIG_REL), "同步配置文件")
     resolved_phase1a = ensure_existing_file(resolve_project_path(phase1a_config_path, DEFAULT_PHASE1A_CONFIG_REL), "识别配置文件")
+    try:
+        runtime_config = json.loads(resolved_config.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("同步配置文件不是有效的 JSON。") from exc
+    westerman_cfg = runtime_config.get("westerman_api")
+    westerman_opted_in = (
+        isinstance(westerman_cfg, dict)
+        and westerman_cfg.get("enabled") is True
+    )
+    skip_westerman = skip_westerman or not westerman_opted_in
+    validate_positive_int(westerman_workers, "Westerman 并发数")
+    if westerman_limit < 0:
+        raise ValueError("Westerman 拉取上限必须大于等于 0。")
 
     command = [
         sys.executable,
@@ -360,6 +393,8 @@ def build_pipeline_command(
         "--phase1a-config", str(resolved_phase1a),
         "--cmc-workers", str(cmc_workers),
         "--emtc-workers", str(emtc_workers),
+        "--westerman-limit", str(westerman_limit),
+        "--westerman-workers", str(westerman_workers),
     ]
     if not cmc_incremental:
         command.append("--full-sync")
@@ -371,6 +406,8 @@ def build_pipeline_command(
         command.append("--skip-cmc")
     if skip_emtc:
         command.append("--skip-emtc")
+    if skip_westerman:
+        command.append("--skip-westerman")
     if skip_phase1a:
         command.append("--skip-phase1a")
     if skip_reports:
@@ -381,6 +418,8 @@ def build_pipeline_command(
         command.extend(["--odoo-push-limit", str(odoo_push_limit)])
 
     parts = []
+    if not skip_westerman:
+        parts.append("Westerman")
     if not skip_cmc:
         parts.append("CMC")
     if not skip_emtc:
@@ -404,8 +443,11 @@ def build_pipeline_command(
         "emtc_limit": emtc_limit,
         "cmc_workers": cmc_workers,
         "emtc_workers": emtc_workers,
+        "westerman_limit": westerman_limit,
+        "westerman_workers": westerman_workers,
         "skip_cmc": skip_cmc,
         "skip_emtc": skip_emtc,
+        "skip_westerman": skip_westerman,
         "skip_phase1a": skip_phase1a,
         "skip_reports": skip_reports,
         "skip_odoo_push": skip_odoo_push,
@@ -483,3 +525,39 @@ def load_runtime_config_snapshot(config_path: str | None = None):
         "storage_dir": str(resolve_storage_dir(config_path)),
         "sources": sources,
     }
+
+
+def load_westerman_pool_snapshot(config_path: str | None = None):
+    """Return a secret-free, read-only summary for the sync dashboard."""
+
+    resolved_config = resolve_project_path(config_path, DEFAULT_SYNC_CONFIG_REL)
+    default_pool_path = PROJECT_ROOT / "runtime" / "westerman" / "pod_pull_pool.sqlite3"
+    if not resolved_config.exists():
+        return {"exists": False, "path": str(default_pool_path), "error_code": None}
+    try:
+        payload = json.loads(resolved_config.read_text(encoding="utf-8"))
+        raw_pool_path = (payload.get("westerman_api") or {}).get("pool_path")
+        if raw_pool_path:
+            candidate = Path(raw_pool_path)
+            pool_path = candidate if candidate.is_absolute() else resolved_config.parent / candidate
+            pool_path = pool_path.resolve()
+        else:
+            pool_path = default_pool_path
+        if not pool_path.exists():
+            return {"exists": False, "path": str(pool_path), "error_code": None}
+
+        from clients.westerman_api.pool import WestermanPodPool
+
+        summary = WestermanPodPool(pool_path, initialize=False).summary()
+        return {
+            "exists": True,
+            "path": str(pool_path),
+            "error_code": None,
+            **summary,
+        }
+    except Exception:
+        return {
+            "exists": True,
+            "path": str(default_pool_path),
+            "error_code": "POOL_SUMMARY_UNAVAILABLE",
+        }
