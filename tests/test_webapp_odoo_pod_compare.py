@@ -14,6 +14,158 @@ from webapp import odoo_pod_compare
 
 
 class OdooPodCompareTests(unittest.TestCase):
+    def _build_tracking_priority_snapshot(
+        self,
+        *,
+        root: Path,
+        indexed_picking_name: str,
+        detail_rows: list[dict],
+        coverage_ids: set[int],
+    ):
+        index_path = root / "runtime" / "odoo_push" / "odoo_pod_index.json"
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        index_path.write_text(
+            json.dumps(
+                {
+                    "by_tracking_number": {
+                        "TRACK-X": {
+                            "picking_name": indexed_picking_name,
+                            "pod_link": "https://pod.test/x.pdf",
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        phase_data = {
+            "run": {
+                "run_name": "tracking-priority",
+                "summary": {"ready_document_count": 1},
+            },
+            "rows": [
+                {
+                    "source_name": "EMTC",
+                    "source_type": "gdrive",
+                    "file_name": "TRACK-X.pdf",
+                    "preferred_key_type": "tracking_number",
+                    "preferred_key": "TRACK-X",
+                }
+            ],
+        }
+        with (
+            mock.patch.object(odoo_pod_compare, "PROJECT_ROOT", root),
+            mock.patch.object(
+                odoo_pod_compare,
+                "_load_latest_phase1a_ready_rows",
+                return_value=phase_data,
+            ),
+            mock.patch.object(
+                odoo_pod_compare,
+                "load_odoo_missing_snapshot",
+                return_value={"total_detail_rows": detail_rows, "totals": {}},
+            ),
+            mock.patch.object(
+                odoo_pod_compare,
+                "_load_stock_tracking_pod_picking_ids",
+                return_value=coverage_ids,
+            ),
+        ):
+            return odoo_pod_compare.build_pod_odoo_compare_snapshot()
+
+    def test_stock_tracking_priority_matches_same_carrier_picking(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot = self._build_tracking_priority_snapshot(
+                root=Path(tmpdir),
+                indexed_picking_name="WRB2B/OUT/1",
+                detail_rows=[
+                    {
+                        "carrier_id": 24,
+                        "carrier_name": "EMTC",
+                        "odoo_picking_id": 101,
+                        "picking_name": "WRB2B/OUT/1",
+                        "state": "done",
+                        "tracking_number": "",
+                    },
+                    {
+                        "carrier_id": 25,
+                        "carrier_name": "CMC",
+                        "odoo_picking_id": 202,
+                        "picking_name": "WCB2B/OUT/2",
+                        "state": "done",
+                        "tracking_number": "TRACK-X",
+                    },
+                ],
+                coverage_ids={101},
+            )
+
+        self.assertEqual(snapshot["totals"]["matched_count"], 1)
+        self.assertEqual(snapshot["totals"]["matched_other_carrier_count"], 0)
+        self.assertEqual(snapshot["matched_rows"][0]["matched_odoo_picking_ids"], "101")
+        self.assertTrue(snapshot["matched_rows"][0]["has_stock_tracking_pod"])
+
+    def test_stock_tracking_priority_can_match_other_target_carrier(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot = self._build_tracking_priority_snapshot(
+                root=Path(tmpdir),
+                indexed_picking_name="WCB2B/OUT/2",
+                detail_rows=[
+                    {
+                        "carrier_id": 25,
+                        "carrier_name": "CMC",
+                        "odoo_picking_id": 202,
+                        "picking_name": "WCB2B/OUT/2",
+                        "state": "done",
+                        "tracking_number": "",
+                    }
+                ],
+                coverage_ids={202},
+            )
+
+        self.assertEqual(snapshot["totals"]["matched_count"], 0)
+        self.assertEqual(snapshot["totals"]["matched_other_carrier_count"], 1)
+        self.assertEqual(
+            snapshot["matched_other_carrier_rows"][0]["matched_odoo_picking_ids"],
+            "202",
+        )
+        self.assertTrue(
+            snapshot["matched_other_carrier_rows"][0]["has_stock_tracking_pod"]
+        )
+
+    def test_build_rejects_mixed_xmlrpc_cache_generations(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            index_path = root / "runtime" / "odoo_push" / "odoo_pod_index.json"
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            index_path.write_text(
+                json.dumps(
+                    {
+                        "requested_backend": "xmlrpc",
+                        "cache_generation": 2,
+                        "generation_id": "index-2",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(odoo_pod_compare, "PROJECT_ROOT", root),
+                mock.patch.object(
+                    odoo_pod_compare,
+                    "_load_latest_phase1a_ready_rows",
+                    return_value={"run": {}, "rows": []},
+                ),
+                mock.patch.object(
+                    odoo_pod_compare,
+                    "load_odoo_missing_snapshot",
+                    return_value={
+                        "read_backend": "xmlrpc",
+                        "xmlrpc_cache": {"generation": 3},
+                        "total_detail_rows": [],
+                    },
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "不是同一 XML-RPC"):
+                    odoo_pod_compare.build_pod_odoo_compare_snapshot()
+
     def test_build_snapshot_compares_latest_pod_identifiers_against_odoo(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -133,6 +285,7 @@ class OdooPodCompareTests(unittest.TestCase):
             with mock.patch.object(odoo_pod_compare, "get_latest_phase1a_run", return_value=run), \
                 mock.patch.object(odoo_pod_compare, "resolve_artifact_path", return_value=matched_path), \
                 mock.patch.object(odoo_pod_compare, "load_odoo_missing_snapshot", return_value=odoo_snapshot), \
+                mock.patch.object(odoo_pod_compare, "_load_stock_tracking_pod_picking_ids", return_value=set()), \
                 mock.patch.object(odoo_pod_compare, "resolve_storage_dir", return_value=(tmp / "storage")):
                 snapshot = odoo_pod_compare.build_pod_odoo_compare_snapshot()
 
@@ -420,6 +573,7 @@ class OdooPodCompareTests(unittest.TestCase):
                 mock.patch.object(odoo_pod_compare, "get_latest_phase1a_run", return_value=run), \
                 mock.patch.object(odoo_pod_compare, "resolve_artifact_path", return_value=matched_path), \
                 mock.patch.object(odoo_pod_compare, "load_odoo_missing_snapshot", return_value=odoo_snapshot), \
+                mock.patch.object(odoo_pod_compare, "_load_stock_tracking_pod_picking_ids", return_value=set()), \
                 mock.patch.object(odoo_pod_compare, "resolve_storage_dir", return_value=(tmp / "storage")):
                 snapshot = odoo_pod_compare.refresh_pod_odoo_compare_snapshot()
                 self.assertIsNotNone(odoo_pod_compare.resolve_pod_odoo_compare_artifact("push_ready_xlsx"))

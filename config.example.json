@@ -66,6 +66,7 @@
   },
   "odoo": {
     "enabled": false,
+    "read_backend": "querydeluxe",
     "url": "https://tenways.odoo.com",
     "db": "adriegrip-tenways-main-4224690",
     "uid": 9,
@@ -75,5 +76,20 @@
     "picking_name_field": "name",
     "tracking_number_field": "carrier_tracking_ref",
     "timeout_seconds": 30
+  },
+  "querydeluxe": {
+    "existing_pod_query_id": 65,
+    "missing_tracking_query_id": 64
+  },
+  "odoo_reconcile": {
+    "cache_path": "./runtime/odoo_reconcile/odoo_reconcile.sqlite3",
+    "page_size": 2000,
+    "incremental_overlap_seconds": 300,
+    "full_refresh_interval_hours": 168,
+    "source_delivery_types": {
+      "emtc": "spare",
+      "cmc": "cmc",
+      "westerman": "westman"
+    }
   }
 }

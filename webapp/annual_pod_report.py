@@ -21,13 +21,9 @@ STOCK_TRACKING_POD_IDS_PATH = Path(__file__).resolve().parents[1] / "runtime" / 
 
 
 def _load_stock_tracking_pod_picking_ids() -> set[int]:
-    if not STOCK_TRACKING_POD_IDS_PATH.exists():
-        return set()
-    try:
-        data = json.loads(STOCK_TRACKING_POD_IDS_PATH.read_text(encoding="utf-8"))
-        return set(data.get("picking_ids", []))
-    except (json.JSONDecodeError, OSError):
-        return set()
+    from .odoo_pull import load_coverage_picking_ids
+
+    return load_coverage_picking_ids()
 
 
 def _row_has_pod(row: dict, stock_tracking_ids: set[int]) -> bool:

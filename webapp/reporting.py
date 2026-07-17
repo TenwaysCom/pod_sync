@@ -9,20 +9,16 @@ from .odoo_missing_report import load_odoo_missing_snapshot
 from .odoo_pod_compare import load_pod_odoo_compare_snapshot
 
 
-POD_SOURCE_CARRIER_IDS = {24, 25}
+POD_SOURCE_CARRIER_IDS = {24, 25, 38}
 
 STOCK_TRACKING_POD_IDS_PATH = Path(__file__).resolve().parents[1] / "runtime" / "stock_tracking_pod_picking_ids.json"
 
 
 def _load_stock_tracking_pod_picking_ids() -> set[int]:
     """Load picking IDs that have a POD in stock.tracking (via pod_link)."""
-    if not STOCK_TRACKING_POD_IDS_PATH.exists():
-        return set()
-    try:
-        data = json.loads(STOCK_TRACKING_POD_IDS_PATH.read_text(encoding="utf-8"))
-        return set(data.get("picking_ids", []))
-    except (json.JSONDecodeError, OSError):
-        return set()
+    from .odoo_pull import load_coverage_picking_ids
+
+    return load_coverage_picking_ids()
 
 
 def _row_has_pod(row: dict, stock_tracking_ids: set[int]) -> bool:

@@ -19,6 +19,25 @@ class EmtcReconcileTests(unittest.TestCase):
     def setUp(self):
         emtc_reconcile._load_reconcile_dataset_cached.cache_clear()
 
+    def test_reconcile_sources_include_westerman_with_picking_name_matching(self):
+        sources = {item["slug"]: item for item in emtc_reconcile.list_reconcile_sources()}
+
+        self.assertEqual(set(sources), {"emtc", "cmc", "westerman"})
+        self.assertEqual(sources["westerman"]["carrier_delivery_type"], "westman")
+        self.assertEqual(sources["westerman"]["match_key_type"], "picking_name")
+        self.assertTrue(
+            emtc_reconcile._odoo_row_matches_source(
+                {"source_slug": "westerman", "carrier_id": 999},
+                sources["westerman"],
+            )
+        )
+        self.assertFalse(
+            emtc_reconcile._odoo_row_matches_source(
+                {"source_slug": "cmc", "carrier_id": 25},
+                sources["westerman"],
+            )
+        )
+
     def test_load_dataset_builds_bidirectional_counts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)

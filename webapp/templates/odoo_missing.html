@@ -35,7 +35,6 @@
       </div>
       <p class="muted">直接从 Odoo 缺失明细和汇总接口生成页面与下载产物。</p>
       <form method="post" action="{{ request.url_for('action_refresh_odoo_missing') }}" class="stack-form compact-form" data-submit-state data-pending-notice="Odoo 缺失报告正在刷新，请稍候…">
-        <input type="hidden" name="detail_url" value="{{ odoo_missing_detail_url }}">
         <button type="submit" class="action-button" data-loading-text="正在刷新 Odoo 缺失报告…">刷新 Odoo 缺失报告</button>
       </form>
       <ul class="compact-list">

@@ -523,6 +523,7 @@ def load_runtime_config_snapshot(config_path: str | None = None):
         "exists": True,
         "path": str(resolved_config),
         "storage_dir": str(resolve_storage_dir(config_path)),
+        "odoo_read_backend": (payload.get("odoo") or {}).get("read_backend", "querydeluxe"),
         "sources": sources,
     }
 

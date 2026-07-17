@@ -18,14 +18,12 @@ from .xlsx_utils import build_xlsx_workbook
 STOCK_TRACKING_POD_IDS_PATH = Path(__file__).resolve().parents[1] / "runtime" / "stock_tracking_pod_picking_ids.json"
 
 
-def _load_stock_tracking_pod_picking_ids():
-    if not STOCK_TRACKING_POD_IDS_PATH.exists():
-        return set()
-    try:
-        data = json.loads(STOCK_TRACKING_POD_IDS_PATH.read_text(encoding="utf-8"))
-        return set(int(pid) for pid in data.get("picking_ids", []))
-    except Exception:
-        return set()
+def _load_stock_tracking_pod_picking_ids(*, expected_generation_id=None):
+    from .odoo_pull import load_coverage_picking_ids
+
+    return load_coverage_picking_ids(
+        expected_generation_id=expected_generation_id
+    )
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +41,9 @@ PUSH_READY_XLSX_PATH = RUNTIME_DIR / "pod_ready_for_odoo.xlsx"
 SOURCE_CARRIER_MAP = {
     "CMC": {"carrier_id": 25, "carrier_name": "CMC"},
     "EMTC": {"carrier_id": 24, "carrier_name": "EMTC"},
+    # Current EU Odoo ID; the new summary path itself uses stable
+    # delivery_type=westman from the XML-RPC cache.
+    "Westerman": {"carrier_id": 38, "carrier_name": "Westerman"},
 }
 
 PREFERRED_KEY_TYPE_LABELS = {
@@ -486,6 +487,30 @@ def build_pod_odoo_compare_snapshot():
     if not odoo_snapshot:
         raise RuntimeError("还没有可用的 Odoo 总明细快照。")
 
+    pod_index = {}
+    pod_index_path = PROJECT_ROOT / "runtime" / "odoo_push" / "odoo_pod_index.json"
+    if pod_index_path.exists():
+        try:
+            pod_index = json.loads(pod_index_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Odoo POD 索引不可读，保留上一版对比报告。") from exc
+
+    snapshot_backend = str(odoo_snapshot.get("read_backend") or "")
+    index_backend = str(pod_index.get("requested_backend") or "")
+    if snapshot_backend and index_backend and snapshot_backend != index_backend:
+        raise RuntimeError("Odoo POD 索引与出库快照读取模式不一致。")
+    if snapshot_backend in {"shadow", "xmlrpc"}:
+        index_cache_generation = int(pod_index.get("cache_generation") or 0)
+        snapshot_cache_generation = int(
+            (odoo_snapshot.get("xmlrpc_cache") or {}).get("generation") or 0
+        )
+        cache_generation_matches = (
+            index_cache_generation == snapshot_cache_generation
+            and (snapshot_backend == "shadow" or index_cache_generation > 0)
+        )
+        if not cache_generation_matches:
+            raise RuntimeError("Odoo POD 索引与出库快照不是同一 XML-RPC 缓存代际。")
+
     run = phase1a_data["run"]
     ready_rows = phase1a_data["rows"]
     aggregated = _aggregate_pod_identifiers(ready_rows)
@@ -493,18 +518,14 @@ def build_pod_odoo_compare_snapshot():
     by_picking, by_tracking, by_picking_any, by_tracking_any = _build_odoo_indices(total_detail_rows)
 
     stock_tracking_tn_to_picking = {}
-    try:
-        pod_index_path = PROJECT_ROOT / "runtime" / "odoo_push" / "odoo_pod_index.json"
-        if pod_index_path.exists():
-            pod_index = json.loads(pod_index_path.read_text(encoding="utf-8"))
-            for tn, entry in (pod_index.get("by_tracking_number") or {}).items():
-                picking_name = (entry.get("picking_name") or "").strip()
-                if picking_name:
-                    stock_tracking_tn_to_picking[_normalize_tracking(tn)] = _normalize_picking_name(picking_name)
-    except Exception:
-        pass
+    for tn, entry in (pod_index.get("by_tracking_number") or {}).items():
+        picking_name = (entry.get("picking_name") or "").strip()
+        if picking_name:
+            stock_tracking_tn_to_picking[_normalize_tracking(tn)] = _normalize_picking_name(picking_name)
 
-    stock_tracking_ids = _load_stock_tracking_pod_picking_ids()
+    stock_tracking_ids = _load_stock_tracking_pod_picking_ids(
+        expected_generation_id=pod_index.get("generation_id") or None
+    )
 
     matched_rows = []
     matched_cancelled_rows = []
@@ -531,15 +552,23 @@ def build_pod_odoo_compare_snapshot():
             matches = list(by_picking.get((carrier_id, normalized_key), []))
             any_carrier_matches = list(by_picking_any.get(normalized_key, []))
         else:
-            matches = list(by_tracking.get((carrier_id, normalized_key), []))
-            any_carrier_matches = list(by_tracking_any.get(normalized_key, []))
             # Priority: stock.tracking first, then stock.picking fallback
-            if not any_carrier_matches and normalized_key in stock_tracking_tn_to_picking:
+            stock_tracking_matches = []
+            if normalized_key in stock_tracking_tn_to_picking:
                 st_picking_name = stock_tracking_tn_to_picking[normalized_key]
-                st_matches = by_picking_any.get(st_picking_name, [])
-                done_st = [r for r in st_matches if r.get("state") == "done"]
-                if done_st:
-                    any_carrier_matches = st_matches
+                stock_tracking_matches = list(
+                    by_picking_any.get(st_picking_name, [])
+                )
+            if stock_tracking_matches:
+                any_carrier_matches = stock_tracking_matches
+                matches = [
+                    row
+                    for row in stock_tracking_matches
+                    if carrier_id is None or row.get("carrier_id") == carrier_id
+                ]
+            else:
+                matches = list(by_tracking.get((carrier_id, normalized_key), []))
+                any_carrier_matches = list(by_tracking_any.get(normalized_key, []))
 
         same_carrier_done = [row for row in matches if row.get("state") == "done"]
         same_carrier_cancel = [row for row in matches if row.get("state") == "cancel"]
@@ -752,15 +781,23 @@ def save_pod_odoo_compare_snapshot(snapshot):
 
 
 def refresh_pod_odoo_compare_snapshot():
-    snapshot = build_pod_odoo_compare_snapshot()
-    save_pod_odoo_compare_snapshot(snapshot)
-    phase1a_data = _load_latest_phase1a_ready_rows()
-    odoo_snapshot = load_odoo_missing_snapshot()
-    ready_rows = list((phase1a_data or {}).get("rows") or [])
-    total_detail_rows = list((odoo_snapshot or {}).get("total_detail_rows") or [])
-    _ensure_directory(RUNTIME_DIR)
-    PUSH_READY_XLSX_PATH.write_bytes(_build_ready_for_odoo_push_workbook(ready_rows, total_detail_rows))
-    return snapshot
+    from .odoo_pull import _index_file_lock
+
+    # Hold the same cross-process lock used by index/coverage commits until all
+    # derived artifacts are saved. This prevents an older report generation
+    # from overwriting a newer one after its initial consistency check.
+    with _index_file_lock():
+        snapshot = build_pod_odoo_compare_snapshot()
+        save_pod_odoo_compare_snapshot(snapshot)
+        phase1a_data = _load_latest_phase1a_ready_rows()
+        odoo_snapshot = load_odoo_missing_snapshot()
+        ready_rows = list((phase1a_data or {}).get("rows") or [])
+        total_detail_rows = list((odoo_snapshot or {}).get("total_detail_rows") or [])
+        _ensure_directory(RUNTIME_DIR)
+        PUSH_READY_XLSX_PATH.write_bytes(
+            _build_ready_for_odoo_push_workbook(ready_rows, total_detail_rows)
+        )
+        return snapshot
 
 
 def load_pod_odoo_compare_snapshot():

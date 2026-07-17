@@ -94,6 +94,33 @@ python3 clients/westerman_api/sync.py --config config.local.json --limit 100 --w
 完整流水线会先执行 Westerman，再执行 CMC/EMTC，因此其他云盘故障不会阻止
 Westerman 本轮候选搜索和下载。
 
+### Odoo 普通接口读取模式
+
+QueryDeluxe 64/65 可以按阶段替换为普通 Odoo XML-RPC。唯一的模式开关是：
+
+```json
+{
+  "odoo": {
+    "read_backend": "shadow"
+  }
+}
+```
+
+- `querydeluxe`：保持原行为，适合随时回滚。
+- `shadow`：QueryDeluxe 仍是权威数据，同时刷新并对比 XML-RPC 缓存。
+- `xmlrpc`：完全从 XML-RPC 缓存生成 POD 索引和对账数据，不访问 Query 64/65。
+
+XML-RPC 缓存只保留 `delivery_type=spare/cmc/westman` 的出库单，以及
+`stock.tracking` 中已有 POD 的记录。首次是全量构建，之后按 `write_date`
+增量刷新，每 7 天自动全量校准一次。缓存路径默认为
+`runtime/odoo_reconcile/odoo_reconcile.sqlite3`。
+
+总结对账中的“命中其他承运商”也只在这三家目标承运商之间交叉检查；其他
+delivery type 按本次业务范围排除，不再为了这个状态加载全部 Odoo 出库单。
+
+生产切换建议先运行 `shadow` 并检查任务日志中的 `shadow_status`，确认稳定后再改为
+`xmlrpc`。需要回滚时只需改回 `querydeluxe`，无需删除缓存。
+
 再看 Phase 1A：
 
 ```bash

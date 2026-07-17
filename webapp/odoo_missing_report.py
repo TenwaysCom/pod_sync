@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import csv
+import fcntl
+import io
 import json
 import math
+import uuid
 from collections import Counter, defaultdict
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -69,15 +73,65 @@ def _ensure_directory(path: Path):
 
 
 def _write_json(path: Path, payload):
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_text(
+        path,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+    )
 
 
 def _write_csv(path: Path, rows, fieldnames):
-    with path.open("w", encoding="utf-8", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({key: row.get(key) for key in fieldnames})
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({key: row.get(key) for key in fieldnames})
+    _atomic_write_text(path, buffer.getvalue())
+
+
+def _atomic_write_text(path: Path, content: str):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(content, encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+@contextmanager
+def _snapshot_file_lock():
+    lock_path = SNAPSHOT_PATH.with_name(f".{SNAPSHOT_PATH.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _snapshot_cache_order(snapshot: dict):
+    backend = str(snapshot.get("read_backend") or "")
+    if backend not in {"shadow", "xmlrpc"}:
+        return None
+    cache = snapshot.get("xmlrpc_cache") or {}
+    return (
+        backend,
+        str(cache.get("last_success_at") or cache.get("window_end") or ""),
+        int(cache.get("generation") or 0),
+    )
+
+
+def _incoming_snapshot_is_older(incoming: dict, existing: dict) -> bool:
+    incoming_order = _snapshot_cache_order(incoming)
+    existing_order = _snapshot_cache_order(existing)
+    if not incoming_order or not existing_order or incoming_order[0] != existing_order[0]:
+        return False
+    incoming_as_of, existing_as_of = incoming_order[1], existing_order[1]
+    if incoming_as_of and existing_as_of and incoming_as_of != existing_as_of:
+        return incoming_as_of < existing_as_of
+    return incoming_order[2] < existing_order[2]
 
 
 def _parse_datetime(value: str | None):
@@ -129,6 +183,15 @@ def _clean_text(value):
     if isinstance(value, str):
         return value.strip() or None
     return value or None
+
+
+def _safe_int(value):
+    if value in (None, False, ""):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _resolve_tracking_number(row):
@@ -267,19 +330,42 @@ def render_odoo_missing_markdown(snapshot):
 
 
 def save_odoo_missing_snapshot(snapshot):
-    _ensure_directory(RUNTIME_DIR)
-    _write_json(SNAPSHOT_PATH, snapshot)
-    _write_csv(SUMMARY_CSV_PATH, snapshot.get("summary_rows") or [], SUMMARY_FIELDS)
-    _write_csv(TOTAL_DETAIL_CSV_PATH, snapshot.get("total_detail_rows") or [], TOTAL_DETAIL_FIELDS)
-    _write_csv(MISSING_DETAIL_CSV_PATH, snapshot.get("missing_detail_rows") or [], TOTAL_DETAIL_FIELDS)
-    REPORT_MD_PATH.write_text(render_odoo_missing_markdown(snapshot), encoding="utf-8")
-    return {
-        "snapshot_json": SNAPSHOT_PATH,
-        "summary_csv": SUMMARY_CSV_PATH,
-        "total_detail_csv": TOTAL_DETAIL_CSV_PATH,
-        "missing_detail_csv": MISSING_DETAIL_CSV_PATH,
-        "report_md": REPORT_MD_PATH,
-    }
+    with _snapshot_file_lock():
+        _ensure_directory(RUNTIME_DIR)
+        existing = None
+        if SNAPSHOT_PATH.exists():
+            try:
+                existing = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                existing = None
+        stale_generation_rejected = bool(
+            existing and _incoming_snapshot_is_older(snapshot, existing)
+        )
+        if not stale_generation_rejected:
+            _write_json(SNAPSHOT_PATH, snapshot)
+            _write_csv(SUMMARY_CSV_PATH, snapshot.get("summary_rows") or [], SUMMARY_FIELDS)
+            _write_csv(
+                TOTAL_DETAIL_CSV_PATH,
+                snapshot.get("total_detail_rows") or [],
+                TOTAL_DETAIL_FIELDS,
+            )
+            _write_csv(
+                MISSING_DETAIL_CSV_PATH,
+                snapshot.get("missing_detail_rows") or [],
+                TOTAL_DETAIL_FIELDS,
+            )
+            _atomic_write_text(
+                REPORT_MD_PATH,
+                render_odoo_missing_markdown(snapshot),
+            )
+        return {
+            "snapshot_json": SNAPSHOT_PATH,
+            "summary_csv": SUMMARY_CSV_PATH,
+            "total_detail_csv": TOTAL_DETAIL_CSV_PATH,
+            "missing_detail_csv": MISSING_DETAIL_CSV_PATH,
+            "report_md": REPORT_MD_PATH,
+            "stale_generation_rejected": stale_generation_rejected,
+        }
 
 
 def refresh_odoo_missing_snapshot(
@@ -287,12 +373,156 @@ def refresh_odoo_missing_snapshot(
     detail_url: str | None = None,
     timeout: int = 30,
     session: requests.Session | None = None,
+    config_path: str = "config.local.json",
+    refresh_xmlrpc_cache: bool = True,
 ):
-    if detail_url is None:
-        detail_url = _get_default_detail_url()
-    detail_payload = _fetch_querydeluxe_rows(detail_url, timeout=timeout, session=session)
-    snapshot = build_odoo_missing_snapshot(total_detail_rows=detail_payload["rows"], detail_url=detail_url)
-    save_odoo_missing_snapshot(snapshot)
+    from webapp.odoo_reconcile_cache import (
+        load_cached_picking_state,
+        load_config,
+        refresh_reconcile_cache,
+        resolve_read_backend,
+    )
+
+    full_cfg = load_config(config_path)
+    backend = resolve_read_backend(full_cfg)
+    cache_result = None
+    cache_warning = None
+    picking_cache_state = None
+
+    if backend in {"querydeluxe", "shadow"}:
+        if detail_url is None:
+            detail_url = _get_default_detail_url(config_path)
+        detail_payload = _fetch_querydeluxe_rows(detail_url, timeout=timeout, session=session)
+        rows = detail_payload["rows"]
+        authoritative_source = "querydeluxe"
+    else:
+        rows = None
+        authoritative_source = "xmlrpc_cache"
+
+    if backend in {"shadow", "xmlrpc"} and refresh_xmlrpc_cache:
+        try:
+            cache_result = refresh_reconcile_cache(config_path, full_cfg=full_cfg)
+        except Exception as exc:
+            # A previously committed cache is safe to read. Never replace a
+            # successful authoritative QueryDeluxe result with a shadow error.
+            cache_warning = f"XML-RPC cache refresh failed: {type(exc).__name__}"
+
+    if backend in {"shadow", "xmlrpc"}:
+        picking_cache_state = load_cached_picking_state(
+            config_path, full_cfg=full_cfg
+        )
+
+    if backend == "xmlrpc":
+        if not picking_cache_state.get("available"):
+            raise RuntimeError(cache_warning or "XML-RPC reconcile cache is not available")
+        rows = picking_cache_state["rows"]
+        detail_url = "odoo-xmlrpc://stock.picking/target-carriers"
+
+    if backend == "shadow" and picking_cache_state.get("available"):
+        source_by_carrier_id = {}
+        delivery_type_by_carrier_id = {}
+        for cached_row in picking_cache_state["rows"]:
+            carrier_id = _safe_int(cached_row.get("carrier_id"))
+            if carrier_id is None:
+                continue
+            source_by_carrier_id[carrier_id] = cached_row.get("source_slug")
+            delivery_type_by_carrier_id[carrier_id] = cached_row.get(
+                "carrier_delivery_type"
+            )
+        for query_row in rows or []:
+            carrier_id = _safe_int(query_row.get("carrier_id"))
+            query_row["source_slug"] = source_by_carrier_id.get(
+                carrier_id, "out_of_scope"
+            )
+            query_row["carrier_delivery_type"] = delivery_type_by_carrier_id.get(
+                carrier_id
+            )
+
+    snapshot = build_odoo_missing_snapshot(total_detail_rows=rows or [], detail_url=detail_url or "")
+    snapshot["read_backend"] = backend
+    snapshot["authoritative_source"] = authoritative_source
+    if backend in {"shadow", "xmlrpc"}:
+        snapshot["xmlrpc_cache"] = {
+            **(cache_result or {}),
+            "available": bool(picking_cache_state.get("available")),
+            "generation": int(picking_cache_state.get("generation") or 0),
+            "last_success_at": picking_cache_state.get("last_success_at"),
+            "target_carrier_ids": picking_cache_state.get("target_carrier_ids") or [],
+        }
+    if cache_warning:
+        snapshot["warnings"] = [cache_warning]
+        cache_as_of = (
+            snapshot.get("xmlrpc_cache", {}).get("last_success_at")
+            or snapshot.get("xmlrpc_cache", {}).get("window_end")
+        )
+        if backend == "xmlrpc" and cache_as_of:
+            snapshot["generated_at"] = cache_as_of
+    if backend in {"shadow", "xmlrpc"}:
+        snapshot["data_as_of"] = (
+            snapshot.get("xmlrpc_cache", {}).get("last_success_at")
+            or snapshot.get("xmlrpc_cache", {}).get("window_end")
+        )
+
+    if backend == "shadow" and snapshot.get("xmlrpc_cache", {}).get("available", True):
+        cached_rows = picking_cache_state["rows"]
+        cache_by_id = {int(row["odoo_picking_id"]): row for row in cached_rows}
+        target_carrier_ids = {
+            _safe_int(value)
+            for value in snapshot.get("xmlrpc_cache", {}).get("target_carrier_ids", [])
+        }
+        target_carrier_ids.discard(None)
+        query_by_id = {
+            record_id: row
+            for row in rows or []
+            if (record_id := _safe_int(row.get("odoo_picking_id"))) is not None
+            and _safe_int(row.get("carrier_id")) in target_carrier_ids
+        }
+        shared = set(cache_by_id) & set(query_by_id)
+        compared_fields = (
+            "picking_name", "carrier_id", "carrier_name", "state",
+            "business_datetime", "tracking_number", "x_studio_pod_link",
+        )
+        field_mismatch_counts = {}
+        for field in compared_fields:
+            mismatch_count_for_field = 0
+            for record_id in shared:
+                cache_value = cache_by_id[record_id].get(field)
+                query_value = query_by_id[record_id].get(field)
+                if field == "tracking_number":
+                    query_value = _resolve_tracking_number(query_by_id[record_id])
+                if (cache_value or "") != (query_value or ""):
+                    mismatch_count_for_field += 1
+            field_mismatch_counts[field] = mismatch_count_for_field
+        mismatch_count = sum(field_mismatch_counts.values())
+        only_count = len(set(query_by_id) ^ set(cache_by_id))
+        from webapp.odoo_read_backends import classify_shadow_status
+
+        query_only_count = len(set(query_by_id) - set(cache_by_id))
+        xmlrpc_only_count = len(set(cache_by_id) - set(query_by_id))
+        shadow_status = classify_shadow_status(
+            mapping_mismatch_count=mismatch_count,
+            only_counts=[query_only_count, xmlrpc_only_count],
+        )
+        snapshot["shadow_comparison"] = {
+            "status": shadow_status,
+            "querydeluxe_target_count": len(query_by_id),
+            "xmlrpc_target_count": len(cache_by_id),
+            "querydeluxe_only_count": query_only_count,
+            "xmlrpc_only_count": xmlrpc_only_count,
+            "field_mismatch_count": mismatch_count,
+            "field_mismatch_counts": field_mismatch_counts,
+        }
+    save_result = save_odoo_missing_snapshot(snapshot)
+    if (
+        isinstance(save_result, dict)
+        and save_result.get("stale_generation_rejected") is True
+    ):
+        # Another refresh committed a newer cache generation while this task
+        # was fetching QueryDeluxe. Return the durable winner to the pipeline.
+        try:
+            return json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            pass
     return snapshot
 
 

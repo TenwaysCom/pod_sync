@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,83 @@ from webapp import odoo_missing_report
 
 
 class OdooMissingReportTests(unittest.TestCase):
+    def test_xmlrpc_mode_builds_snapshot_from_target_cache_without_querydeluxe(self):
+        rows = [
+            {
+                "carrier_id": 91,
+                "carrier_name": "Westerman",
+                "source_slug": "westerman",
+                "odoo_picking_id": 5001,
+                "picking_name": "WDB2B/OUT/01391",
+                "state": "done",
+                "business_datetime": "2026-07-17 09:00:00",
+                "tracking_number": "10094961",
+            }
+        ]
+        full_cfg = {"odoo": {"read_backend": "xmlrpc"}}
+        with (
+            mock.patch("webapp.odoo_reconcile_cache.load_config", return_value=full_cfg),
+            mock.patch("webapp.odoo_reconcile_cache.refresh_reconcile_cache", return_value={"generation": 3}),
+            mock.patch(
+                "webapp.odoo_reconcile_cache.load_cached_picking_state",
+                return_value={
+                    "available": True,
+                    "generation": 3,
+                    "last_success_at": "2026-07-17T09:00:00Z",
+                    "target_carrier_ids": [91],
+                    "rows": rows,
+                },
+            ),
+            mock.patch.object(odoo_missing_report, "_fetch_querydeluxe_rows") as query_fetch,
+            mock.patch.object(odoo_missing_report, "save_odoo_missing_snapshot"),
+        ):
+            snapshot = odoo_missing_report.refresh_odoo_missing_snapshot(config_path="test.json")
+
+        query_fetch.assert_not_called()
+        self.assertEqual(snapshot["read_backend"], "xmlrpc")
+        self.assertEqual(snapshot["authoritative_source"], "xmlrpc_cache")
+        self.assertEqual(snapshot["totals"]["total_done_outgoing"], 1)
+        self.assertEqual(snapshot["total_detail_rows"][0]["picking_name"], "WDB2B/OUT/01391")
+
+    def test_shadow_cache_failure_keeps_querydeluxe_authoritative(self):
+        full_cfg = {
+            "odoo": {"read_backend": "shadow"},
+            "querydeluxe": {"missing_tracking_query_id": 64},
+        }
+        query_rows = [
+            {
+                "carrier_id": 24,
+                "carrier_name": "EMTC",
+                "odoo_picking_id": 1,
+                "picking_name": "WH/OUT/1",
+                "state": "done",
+                "business_datetime": "2026-07-17 09:00:00",
+                "tracking_number": "TRACK-1",
+            }
+        ]
+        with (
+            mock.patch("webapp.odoo_reconcile_cache.load_config", return_value=full_cfg),
+            mock.patch("webapp.odoo_reconcile_cache.refresh_reconcile_cache", side_effect=TimeoutError("down")),
+            mock.patch(
+                "webapp.odoo_reconcile_cache.load_cached_picking_state",
+                return_value={
+                    "available": False,
+                    "generation": 0,
+                    "last_success_at": None,
+                    "target_carrier_ids": [],
+                    "rows": [],
+                },
+            ),
+            mock.patch.object(odoo_missing_report, "_get_default_detail_url", return_value="https://example.test/64"),
+            mock.patch.object(odoo_missing_report, "_fetch_querydeluxe_rows", return_value={"rows": query_rows}),
+            mock.patch.object(odoo_missing_report, "save_odoo_missing_snapshot"),
+        ):
+            snapshot = odoo_missing_report.refresh_odoo_missing_snapshot(config_path="test.json")
+
+        self.assertEqual(snapshot["authoritative_source"], "querydeluxe")
+        self.assertEqual(snapshot["totals"]["total_done_outgoing"], 1)
+        self.assertEqual(snapshot["warnings"], ["XML-RPC cache refresh failed: TimeoutError"])
+
     def test_build_snapshot_enriches_summary_with_detail_counts(self):
         snapshot = odoo_missing_report.build_odoo_missing_snapshot(
             total_detail_rows=[
@@ -205,6 +283,42 @@ class OdooMissingReportTests(unittest.TestCase):
                 self.assertIsNotNone(odoo_missing_report.resolve_odoo_missing_artifact("missing_detail_csv"))
                 self.assertIsNotNone(odoo_missing_report.resolve_odoo_missing_artifact("snapshot_json"))
                 self.assertIsNotNone(odoo_missing_report.resolve_odoo_missing_artifact("report_md"))
+
+    def test_older_cache_generation_cannot_overwrite_newer_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_dir = Path(tmpdir)
+            paths = {
+                "RUNTIME_DIR": runtime_dir,
+                "SNAPSHOT_PATH": runtime_dir / "latest_snapshot.json",
+                "SUMMARY_CSV_PATH": runtime_dir / "summary.csv",
+                "TOTAL_DETAIL_CSV_PATH": runtime_dir / "total_detail.csv",
+                "MISSING_DETAIL_CSV_PATH": runtime_dir / "missing_detail.csv",
+                "REPORT_MD_PATH": runtime_dir / "report.md",
+            }
+            newer = {
+                "read_backend": "xmlrpc",
+                "xmlrpc_cache": {
+                    "generation": 2,
+                    "last_success_at": "2026-07-17T11:00:00Z",
+                },
+                "summary_rows": [],
+                "total_detail_rows": [],
+                "missing_detail_rows": [],
+            }
+            older = {
+                **newer,
+                "xmlrpc_cache": {
+                    "generation": 1,
+                    "last_success_at": "2026-07-17T10:00:00Z",
+                },
+            }
+            with mock.patch.multiple(odoo_missing_report, **paths):
+                odoo_missing_report.save_odoo_missing_snapshot(newer)
+                result = odoo_missing_report.save_odoo_missing_snapshot(older)
+                saved = json.loads(paths["SNAPSHOT_PATH"].read_text(encoding="utf-8"))
+
+        self.assertTrue(result["stale_generation_rejected"])
+        self.assertEqual(saved["xmlrpc_cache"]["generation"], 2)
 
 
 if __name__ == "__main__":

@@ -246,7 +246,8 @@ class OdooPushTests(unittest.TestCase):
                 "search_stock_tracking",
                 return_value=[{"id": 10, "tracking_number": "TN1"}, {"id": 11, "tracking_number": "TN1"}],
             ), \
-            mock.patch.object(odoo_push, "write_tracking_pod") as write_mock:
+            mock.patch.object(odoo_push, "write_tracking_pod") as write_mock, \
+            mock.patch.object(odoo_push, "_record_successful_single_push_in_index"):
             result = odoo_push.push_single_item(
                 config_path="config.local.json",
                 match_key="TN1",
@@ -291,7 +292,8 @@ class OdooPushTests(unittest.TestCase):
                     {"id": 11, "tracking_number": "TN2", "pod_link": "old-2"},
                 ],
             ), \
-            mock.patch.object(odoo_push, "write_tracking_pod") as write_mock:
+            mock.patch.object(odoo_push, "write_tracking_pod") as write_mock, \
+            mock.patch.object(odoo_push, "_record_successful_single_push_in_index"):
             result = odoo_push.push_single_item(
                 config_path="config.local.json",
                 match_key="WCB2B/OUT/100",
@@ -331,11 +333,20 @@ class OdooPushTests(unittest.TestCase):
             mock.patch.object(
                 odoo_push,
                 "search_stock_tracking",
-                return_value=[{"id": 10, "tracking_number": "TN1", "pod_link": None}],
+                return_value=[
+                    {
+                        "id": 10,
+                        "tracking_number": "TN1",
+                        "picking_id": [501, "OUT/501"],
+                        "pod_link": None,
+                    }
+                ],
             ), \
             mock.patch.object(odoo_push, "write_tracking_pod"), \
-            mock.patch("webapp.odoo_pull.load_saved_index", return_value=index), \
-            mock.patch("webapp.odoo_pull.save_index") as save_mock:
+            mock.patch(
+                "webapp.odoo_pull.update_saved_index",
+                side_effect=lambda mutator, **kwargs: (mutator(index), index)[1],
+            ) as update_mock:
             result = odoo_push.push_single_item(
                 config_path="config.local.json",
                 match_key="TN1",
@@ -347,7 +358,9 @@ class OdooPushTests(unittest.TestCase):
         self.assertEqual(index.by_tracking_number["TN1"]["pod_link"], "https://files.test/pod.pdf")
         self.assertEqual(index.by_tracking_number["TN1"]["source_model"], "local_push")
         self.assertTrue(index.updated_at)
-        save_mock.assert_called_once_with(index)
+        update_mock.assert_called_once()
+        self.assertEqual(update_mock.call_args.kwargs["coverage_picking_id"], 501)
+        self.assertNotIn("_index_picking_id", result)
 
     def test_local_file_url_uses_unsigned_url_when_secret_is_invalid(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -503,7 +516,8 @@ class OdooPushTests(unittest.TestCase):
                     "pod_link": "https://files.test/old.pdf?token=do-not-log",
                 }],
             ), \
-            mock.patch.object(odoo_push, "write_tracking_pod") as write_mock:
+            mock.patch.object(odoo_push, "write_tracking_pod") as write_mock, \
+            mock.patch.object(odoo_push, "_record_successful_single_push_in_index"):
             result = odoo_push.push_single_item(
                 config_path="config.local.json",
                 match_key="TN1",
@@ -535,7 +549,8 @@ class OdooPushTests(unittest.TestCase):
                     "pod_link": "https://files.test/pod.pdf",
                 }],
             ), \
-            mock.patch.object(odoo_push, "write_tracking_pod") as write_mock:
+            mock.patch.object(odoo_push, "write_tracking_pod") as write_mock, \
+            mock.patch.object(odoo_push, "_record_successful_single_push_in_index"):
             result = odoo_push.push_single_item(
                 config_path="config.local.json",
                 match_key="TN1",
@@ -644,6 +659,61 @@ class OdooPushTests(unittest.TestCase):
         self.assertEqual(result["total"], 0)
         self.assertEqual(result["skipped_existing"], 1)
         self.assertEqual(result["details"], [])
+        connect_mock.assert_not_called()
+
+    def test_missing_only_checks_all_urls_for_tracking_key(self):
+        from webapp.odoo_pull import ExistingPodIndex
+
+        existing_index = ExistingPodIndex()
+        existing_index.add_row(
+            tracking_number="TN1",
+            picking_name=None,
+            pod_link="https://files.test/first.pdf",
+        )
+        existing_index.add_row(
+            tracking_number="TN1",
+            picking_name=None,
+            pod_link="https://files.test/target.pdf",
+        )
+        self.assertEqual(
+            existing_index.get_pod_info(tracking_number="TN1")["pod_link"],
+            "https://files.test/first.pdf",
+        )
+        payload = {
+            "items": [
+                {
+                    "identifier_status": "ready",
+                    "preferred_key_type": "tracking_number",
+                    "preferred_key": "TN1",
+                    "local_path": "/tmp/pod/CMC/proof.pdf",
+                    "source_name": "CMC",
+                    "source_type": "onedrive",
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            payload_path = Path(tmpdir) / "payload.json"
+            payload_path.write_text(json.dumps(payload), encoding="utf-8")
+            with mock.patch.object(
+                odoo_push, "load_config", return_value=self._config()
+            ), mock.patch.object(
+                odoo_push,
+                "resolve_push_file_url",
+                return_value=("https://files.test/target.pdf", None, "local"),
+            ), mock.patch(
+                "webapp.odoo_pull.get_index", return_value=existing_index
+            ), mock.patch.object(
+                odoo_push, "connect_odoo"
+            ) as connect_mock:
+                result = odoo_push.push_payload(
+                    config_path="config.local.json",
+                    payload_path=str(payload_path),
+                    missing_only=True,
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(result["skipped_existing"], 1)
         connect_mock.assert_not_called()
 
     def test_push_payload_uses_current_tracking_record_for_same_url_check(self):
@@ -1168,6 +1238,61 @@ class OdooPushTests(unittest.TestCase):
         self.assertEqual(result["ready_to_push_count"], 1)
         self.assertEqual(result["already_has_pod_count"], 0)
         self.assertNotIn("do-not-log", json.dumps(result))
+
+    def test_preflight_checks_all_urls_for_tracking_key(self):
+        from webapp.odoo_pull import ExistingPodIndex
+
+        existing_index = ExistingPodIndex()
+        existing_index.add_row(
+            tracking_number="TN1",
+            picking_name=None,
+            pod_link="https://files.test/first.pdf",
+        )
+        existing_index.add_row(
+            tracking_number="TN1",
+            picking_name=None,
+            pod_link="https://files.test/target.pdf",
+        )
+        payload = {
+            "items": [
+                {
+                    "identifier_status": "ready",
+                    "preferred_key_type": "tracking_number",
+                    "preferred_key": "TN1",
+                    "source_name": "CMC",
+                    "source_type": "onedrive",
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            payload_path = Path(tmpdir) / "payload.json"
+            payload_path.write_text(json.dumps(payload), encoding="utf-8")
+            with mock.patch.object(
+                odoo_push, "load_config", return_value=self._config()
+            ), mock.patch.object(
+                odoo_push,
+                "resolve_push_file_url",
+                return_value=("https://files.test/target.pdf", None, "local"),
+            ), mock.patch(
+                "webapp.odoo_pull.get_index", return_value=existing_index
+            ), mock.patch.object(
+                odoo_push,
+                "connect_odoo",
+                return_value=(FakeCommon(), object()),
+            ), mock.patch.object(
+                odoo_push, "search_stock_tracking"
+            ) as search_mock, mock.patch.object(
+                odoo_push, "search_picking"
+            ) as picking_search_mock:
+                result = odoo_push.preflight_payload(
+                    config_path="config.local.json",
+                    payload_path=str(payload_path),
+                )
+
+        self.assertEqual(result["ready_to_push_count"], 0)
+        self.assertEqual(result["already_has_pod_count"], 1)
+        search_mock.assert_not_called()
+        picking_search_mock.assert_not_called()
 
     def test_preflight_isolates_westerman_when_pool_is_missing(self):
         payload = {

@@ -23,6 +23,7 @@ RECONCILE_SOURCE_CONFIGS = {
         "slug": "emtc",
         "label": "EMTC",
         "carrier_id": 24,
+        "carrier_delivery_type": "spare",
         "source_name": "EMTC",
         "match_key_type": "tracking_number",
         "match_key_label": "tracking number",
@@ -53,6 +54,7 @@ RECONCILE_SOURCE_CONFIGS = {
         "slug": "cmc",
         "label": "CMC",
         "carrier_id": 25,
+        "carrier_delivery_type": "cmc",
         "source_name": "CMC",
         "match_key_type": "picking_name",
         "match_key_label": "出库单号",
@@ -80,6 +82,23 @@ RECONCILE_SOURCE_CONFIGS = {
         "pod_search_placeholder": "出库单号、文件名、路径、Odoo 单号",
     },
 }
+
+# Westerman uses the same picking-name reconciliation contract as CMC. Keep a
+# distinct source definition so the existing generic summary, paging and export
+# routes can expose it without a second report implementation.
+RECONCILE_SOURCE_CONFIGS["westerman"] = {
+    key: value.replace("CMC", "Westerman") if isinstance(value, str) else value
+    for key, value in RECONCILE_SOURCE_CONFIGS["cmc"].items()
+}
+RECONCILE_SOURCE_CONFIGS["westerman"].update(
+    {
+        "slug": "westerman",
+        "label": "Westerman",
+        "carrier_id": None,
+        "carrier_delivery_type": "westman",
+        "source_name": "Westerman",
+    }
+)
 
 DEFAULT_RECONCILE_KIND = "emtc"
 
@@ -152,6 +171,52 @@ def _dedupe_pod_index_entries(entries):
 
 
 def _load_pod_index_by_key(config):
+    try:
+        from .odoo_reconcile_cache import (
+            load_cached_pod_state,
+            load_config,
+            resolve_read_backend,
+        )
+
+        full_cfg = load_config("config.local.json")
+        if resolve_read_backend(full_cfg) == "xmlrpc":
+            cache_state = load_cached_pod_state(full_cfg=full_cfg)
+            entries_by_key = defaultdict(list)
+            for row in cache_state.get("rows") or []:
+                for source_key in _pod_index_key_sources(config):
+                    raw_key = (
+                        row.get("tracking_number")
+                        if source_key == "by_tracking_number"
+                        else row.get("picking_name")
+                    )
+                    normalized_key = _normalize_match_key(raw_key, config["match_key_type"])
+                    if not normalized_key:
+                        continue
+                    entries_by_key[normalized_key].append(
+                        {
+                            "tracking_number": row.get("tracking_number"),
+                            "picking_name": row.get("picking_name"),
+                            "pod_link": row.get("pod_link"),
+                            "index_key": raw_key,
+                            "index_source": source_key,
+                        }
+                    )
+            return (
+                {
+                    key: _dedupe_pod_index_entries(entries)
+                    for key, entries in entries_by_key.items()
+                },
+                {
+                    "fetched_at": cache_state.get("last_success_at"),
+                    "updated_at": cache_state.get("last_success_at"),
+                    "total_loaded": len(cache_state.get("rows") or []),
+                    "cache_generation": cache_state.get("generation"),
+                },
+            )
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError):
+        # Keep the last saved JSON index available during a cache/config outage.
+        pass
+
     if not POD_INDEX_PATH.exists():
         return {}, {}
     try:
@@ -232,7 +297,11 @@ def _resolve_reconcile_source(kind: str | None):
 
 
 def list_reconcile_sources():
-    return [RECONCILE_SOURCE_CONFIGS["emtc"], RECONCILE_SOURCE_CONFIGS["cmc"]]
+    return [
+        RECONCILE_SOURCE_CONFIGS["emtc"],
+        RECONCILE_SOURCE_CONFIGS["cmc"],
+        RECONCILE_SOURCE_CONFIGS["westerman"],
+    ]
 
 
 def _status_labels(config):
@@ -301,6 +370,16 @@ def _safe_int(value):
 
 def _matches_source_name(value: str | None, expected: str):
     return _canonicalize(value).startswith(_canonicalize(expected))
+
+
+def _odoo_row_matches_source(row, config):
+    if row.get("source_slug"):
+        return row.get("source_slug") == config["slug"]
+    if row.get("carrier_delivery_type"):
+        return row.get("carrier_delivery_type") == config.get("carrier_delivery_type")
+    if config.get("carrier_id") is not None:
+        return row.get("carrier_id") == config["carrier_id"]
+    return _matches_source_name(row.get("carrier_name"), config["source_name"])
 
 
 def _extract_odoo_match_key(row, config):
@@ -604,7 +683,7 @@ def _build_dataset_view(
         all_matches = all_odoo_by_key.get(normalized_key, []) if normalized_key else []
         other_carrier_matches = [
             match for match in all_matches
-            if match.get("carrier_id") != config["carrier_id"]
+            if not _odoo_row_matches_source(match, config)
         ]
         pod_index_matches = pod_index_by_key.get(normalized_key, []) if normalized_key else []
         if not normalized_key:
@@ -869,7 +948,7 @@ def _load_reconcile_dataset_cached(
         normalized_row["match_key"] = raw_key
         normalized_row["normalized_match_key"] = normalized_key
         all_odoo_rows.append(normalized_row)
-        if row.get("carrier_id") == config["carrier_id"]:
+        if _odoo_row_matches_source(row, config):
             odoo_rows.append(normalized_row)
 
     pod_docs = []

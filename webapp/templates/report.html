@@ -54,7 +54,6 @@
       </div>
       <p class="muted">一次刷新会先拉最新 Odoo 总明细，再重建最新 POD vs Odoo 对比。</p>
       <form method="post" action="{{ request.url_for('action_refresh_report') }}" class="stack-form compact-form" data-submit-state data-pending-notice="统一报告正在刷新，请稍候…">
-        <input type="hidden" name="detail_url" value="{{ odoo_missing_detail_url }}">
         <button type="submit" class="action-button" data-loading-text="正在刷新统一报告…">刷新统一报告</button>
       </form>
       <ul class="compact-list">

@@ -738,6 +738,134 @@ class WebAppActionTests(unittest.TestCase):
 
             self.assertEqual(resolved, (tmp / "downloads" / "pod").resolve())
 
+    def test_report_only_pipeline_fails_and_skips_dependent_compare_on_missing_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.local.json"
+            config_path.write_text("{}", encoding="utf-8")
+
+            with (
+                mock.patch(
+                    "webapp.odoo_pull.fetch_and_save_index",
+                    return_value=mock.Mock(
+                        summary=lambda: {},
+                        shadow_status="",
+                        coverage_status="complete",
+                    ),
+                ),
+                mock.patch(
+                    "webapp.odoo_missing_report.refresh_odoo_missing_snapshot",
+                    side_effect=RuntimeError("temporary report failure"),
+                ),
+                mock.patch(
+                    "webapp.odoo_pod_compare.refresh_pod_odoo_compare_snapshot",
+                    return_value={"ok": True},
+                ) as compare_mock,
+            ):
+                result = pipeline_runner.run_pipeline(
+                    config_path=str(config_path),
+                    skip_westerman=True,
+                    skip_cmc=True,
+                    skip_emtc=True,
+                    skip_phase1a=True,
+                    skip_odoo_push=True,
+                    skip_reports=False,
+                )
+
+            self.assertFalse(result["ok"])
+            self.assertTrue(result["degraded"])
+            self.assertEqual(result["warnings"][0]["step"], "refresh_odoo_missing")
+            self.assertFalse(
+                next(step for step in result["steps"] if step["step"] == "refresh_odoo_missing")["ok"]
+            )
+            self.assertFalse(
+                next(step for step in result["steps"] if step["step"] == "refresh_pod_compare")["ok"]
+            )
+            compare_mock.assert_not_called()
+
+    def test_incomplete_coverage_skips_compare_and_fails_report_only_run(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.local.json"
+            config_path.write_text("{}", encoding="utf-8")
+
+            with (
+                mock.patch(
+                    "webapp.odoo_pull.fetch_and_save_index",
+                    return_value=mock.Mock(
+                        summary=lambda: {},
+                        shadow_status="",
+                        coverage_status="unavailable:TimeoutError",
+                    ),
+                ),
+                mock.patch(
+                    "webapp.odoo_missing_report.refresh_odoo_missing_snapshot",
+                    return_value={},
+                ),
+                mock.patch(
+                    "webapp.odoo_pod_compare.refresh_pod_odoo_compare_snapshot"
+                ) as compare_mock,
+            ):
+                result = pipeline_runner.run_pipeline(
+                    config_path=str(config_path),
+                    skip_westerman=True,
+                    skip_cmc=True,
+                    skip_emtc=True,
+                    skip_phase1a=True,
+                    skip_odoo_push=True,
+                    skip_reports=False,
+                )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["degraded"])
+        self.assertEqual(
+            result["warnings"][0]["step"], "refresh_odoo_pod_index_coverage"
+        )
+        compare_mock.assert_not_called()
+
+    def test_successful_business_step_is_not_reversed_by_report_refresh_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.local.json"
+            phase_path = root / "phase1a.json"
+            config_path.write_text("{}", encoding="utf-8")
+            phase_path.write_text("{}", encoding="utf-8")
+
+            with (
+                mock.patch.object(pipeline_runner, "_run_step", return_value=(0, "")),
+                mock.patch.object(
+                    pipeline_runner, "_get_latest_phase1a_summary", return_value=None
+                ),
+                mock.patch(
+                    "webapp.odoo_pull.fetch_and_save_index",
+                    return_value=mock.Mock(
+                        summary=lambda: {},
+                        shadow_status="",
+                        coverage_status="complete",
+                    ),
+                ),
+                mock.patch(
+                    "webapp.odoo_missing_report.refresh_odoo_missing_snapshot",
+                    side_effect=RuntimeError("temporary report failure"),
+                ),
+                mock.patch(
+                    "webapp.odoo_pod_compare.refresh_pod_odoo_compare_snapshot"
+                ) as compare_mock,
+            ):
+                result = pipeline_runner.run_pipeline(
+                    config_path=str(config_path),
+                    phase1a_config_path=str(phase_path),
+                    skip_westerman=True,
+                    skip_cmc=True,
+                    skip_emtc=True,
+                    skip_phase1a=False,
+                    skip_odoo_push=True,
+                    skip_reports=False,
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["degraded"])
+            self.assertEqual(result["warnings"][0]["step"], "refresh_odoo_missing")
+            compare_mock.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

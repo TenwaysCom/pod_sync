@@ -173,6 +173,7 @@ def run_pipeline(
     steps: list[dict] = []
     data_report: dict[str, dict] = {}
     soft_failed_steps: list[str] = []
+    warnings: list[dict] = []
     excluded_push_source_types = {"westerman_api"} if skip_westerman else set()
     overall_start = time.time()
 
@@ -474,42 +475,102 @@ def run_pipeline(
         print("\n" + "=" * 60)
         print("STEP: 刷新 Odoo POD 索引和统一报告")
         print("=" * 60)
-        try:
-            from webapp.odoo_missing_report import refresh_odoo_missing_snapshot
-            from webapp.odoo_pod_compare import refresh_pod_odoo_compare_snapshot
+        from webapp.odoo_missing_report import refresh_odoo_missing_snapshot
+        from webapp.odoo_pod_compare import refresh_pod_odoo_compare_snapshot
 
-            should_refresh_pod_index = (
-                not skip_odoo_push
-                and data_report.get("odoo_push", {}).get("status") != "skipped"
-            )
-            if should_refresh_pod_index:
+        # A report refresh is one generation: Query65-equivalent index,
+        # Query64-equivalent picking snapshot, then the derived comparison.
+        # Refresh the index even when this run did not push anything.
+        should_refresh_pod_index = True
+        pod_index_refreshed = False
+        pod_index_refresh_ok = False
+        if should_refresh_pod_index:
+            try:
                 from webapp.odoo_pull import fetch_and_save_index
 
                 index = fetch_and_save_index(config_path)
                 data_report["odoo_pod_index"] = index.summary()
                 print("[OK] Odoo POD 索引已刷新")
                 record("refresh_odoo_pod_index", True)
+                pod_index_refreshed = True
+                pod_index_refresh_ok = index.coverage_status == "complete"
+                if index.coverage_status != "complete":
+                    warnings.append(
+                        {
+                            "step": "refresh_odoo_pod_index_coverage",
+                            "warning": index.coverage_status,
+                        }
+                    )
+                if index.shadow_status in {
+                    "differences",
+                    "inconclusive_concurrent_changes",
+                    "unavailable",
+                }:
+                    warnings.append(
+                        {
+                            "step": "refresh_odoo_pod_index_shadow",
+                            "warning": index.shadow_status,
+                        }
+                    )
+            except Exception as exc:
+                print(f"[WARNING] Odoo POD 索引刷新失败，保留上一代索引: {exc}")
+                record("refresh_odoo_pod_index", False, str(exc))
+                warnings.append(
+                    {"step": "refresh_odoo_pod_index", "error_type": type(exc).__name__}
+                )
 
-            refresh_odoo_missing_snapshot()
+        missing_refresh_ok = False
+        try:
+            snapshot = refresh_odoo_missing_snapshot(
+                config_path=config_path,
+                refresh_xmlrpc_cache=not pod_index_refreshed,
+            )
+            data_report["odoo_missing"] = {
+                "read_backend": snapshot.get("read_backend"),
+                "authoritative_source": snapshot.get("authoritative_source"),
+                "shadow_comparison": snapshot.get("shadow_comparison"),
+                "warnings": snapshot.get("warnings") or [],
+            }
             print("[OK] Odoo 缺失追踪报告已刷新")
             record("refresh_odoo_missing", True)
-
-            refresh_pod_odoo_compare_snapshot()
-            print("[OK] POD vs Odoo 对比报告已刷新")
-            record("refresh_pod_compare", True)
+            missing_refresh_ok = True
+            if snapshot.get("warnings"):
+                warnings.append(
+                    {"step": "refresh_odoo_missing_shadow", "warning": "unavailable"}
+                )
+            shadow_status = (snapshot.get("shadow_comparison") or {}).get("status")
+            if shadow_status in {
+                "differences",
+                "inconclusive_concurrent_changes",
+                "unavailable",
+            }:
+                warnings.append(
+                    {
+                        "step": "refresh_odoo_missing_shadow",
+                        "warning": shadow_status,
+                    }
+                )
         except Exception as exc:
-            print(f"[FAILED] 刷新报告失败: {exc}")
-            record("refresh_reports", False, str(exc))
-            return {
-                "ok": False,
-                "failed_step": "refresh_reports",
-                "degraded": bool(soft_failed_steps),
-                "soft_failed_steps": soft_failed_steps,
-                "error": str(exc),
-                "steps": steps,
-                "data_report": data_report,
-                "elapsed_seconds": round(time.time() - overall_start, 1),
-            }
+            print(f"[WARNING] Odoo 缺失追踪报告刷新失败，保留旧报告: {exc}")
+            record("refresh_odoo_missing", False, str(exc))
+            warnings.append(
+                {"step": "refresh_odoo_missing", "error_type": type(exc).__name__}
+            )
+
+        if pod_index_refresh_ok and missing_refresh_ok:
+            try:
+                refresh_pod_odoo_compare_snapshot()
+                print("[OK] POD vs Odoo 对比报告已刷新")
+                record("refresh_pod_compare", True)
+            except Exception as exc:
+                print(f"[WARNING] POD vs Odoo 对比报告刷新失败，保留旧报告: {exc}")
+                record("refresh_pod_compare", False, str(exc))
+                warnings.append(
+                    {"step": "refresh_pod_compare", "error_type": type(exc).__name__}
+                )
+        else:
+            print("[WARNING] 上游报告未完整刷新，跳过 POD vs Odoo 对比以避免混合代数据")
+            record("refresh_pod_compare", False, "skipped_due_to_upstream_refresh_failure")
 
     elapsed = round(time.time() - overall_start, 1)
     print(f"\n{'=' * 60}")
@@ -521,14 +582,33 @@ def run_pipeline(
             "degraded": True,
             "failed_step": soft_failed_steps[0],
             "soft_failed_steps": soft_failed_steps,
+            "warnings": warnings,
+            "steps": steps,
+            "data_report": data_report,
+            "elapsed_seconds": elapsed,
+        }
+    business_steps = {
+        "westerman_sync", "cmc_sync", "emtc_sync", "phase1a", "odoo_push"
+    }
+    successful_business_step = any(
+        step.get("step") in business_steps and step.get("ok") for step in steps
+    )
+    if warnings and not successful_business_step:
+        return {
+            "ok": False,
+            "degraded": True,
+            "failed_step": warnings[0]["step"],
+            "soft_failed_steps": [],
+            "warnings": warnings,
             "steps": steps,
             "data_report": data_report,
             "elapsed_seconds": elapsed,
         }
     return {
         "ok": True,
-        "degraded": False,
+        "degraded": bool(warnings),
         "soft_failed_steps": [],
+        "warnings": warnings,
         "steps": steps,
         "data_report": data_report,
         "elapsed_seconds": elapsed,

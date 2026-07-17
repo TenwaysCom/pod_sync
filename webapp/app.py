@@ -45,16 +45,20 @@ from .odoo_missing_report import (
 
 
 def _get_odoo_missing_detail_url() -> str:
-    """Read QueryDeluxe detail URL from config."""
+    """Return a display-only description of the configured Odoo read source."""
     cfg_path = PROJECT_ROOT / "config.local.json"
     if not cfg_path.exists():
-        raise FileNotFoundError(f"Config file not found: {cfg_path}")
+        return "未配置"
     cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    backend = (cfg.get("odoo", {}).get("read_backend") or "querydeluxe").strip().lower()
+    if backend == "xmlrpc":
+        return "Odoo XML-RPC 增量缓存（CMC / EMTC / Westerman）"
     odoo_url = cfg.get("odoo", {}).get("url", "").rstrip("/")
     query_id = cfg.get("querydeluxe", {}).get("missing_tracking_query_id", 64)
     if not odoo_url:
-        raise ValueError("Odoo URL not configured in config.local.json")
-    return f"{odoo_url}/api/querydeluxe/{query_id}/data"
+        return "未配置"
+    suffix = "（权威源，XML-RPC 影子校验）" if backend == "shadow" else ""
+    return f"{odoo_url}/api/querydeluxe/{query_id}/data{suffix}"
 from .annual_pod_report import build_annual_pod_workbook
 from .odoo_push_history import list_push_runs, get_log_content, delete_push_run
 from .odoo_pull import fetch_and_save_index, load_saved_index
@@ -1444,45 +1448,114 @@ async def action_refresh_remote_counts(config_path: str = Form(DEFAULT_SYNC_CONF
 
 @app.post("/actions/refresh-odoo-missing")
 async def action_refresh_odoo_missing(
-    detail_url: str = Form(_get_odoo_missing_detail_url()),
+    config_path: str = Form(DEFAULT_SYNC_CONFIG_REL),
 ):
     try:
-        refresh_odoo_missing_snapshot(detail_url=detail_url)
-    except Exception as exc:
-        return redirect_with_error("/odoo-missing", f"Odoo 缺失报告刷新失败：{exc}")
-    return redirect_with_notice("/odoo-missing", "Odoo 缺失报告已刷新。")
+        resolved_config = ensure_existing_file(
+            resolve_project_path(config_path, DEFAULT_SYNC_CONFIG_REL),
+            "同步配置文件",
+        )
+    except ValueError as exc:
+        return redirect_with_error("/odoo-missing", str(exc))
+    command = [
+        sys.executable,
+        str(PROJECT_ROOT / "webapp" / "pipeline_runner.py"),
+        "--config", str(resolved_config),
+        "--skip-westerman", "--skip-cmc", "--skip-emtc",
+        "--skip-phase1a", "--skip-odoo-push",
+    ]
+    job = job_store.start_job(
+        action="refresh_odoo_reports",
+        label="刷新 Odoo 索引和对账报告",
+        command=command,
+        metadata={"category": "report", "config_path": str(resolved_config)},
+    )
+    return RedirectResponse(url=f"/jobs/{job['job_id']}", status_code=303)
 
 
 @app.post("/actions/refresh-compare")
-async def action_refresh_compare():
+async def action_refresh_compare(
+    config_path: str = Form(DEFAULT_SYNC_CONFIG_REL),
+):
     try:
-        refresh_pod_odoo_compare_snapshot()
-    except Exception as exc:
-        return redirect_with_error("/compare", f"POD 对比报告刷新失败：{exc}")
-    return redirect_with_notice("/compare", "POD 对比报告已刷新。")
+        resolved_config = ensure_existing_file(
+            resolve_project_path(config_path, DEFAULT_SYNC_CONFIG_REL),
+            "同步配置文件",
+        )
+    except ValueError as exc:
+        return redirect_with_error("/compare", str(exc))
+    command = [
+        sys.executable,
+        str(PROJECT_ROOT / "webapp" / "pipeline_runner.py"),
+        "--config", str(resolved_config),
+        "--skip-westerman", "--skip-cmc", "--skip-emtc",
+        "--skip-phase1a", "--skip-odoo-push",
+    ]
+    job = job_store.start_job(
+        action="refresh_odoo_reports",
+        label="刷新 Odoo 索引和 POD 对比",
+        command=command,
+        metadata={"category": "report", "config_path": str(resolved_config)},
+    )
+    return RedirectResponse(url=f"/jobs/{job['job_id']}", status_code=303)
 
 
 @app.post("/actions/refresh-report")
 async def action_refresh_report(
-    detail_url: str = Form(_get_odoo_missing_detail_url()),
+    config_path: str = Form(DEFAULT_SYNC_CONFIG_REL),
 ):
     try:
-        refresh_odoo_missing_snapshot(detail_url=detail_url)
-        refresh_pod_odoo_compare_snapshot()
-    except Exception as exc:
-        return redirect_with_error("/report", f"统一报告刷新失败：{exc}")
-    return redirect_with_notice("/report", "统一报告已刷新。")
+        resolved_config = ensure_existing_file(
+            resolve_project_path(config_path, DEFAULT_SYNC_CONFIG_REL),
+            "同步配置文件",
+        )
+    except ValueError as exc:
+        return redirect_with_error("/report", str(exc))
+    command = [
+        sys.executable,
+        str(PROJECT_ROOT / "webapp" / "pipeline_runner.py"),
+        "--config", str(resolved_config),
+        "--skip-westerman", "--skip-cmc", "--skip-emtc",
+        "--skip-phase1a", "--skip-odoo-push",
+    ]
+    job = job_store.start_job(
+        action="refresh_odoo_reports",
+        label="刷新 Odoo 索引和统一报告",
+        command=command,
+        metadata={"category": "report", "config_path": str(resolved_config)},
+    )
+    return RedirectResponse(url=f"/jobs/{job['job_id']}", status_code=303)
 
 
 @app.post("/api/refresh-report")
 async def api_refresh_report(
-    detail_url: str = Form(_get_odoo_missing_detail_url()),
+    config_path: str = Form(DEFAULT_SYNC_CONFIG_REL),
 ):
     try:
-        refresh_odoo_missing_snapshot(detail_url=detail_url)
-        refresh_pod_odoo_compare_snapshot()
+        resolved_config = ensure_existing_file(
+            resolve_project_path(config_path, DEFAULT_SYNC_CONFIG_REL),
+            "同步配置文件",
+        )
+        command = [
+            sys.executable,
+            str(PROJECT_ROOT / "webapp" / "pipeline_runner.py"),
+            "--config", str(resolved_config),
+            "--skip-westerman", "--skip-cmc", "--skip-emtc",
+            "--skip-phase1a", "--skip-odoo-push",
+        ]
+        job = job_store.start_job(
+            action="refresh_odoo_reports",
+            label="刷新 Odoo 索引和统一报告",
+            command=command,
+            metadata={"category": "report", "config_path": str(resolved_config)},
+        )
         return JSONResponse(
-            content={"ok": True, "message": "统一报告已刷新。"}
+            content={
+                "ok": True,
+                "message": "统一报告刷新任务已创建。",
+                "job_id": job["job_id"],
+            },
+            status_code=202,
         )
     except Exception as exc:
         return JSONResponse(

@@ -211,16 +211,16 @@ def _record_successful_single_push_in_index(
     match_key: str,
     match_key_type: str,
     file_url: str,
+    picking_id: int | None = None,
 ):
     if result.get("status") not in POD_INDEX_SUCCESS_STATUSES or not file_url:
         return
     try:
         try:
-            from .odoo_pull import ExistingPodIndex, load_saved_index, save_index
+            from .odoo_pull import update_saved_index
         except ImportError:
-            from webapp.odoo_pull import ExistingPodIndex, load_saved_index, save_index
+            from webapp.odoo_pull import update_saved_index
 
-        index = load_saved_index() or ExistingPodIndex()
         tracking_number = match_key if match_key_type == "tracking_number" else None
         picking_name = match_key if match_key_type == "picking_name" else None
         target_name = result.get("target_name")
@@ -229,14 +229,22 @@ def _record_successful_single_push_in_index(
         elif target_name and match_key_type == "tracking_number":
             tracking_number = tracking_number or target_name
 
-        index.add_row(
-            tracking_number=tracking_number,
-            picking_name=picking_name,
-            pod_link=file_url,
-            source_model="local_push",
-        )
-        index.updated_at = _utc_now_iso()
-        save_index(index)
+        def apply_update(index):
+            index.add_row(
+                tracking_number=tracking_number,
+                picking_name=picking_name,
+                pod_link=file_url,
+                source_model="local_push",
+            )
+            index.updated_at = _utc_now_iso()
+
+        if picking_id:
+            update_saved_index(
+                apply_update,
+                coverage_picking_id=int(picking_id),
+            )
+        else:
+            update_saved_index(apply_update)
     except Exception as exc:
         result["index_update_error"] = str(exc)
 
@@ -537,6 +545,38 @@ def _payload_lookup_key(item: dict) -> tuple[str, str]:
     return key_type, key_value
 
 
+def _index_has_exact_pod_url(
+    existing_index,
+    *,
+    key_type: str,
+    key_value: str,
+    target_url: str | None,
+) -> bool:
+    """Check all known URLs while remaining compatible with older index objects."""
+    if existing_index is None or not target_url:
+        return False
+    tracking_number = key_value if key_type == "tracking_number" else None
+    picking_name = key_value if key_type == "picking_name" else None
+    has_exact_pod_url = getattr(existing_index, "has_exact_pod_url", None)
+    if callable(has_exact_pod_url):
+        return bool(
+            has_exact_pod_url(
+                target_url,
+                tracking_number=tracking_number,
+                picking_name=picking_name,
+            )
+        )
+
+    existing_info = existing_index.get_pod_info(
+        tracking_number=tracking_number,
+        picking_name=picking_name,
+    )
+    return bool(
+        existing_info
+        and str(existing_info.get("pod_link") or "") == target_url
+    )
+
+
 def payload_item_has_same_target_pod_url(
     item: dict,
     existing_index,
@@ -547,20 +587,16 @@ def payload_item_has_same_target_pod_url(
     if existing_index is None:
         return False
     key_type, key_value = _payload_lookup_key(item)
-    existing_info = existing_index.get_pod_info(
-        tracking_number=key_value if key_type == "tracking_number" else None,
-        picking_name=key_value if key_type == "picking_name" else None,
-    )
-    if not existing_info:
-        return False
     target_url, _, _ = resolve_push_file_url(
         full_cfg,
         local_path=item.get("local_path"),
         source_file_url=item.get("file_url"),
     )
-    return bool(
-        target_url
-        and str(existing_info.get("pod_link") or "") == target_url
+    return _index_has_exact_pod_url(
+        existing_index,
+        key_type=key_type,
+        key_value=key_value,
+        target_url=target_url,
     )
 
 
@@ -1122,11 +1158,13 @@ def _push_single_item_unlocked(
     }
 
     def finish():
+        index_picking_id = result.pop("_index_picking_id", None)
         _record_successful_single_push_in_index(
             result=result,
             match_key=key_value,
             match_key_type=key_type,
             file_url=final_url,
+            picking_id=index_picking_id,
         )
         return redact_sensitive_data(result)
 
@@ -1152,6 +1190,11 @@ def _push_single_item_unlocked(
             result["target_model"] = "stock.tracking"
             result["target_id"] = tracking_id
             result["target_name"] = track.get("tracking_number")
+            picking_reference = track.get("picking_id")
+            if isinstance(picking_reference, (list, tuple)):
+                picking_reference = picking_reference[0] if picking_reference else None
+            if picking_reference:
+                result["_index_picking_id"] = int(picking_reference)
 
             if current_pod_link and str(current_pod_link) == final_url:
                 result["status"] = "skipped_same"
@@ -1195,6 +1238,8 @@ def _push_single_item_unlocked(
     picking_id = pick.get("id")
     result["target_model"] = "stock.tracking"
     result["target_name"] = pick.get("name")
+    if picking_id:
+        result["_index_picking_id"] = int(picking_id)
 
     # Check for existing stock.tracking records linked to this picking
     try:
@@ -1394,14 +1439,13 @@ def _preflight_payload_unredacted(
             invalid.append(entry)
             continue
 
-        # Check existing POD
-        existing_info = None
-        if existing_index:
-            existing_info = existing_index.get_pod_info(
-                tracking_number=key_value if key_type == "tracking_number" else None,
-                picking_name=key_value if key_type == "picking_name" else None,
-            )
-        if existing_info and str(existing_info.get("pod_link") or "") == file_url:
+        # Check every known POD URL for this key, not only the compatibility winner.
+        if _index_has_exact_pod_url(
+            existing_index,
+            key_type=key_type,
+            key_value=key_value,
+            target_url=file_url,
+        ):
             already_has_pod.append(entry)
             continue
 
