@@ -12,6 +12,7 @@ from urllib.parse import quote
 from .actions import resolve_storage_dir
 from .odoo_missing_report import load_odoo_missing_snapshot
 from .phase1a_runs import get_latest_phase1a_run, resolve_artifact_path
+from .pod_sources import POD_SOURCE_REGISTRY
 from .xlsx_utils import build_xlsx_workbook
 
 
@@ -39,11 +40,11 @@ REPORT_MD_PATH = RUNTIME_DIR / "pod_vs_odoo_report.md"
 PUSH_READY_XLSX_PATH = RUNTIME_DIR / "pod_ready_for_odoo.xlsx"
 
 SOURCE_CARRIER_MAP = {
-    "CMC": {"carrier_id": 25, "carrier_name": "CMC"},
-    "EMTC": {"carrier_id": 24, "carrier_name": "EMTC"},
-    # Current EU Odoo ID; the new summary path itself uses stable
-    # delivery_type=westman from the XML-RPC cache.
-    "Westerman": {"carrier_id": 38, "carrier_name": "Westerman"},
+    source.source_name: {
+        "carrier_id": source.carrier_id,
+        "carrier_name": source.carrier_name,
+    }
+    for source in POD_SOURCE_REGISTRY
 }
 
 PREFERRED_KEY_TYPE_LABELS = {

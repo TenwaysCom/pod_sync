@@ -38,6 +38,73 @@ class EmtcReconcileTests(unittest.TestCase):
             )
         )
 
+    def test_pod_index_xmlrpc_uses_the_explicit_config_and_available_cache(self):
+        config = emtc_reconcile.RECONCILE_SOURCE_CONFIGS["cmc"]
+        full_cfg = {"odoo": {"read_backend": "xmlrpc"}}
+        cache_state = {
+            "available": True,
+            "generation": 7,
+            "last_success_at": "2026-07-18T01:00:00Z",
+            "rows": [
+                {
+                    "tracking_number": "TRACK-1",
+                    "picking_name": "WDB2B/OUT/00001",
+                    "pod_link": "https://pod.example/1.pdf",
+                }
+            ],
+        }
+
+        with mock.patch(
+            "webapp.odoo_reconcile_cache.load_config",
+            return_value=full_cfg,
+        ) as load_config, mock.patch(
+            "webapp.odoo_reconcile_cache.load_cached_pod_state",
+            return_value=cache_state,
+        ) as load_cached:
+            entries, metadata = emtc_reconcile._load_pod_index_by_key(
+                config,
+                config_path="/tmp/pod-sync-test-config.json",
+            )
+
+        load_config.assert_called_once_with("/tmp/pod-sync-test-config.json")
+        load_cached.assert_called_once_with(
+            "/tmp/pod-sync-test-config.json",
+            full_cfg=full_cfg,
+        )
+        self.assertIn("WDB2BOUT00001", entries)
+        self.assertEqual(metadata["cache_generation"], 7)
+
+    def test_pod_index_xmlrpc_falls_back_to_saved_json_when_cache_unavailable(self):
+        config = emtc_reconcile.RECONCILE_SOURCE_CONFIGS["cmc"]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pod_index_path = Path(tmpdir) / "odoo_pod_index.json"
+            pod_index_path.write_text(
+                json.dumps(
+                    {
+                        "by_picking_name": {
+                            "WDB2B/OUT/00002": {
+                                "pod_link": "https://pod.example/2.pdf",
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                emtc_reconcile,
+                "POD_INDEX_PATH",
+                pod_index_path,
+            ), mock.patch(
+                "webapp.odoo_reconcile_cache.load_config",
+                return_value={"odoo": {"read_backend": "xmlrpc"}},
+            ), mock.patch(
+                "webapp.odoo_reconcile_cache.load_cached_pod_state",
+                return_value={"available": False, "rows": []},
+            ):
+                entries, _metadata = emtc_reconcile._load_pod_index_by_key(config)
+
+        self.assertIn("WDB2BOUT00002", entries)
+
     def test_load_dataset_builds_bidirectional_counts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -309,6 +376,11 @@ class EmtcReconcileTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            config_path = tmp / "config.local.json"
+            config_path.write_text(
+                json.dumps({"odoo": {"read_backend": "querydeluxe"}}),
+                encoding="utf-8",
+            )
             run = {"run_name": "202604280001", "summary": {"generated_at": "2026-04-28T01:00:00Z"}}
             odoo_snapshot = {
                 "generated_at": "2026-04-28T02:00:00Z",
@@ -336,6 +408,7 @@ class EmtcReconcileTests(unittest.TestCase):
                 mock.patch.object(emtc_reconcile, "resolve_artifact_path", return_value=parsed_path), \
                 mock.patch.object(emtc_reconcile, "load_odoo_missing_snapshot", return_value=odoo_snapshot), \
                 mock.patch.object(emtc_reconcile, "resolve_storage_dir", return_value=(tmp / "storage")), \
+                mock.patch.object(emtc_reconcile, "CONFIG_PATH", config_path), \
                 mock.patch.object(emtc_reconcile, "POD_INDEX_PATH", pod_index_path):
                 dataset = emtc_reconcile.load_reconcile_dataset("cmc")
 
@@ -438,6 +511,16 @@ class EmtcReconcileTests(unittest.TestCase):
         self.assertEqual([row["picking_name"] for row in filtered["odoo_to_pod_rows"]], ["WH/OUT/1", "WH/OUT/2"])
         self.assertEqual(filtered["pod_summary"]["found_in_odoo_count"], 1)
         self.assertEqual(filtered["pod_summary"]["not_found_in_odoo_count"], 1)
+
+    def test_rejects_start_month_after_end_month(self):
+        dataset = {
+            "_odoo_rows": [],
+            "_all_odoo_rows": [],
+            "_pod_docs": [],
+        }
+
+        with self.assertRaisesRegex(ValueError, "开始月份不能晚于结束月份"):
+            emtc_reconcile._apply_start_month_filter(dataset, "2024-07", "2024-06")
 
     def test_apply_odoo_state_filter_updates_odoo_pool(self):
         dataset = {

@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -419,6 +420,8 @@ class DriveDownloadTests(unittest.TestCase):
                         "source_file_id": "file-1",
                         "source_modified_time": "2026-07-17T00:00:00Z",
                         "local_path": str(existing_file),
+                        "local_size": 3,
+                        "sha256": hashlib.sha256(b"old").hexdigest(),
                     }
                 )
                 + "\n",
@@ -498,6 +501,110 @@ class DriveDownloadTests(unittest.TestCase):
         self.assertTrue(downloaded_items[0]["_cursor_replayed_changed"])
         self.assertEqual(cursor_stats["cursor_restart_count"], 1)
         self.assertEqual(cursor_stats["cursor_recovered_count"], 1)
+
+    def test_onedrive_incremental_redownloads_same_size_corrupt_local_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "files"
+            output_dir.mkdir()
+            local_file = output_dir / "proof.pdf"
+            local_file.write_bytes(b"evil")
+            cfg = {"warehouse": "CMC", "drive_id": "drive"}
+            manifest_path = probe_onedrive.resolve_manifest_path(
+                "onedrive",
+                cfg,
+                {},
+                explicit_output_dir=output_dir,
+            )
+            manifest_path.parent.mkdir(parents=True)
+            manifest_path.write_text(
+                json.dumps({
+                    "source_file_id": "file-1",
+                    "source_modified_time": "2026-07-17T00:00:00Z",
+                    "local_path": str(local_file),
+                    "local_size": 4,
+                    "sha256": hashlib.sha256(b"good").hexdigest(),
+                }) + "\n",
+                encoding="utf-8",
+            )
+            item = {
+                "id": "file-1",
+                "name": "proof.pdf",
+                "path": "/POD/proof.pdf",
+                "is_folder": False,
+                "modified_time": "2026-07-17T00:00:00Z",
+            }
+            with mock.patch.object(
+                probe_onedrive,
+                "download_and_record_file",
+                return_value={"local_size": 4},
+            ) as download_mock, contextlib.redirect_stdout(io.StringIO()):
+                summary = probe_onedrive.sync_all_files(
+                    session=object(),
+                    cfg=cfg,
+                    download_cfg={},
+                    headers={},
+                    timeout=10,
+                    items=[item],
+                    explicit_output_dir=output_dir,
+                    workers=1,
+                    incremental=True,
+                )
+
+        self.assertEqual(summary["skipped_files"], 0)
+        self.assertEqual(summary["downloaded_files"], 1)
+        download_mock.assert_called_once()
+
+    def test_gdrive_incremental_redownloads_same_size_corrupt_local_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "files"
+            output_dir.mkdir()
+            local_file = output_dir / "proof.pdf"
+            local_file.write_bytes(b"evil")
+            cfg = {"warehouse": "EMTC"}
+            manifest_path = probe_gdrive.resolve_manifest_path(
+                "gdrive",
+                cfg,
+                {},
+                explicit_output_dir=output_dir,
+            )
+            manifest_path.parent.mkdir(parents=True)
+            manifest_path.write_text(
+                json.dumps({
+                    "source_file_id": "file-1",
+                    "source_modified_time": "2026-07-17T00:00:00Z",
+                    "local_path": str(local_file),
+                    "local_size": 4,
+                    "sha256": hashlib.sha256(b"good").hexdigest(),
+                }) + "\n",
+                encoding="utf-8",
+            )
+            item = {
+                "id": "file-1",
+                "name": "proof.pdf",
+                "path": "/POD/proof.pdf",
+                "is_folder": False,
+                "modified_time": "2026-07-17T00:00:00Z",
+            }
+            with mock.patch.object(
+                probe_gdrive,
+                "download_and_record_file",
+                return_value={"local_size": 4},
+            ) as download_mock, contextlib.redirect_stdout(io.StringIO()):
+                summary = probe_gdrive.sync_all_files(
+                    session=object(),
+                    cfg=cfg,
+                    download_cfg={},
+                    headers={},
+                    timeout=10,
+                    items=[item],
+                    explicit_output_dir=output_dir,
+                    workers=1,
+                    incremental=True,
+                )
+
+        self.assertEqual(summary["skipped_files"], 0)
+        self.assertEqual(summary["downloaded_files"], 1)
+        download_mock.assert_called_once()
 
     def test_onedrive_limit_close_preserves_cursor_recovery_stat(self):
         base_url = "https://graph.microsoft.com/v1.0/drives/drive/items/folder/children"

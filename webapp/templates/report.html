@@ -1,38 +1,51 @@
 {% extends "base.html" %}
-{% block title %}报告 · POD 同步控制台{% endblock %}
+{% block title %}详细报告 · POD 同步控制台{% endblock %}
 {% block content %}
+  {% set odoo_totals = (odoo_snapshot.get("totals") or {}) if odoo_snapshot else {} %}
+  {% set compare_totals = (compare_snapshot.get("totals") or {}) if compare_snapshot else {} %}
+  {% set compare_phase1a = (compare_snapshot.get("phase1a") or {}) if compare_snapshot else {} %}
+  {% set compare_run_name = compare_phase1a.get("run_name") or "" %}
+  <section class="section report-tool-banner" aria-labelledby="reportToolTitle">
+    <div>
+      <p class="eyebrow">工具 · 数据诊断</p>
+      <h2 id="reportToolTitle">详细报告</h2>
+      <p class="lede">这里保留全量字段、技术明细和下载产物；日常核对请优先使用总结对账。</p>
+    </div>
+    <a class="secondary-button" href="{{ request.url_for('reconcile_page') }}">返回总结对账</a>
+  </section>
+
   <section class="grid grid-cards">
     <a class="card stat-card stat-card-link" href="{{ request.url_for('odoo_missing_page') }}?tracking_status=&state=&pod_link_status=">
       <p class="label">Odoo 全量出库</p>
-      <h2>{% if odoo_snapshot %}{{ odoo_snapshot.totals.total_done_outgoing }}{% else %}0{% endif %}</h2>
+      <h2>{{ odoo_totals.get("total_done_outgoing", 0) }}</h2>
       <p class="muted">
-        {% if odoo_snapshot %}all carriers · done {{ odoo_snapshot.totals.done_count }} / cancel {{ odoo_snapshot.totals.cancel_count }}{% else %}当前所有 outgoing 总明细{% endif %}
+        {% if odoo_totals %}all carriers · done {{ odoo_totals.get("done_count", 0) }} / cancel {{ odoo_totals.get("cancel_count", 0) }}{% else %}当前所有 outgoing 总明细{% endif %}
       </p>
     </a>
     <article class="card stat-card">
       <p class="label">POD 相关单池</p>
       <h2>{% if pod_scope_analysis and pod_scope_analysis.overview %}{{ pod_scope_analysis.overview.total_count }}{% else %}0{% endif %}</h2>
-      <p class="muted">默认只看 carrier_id 24 / 25，也就是 EMTC / CMC</p>
+      <p class="muted">只看 carrier_id 24 / 25 / 38，也就是 EMTC / CMC / Westerman</p>
     </article>
     <a class="card stat-card stat-card-link" href="{{ request.url_for('compare_page') }}?status=matched_any">
       <p class="label">POD 匹配率</p>
-      <h2>{% if compare_snapshot %}{{ compare_snapshot.totals.match_rate_percent }}%{% else %}0%{% endif %}</h2>
+      <h2>{{ compare_totals.get("match_rate_percent", 0) }}%</h2>
       <p class="muted">同承运商、已取消、其他承运商均计入命中</p>
     </a>
     <a class="card stat-card stat-card-link" href="{{ request.url_for('compare_page') }}?status=matched_cancelled">
       <p class="label">命中已取消单</p>
-      <h2>{% if compare_snapshot %}{{ compare_snapshot.totals.matched_cancelled_count }}{% else %}0{% endif %}</h2>
+      <h2>{{ compare_totals.get("matched_cancelled_count", 0) }}</h2>
       <p class="muted">POD 能找到 Odoo，但单据状态是 cancel</p>
     </a>
     <a class="card stat-card stat-card-link" href="{{ request.url_for('compare_page') }}?status=odoo_not_found">
       <p class="label">按匹配键未命中 Odoo</p>
-      <h2>{% if compare_snapshot %}{{ compare_snapshot.totals.not_found_count }}{% else %}0{% endif %}</h2>
+      <h2>{{ compare_totals.get("not_found_count", 0) }}</h2>
       <p class="muted">POD 已识别匹配键，但在 Odoo 总明细中未命中</p>
     </a>
-    {% if compare_snapshot %}
-      <a class="card stat-card stat-card-link" href="{{ request.url_for('phase1a_run_detail', run_name=compare_snapshot.phase1a.run_name) }}?status=needs_review">
+    {% if compare_run_name %}
+      <a class="card stat-card stat-card-link" href="{{ request.url_for('phase1a_run_detail', run_name=compare_run_name) }}?status=needs_review">
         <p class="label">识别待处理</p>
-        <h2>{{ compare_snapshot.totals.review_document_count }}</h2>
+        <h2>{{ compare_totals.get("review_document_count", 0) }}</h2>
         <p class="muted">尚未进入自动对比的文档</p>
       </a>
     {% else %}
@@ -57,9 +70,9 @@
         <button type="submit" class="action-button" data-loading-text="正在刷新统一报告…">刷新统一报告</button>
       </form>
       <ul class="compact-list">
-        <li>Odoo 快照：{% if odoo_snapshot %}{{ odoo_snapshot.generated_at }}{% else %}无{% endif %}</li>
-        <li>POD 对比：{% if compare_snapshot %}{{ compare_snapshot.generated_at }}{% else %}无{% endif %}</li>
-        <li>最新识别批次：{% if compare_snapshot %}<span class="mono">{{ compare_snapshot.phase1a.run_name }}</span>{% else %}无{% endif %}</li>
+        <li>Odoo 快照：{{ odoo_snapshot.get("generated_at", "无") if odoo_snapshot else "无" }}</li>
+        <li>POD 对比：{{ compare_snapshot.get("generated_at", "无") if compare_snapshot else "无" }}</li>
+        <li>最新识别批次：{% if compare_run_name %}<span class="mono">{{ compare_run_name }}</span>{% else %}无{% endif %}</li>
       </ul>
     </div>
 
@@ -102,7 +115,7 @@
       <div class="section-head section-head-tight">
         <div>
           <p class="eyebrow">POD 相关 Odoo 单池</p>
-          <h2>先看与 POD 真正相关的 EMTC / CMC 范围</h2>
+          <h2>先看与 POD 真正相关的 EMTC / CMC / Westerman 范围</h2>
         </div>
       </div>
       {% if pod_scope_analysis and pod_scope_analysis.overview %}
@@ -110,7 +123,7 @@
           <article class="card stat-card stat-card-inline">
             <p class="label">单池总数</p>
             <h2>{{ pod_scope_analysis.overview.total_count }}</h2>
-            <p class="muted">EMTC / CMC 当前总明细范围</p>
+            <p class="muted">EMTC / CMC / Westerman 当前总明细范围</p>
           </article>
           <article class="card stat-card stat-card-inline">
             <p class="label">缺失 tracking number</p>
@@ -118,14 +131,14 @@
             <p class="muted">直接影响 EMTC 侧按 tracking number 匹配</p>
           </article>
           <article class="card stat-card stat-card-inline">
-            <p class="label">待写入 POD 链接</p>
+            <p class="label">出库单汇总尚无 POD</p>
             <h2>{{ pod_scope_analysis.overview.without_pod_link_count }}</h2>
-            <p class="muted">当前还没有写回 `x_studio_pod_link`</p>
+            <p class="muted">实际写入源是 `stock.tracking.pod_link`；这里统计 Odoo 出库单的汇总结果</p>
           </article>
           <article class="card stat-card stat-card-inline">
-            <p class="label">可直接推送</p>
+            <p class="label">done 且待核对</p>
             <h2>{{ pod_scope_analysis.overview.ready_for_push_count }}</h2>
-            <p class="muted">`done` 且 `x_studio_pod_link` 为空</p>
+            <p class="muted">只表示出库单汇总尚无 POD；是否可写仍以标准推送预检为准</p>
           </article>
         </div>
 
@@ -140,7 +153,7 @@
                 <th>tracking number覆盖率</th>
                 <th>已有 POD 链接</th>
                 <th>POD 链接覆盖率</th>
-                <th>可推送</th>
+                <th>done 且待核对</th>
               </tr>
             </thead>
             <tbody>
@@ -188,18 +201,18 @@
           </article>
           <article class="card stat-card stat-card-inline">
             <p class="label">承运商总数</p>
-            <h2>{{ odoo_snapshot.totals.carrier_count }}</h2>
+            <h2>{{ odoo_totals.get("carrier_count", 0) }}</h2>
             <p class="muted">这决定了“命中其他承运商”和“按匹配键未命中 Odoo”是否能被正确区分</p>
           </article>
           <article class="card stat-card stat-card-inline">
             <p class="label">全量已有 POD 链接</p>
             <h2>{{ odoo_analysis.overview.with_pod_link_count }}</h2>
-            <p class="muted">所有 carrier 里已写回 `x_studio_pod_link` 的单据</p>
+            <p class="muted">所有 carrier 中已由 `stock.tracking.pod_link` 聚合出 POD 的单据</p>
           </article>
           <article class="card stat-card stat-card-inline">
             <p class="label">全量待写入</p>
             <h2>{{ odoo_analysis.overview.without_pod_link_count }}</h2>
-            <p class="muted">所有 carrier 里还没写回 POD 链接的单据</p>
+            <p class="muted">所有 carrier 中出库单汇总尚无 POD；不等同于都有可推送文件</p>
           </article>
         </div>
 
@@ -258,9 +271,9 @@
             <p class="muted">全部年份中已经写回 Odoo 的数量</p>
           </article>
           <article class="card stat-card stat-card-inline">
-            <p class="label">全量可推送</p>
+            <p class="label">done 且待核对</p>
             <h2>{{ all_time_analysis.overview.ready_for_push_count }}</h2>
-            <p class="muted">全部年份里 `done` 且 `x_studio_pod_link` 为空</p>
+            <p class="muted">是否可写仍以 payload、门禁、合并和 Odoo 预检结果为准</p>
           </article>
         </div>
 

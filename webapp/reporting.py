@@ -7,9 +7,7 @@ from pathlib import Path
 
 from .odoo_missing_report import load_odoo_missing_snapshot
 from .odoo_pod_compare import load_pod_odoo_compare_snapshot
-
-
-POD_SOURCE_CARRIER_IDS = {24, 25, 38}
+from .pod_sources import POD_SOURCE_CARRIER_IDS, POD_SOURCE_NAME_BY_CARRIER_ID
 
 STOCK_TRACKING_POD_IDS_PATH = Path(__file__).resolve().parents[1] / "runtime" / "stock_tracking_pod_picking_ids.json"
 
@@ -79,7 +77,7 @@ def _resolve_tracking_number(row):
     return _clean_text(row.get("tracking_number")) or _clean_text(row.get("carrier_tracking_ref"))
 
 
-def _summarize_rows(rows: list[dict]):
+def _summarize_rows(rows: list[dict], stock_tracking_ids: set[int]):
     total_count = len(rows)
     done_count = 0
     cancel_count = 0
@@ -89,7 +87,7 @@ def _summarize_rows(rows: list[dict]):
 
     for row in rows:
         tracking_number = _resolve_tracking_number(row)
-        pod_link = _clean_text(row.get("x_studio_pod_link"))
+        has_pod = _row_has_pod(row, stock_tracking_ids)
         state = row.get("state")
         if state == "done":
             done_count += 1
@@ -97,9 +95,9 @@ def _summarize_rows(rows: list[dict]):
             cancel_count += 1
         if tracking_number:
             with_tracking_count += 1
-        if pod_link:
+        if has_pod:
             with_pod_link_count += 1
-        if state == "done" and not pod_link:
+        if state == "done" and not has_pod:
             ready_for_push_count += 1
 
     return {
@@ -114,7 +112,11 @@ def _summarize_rows(rows: list[dict]):
     }
 
 
-def build_odoo_analysis_context(odoo_snapshot: dict | None):
+def build_odoo_analysis_context(
+    odoo_snapshot: dict | None,
+    *,
+    stock_tracking_ids: set[int] | None = None,
+):
     if not odoo_snapshot:
         return {
             "overview": {},
@@ -124,6 +126,8 @@ def build_odoo_analysis_context(odoo_snapshot: dict | None):
         }
 
     rows = list(odoo_snapshot.get("total_detail_rows") or [])
+    if stock_tracking_ids is None:
+        stock_tracking_ids = _load_stock_tracking_pod_picking_ids()
     total_count = len(rows)
     with_tracking_count = 0
     with_pod_link_count = 0
@@ -145,16 +149,16 @@ def build_odoo_analysis_context(odoo_snapshot: dict | None):
 
     for row in rows:
         tracking_number = _resolve_tracking_number(row)
-        pod_link = _clean_text(row.get("x_studio_pod_link"))
+        has_pod = _row_has_pod(row, stock_tracking_ids)
         state = row.get("state") or "-"
         carrier_id = row.get("carrier_id")
         carrier_name = row.get("carrier_name") or "-"
 
         if tracking_number:
             with_tracking_count += 1
-        if pod_link:
+        if has_pod:
             with_pod_link_count += 1
-        if state == "done" and not pod_link:
+        if state == "done" and not has_pod:
             ready_for_push_count += 1
 
         state_counts[state]["row_count"] += 1
@@ -162,7 +166,7 @@ def build_odoo_analysis_context(odoo_snapshot: dict | None):
         if tracking_number:
             state_counts[state]["with_tracking_count"] += 1
             carrier_state_counts[(carrier_id, carrier_name, state)]["with_tracking_count"] += 1
-        if pod_link:
+        if has_pod:
             state_counts[state]["with_pod_link_count"] += 1
             carrier_state_counts[(carrier_id, carrier_name, state)]["with_pod_link_count"] += 1
 
@@ -185,8 +189,8 @@ def build_odoo_analysis_context(odoo_snapshot: dict | None):
         {
             "field_name": "carrier_id + carrier_name",
             "source": "stock_picking.carrier_id / 承运商映射",
-            "purpose": "区分 Odoo 当前承运商；POD 识别默认按 24=EMTC、25=CMC 起步，但现在总表已经放开到全部 outgoing carrier。",
-            "detail": f"当前总表共 {len({(row.get('carrier_id'), row.get('carrier_name')) for row in rows})} 个 carrier，其中 POD 相关默认 carrier_id 为 24 / 25。",
+            "purpose": "区分 Odoo 当前承运商；POD 单池按 24=EMTC、25=CMC、38=Westerman 统计，总表保留全部 outgoing carrier。",
+            "detail": f"当前总表共 {len({(row.get('carrier_id'), row.get('carrier_name')) for row in rows})} 个 carrier，其中 POD 相关 carrier_id 为 24 / 25 / 38。",
         },
         {
             "field_name": "state",
@@ -207,10 +211,10 @@ def build_odoo_analysis_context(odoo_snapshot: dict | None):
             "detail": f"{with_tracking_count} / {total_count} 非空，缺失 {without_tracking_count}，覆盖率 {_float_percent(with_tracking_count, total_count)}%。",
         },
         {
-            "field_name": "x_studio_pod_link",
-            "source": "stock_picking.x_studio_pod_link",
-            "purpose": "Odoo 中保存 POD 图片/文件链接的字段，也是 POD 侧后续回写目标字段。",
-            "detail": f"{with_pod_link_count} / {total_count} 已有链接，待写入 {without_pod_link_count}，done 且待写入 {ready_for_push_count}。",
+            "field_name": "pod_coverage",
+            "source": "stock.tracking.pod_link + stock.picking.x_studio_pod_link",
+            "purpose": "以 stock.tracking.pod_link 为实际写入源，并兼容出库单上的历史/聚合镜像。",
+            "detail": f"{with_pod_link_count} / {total_count} 已有 POD，尚无 POD {without_pod_link_count}，done 且待核对 {ready_for_push_count}。是否可写仍以标准推送预检为准。",
         },
     ]
 
@@ -262,16 +266,22 @@ def build_odoo_analysis_context(odoo_snapshot: dict | None):
     }
 
 
-def build_pod_scope_context(odoo_snapshot: dict | None):
+def build_pod_scope_context(
+    odoo_snapshot: dict | None,
+    *,
+    stock_tracking_ids: set[int] | None = None,
+):
     if not odoo_snapshot:
         return {
             "overview": {},
             "carrier_rows": [],
         }
 
+    if stock_tracking_ids is None:
+        stock_tracking_ids = _load_stock_tracking_pod_picking_ids()
     all_rows = list(odoo_snapshot.get("total_detail_rows") or [])
     rows = [row for row in all_rows if row.get("carrier_id") in POD_SOURCE_CARRIER_IDS]
-    overview = _summarize_rows(rows)
+    overview = _summarize_rows(rows, stock_tracking_ids)
     overview["carrier_count"] = len({row.get("carrier_id") for row in rows if row.get("carrier_id") is not None})
 
     grouped = defaultdict(list)
@@ -280,7 +290,7 @@ def build_pod_scope_context(odoo_snapshot: dict | None):
 
     carrier_rows = []
     for (carrier_id, carrier_name), carrier_items in sorted(grouped.items(), key=lambda item: item[0][0] or 0):
-        summary = _summarize_rows(carrier_items)
+        summary = _summarize_rows(carrier_items, stock_tracking_ids)
         carrier_rows.append(
             {
                 "carrier_id": carrier_id,
@@ -400,13 +410,19 @@ def build_monthly_tracking_overview(monthly_rows: list[dict] | None, *, limit: i
     return overview_rows[:limit]
 
 
-def build_all_time_tracking_context(odoo_snapshot: dict | None):
+def build_all_time_tracking_context(
+    odoo_snapshot: dict | None,
+    *,
+    stock_tracking_ids: set[int] | None = None,
+):
     if not odoo_snapshot:
         return {
             "overview": {},
             "carrier_rows": [],
         }
 
+    if stock_tracking_ids is None:
+        stock_tracking_ids = _load_stock_tracking_pod_picking_ids()
     rows = list(odoo_snapshot.get("total_detail_rows") or [])
 
     carrier_grouped = defaultdict(list)
@@ -417,7 +433,7 @@ def build_all_time_tracking_context(odoo_snapshot: dict | None):
     total_count = len(rows)
     carrier_rows = []
     for (carrier_id, carrier_name), carrier_items in sorted(carrier_grouped.items(), key=lambda item: item[0][0] or 0):
-        counts = _summarize_rows(carrier_items)
+        counts = _summarize_rows(carrier_items, stock_tracking_ids)
         carrier_rows.append(
             {
                 "carrier_id": carrier_id,
@@ -434,7 +450,7 @@ def build_all_time_tracking_context(odoo_snapshot: dict | None):
             }
         )
 
-    summary = _summarize_rows(rows)
+    summary = _summarize_rows(rows, stock_tracking_ids)
     return {
         "overview": {
             "total_count": total_count,
@@ -512,8 +528,12 @@ def build_compare_analysis_context(compare_snapshot: dict | None):
     }
 
 
-def build_monthly_pod_coverage_rows(odoo_snapshot: dict | None):
-    """Monthly POD coverage from Odoo perspective (CMC + EMTC only).
+def build_monthly_pod_coverage_rows(
+    odoo_snapshot: dict | None,
+    *,
+    stock_tracking_ids: set[int] | None = None,
+):
+    """Monthly POD coverage from the Odoo perspective for all POD sources.
 
     Counts a row as "with POD" if either:
       - stock.picking.x_studio_pod_link is set, OR
@@ -522,19 +542,20 @@ def build_monthly_pod_coverage_rows(odoo_snapshot: dict | None):
     if not odoo_snapshot:
         return []
 
-    target_carriers = {24: "EMTC", 25: "CMC"}
-    stock_tracking_ids = _load_stock_tracking_pod_picking_ids()
+    if stock_tracking_ids is None:
+        stock_tracking_ids = _load_stock_tracking_pod_picking_ids()
     grouped = defaultdict(lambda: {"total_orders": 0, "with_pod": 0, "without_pod": 0})
 
     for row in odoo_snapshot.get("total_detail_rows") or []:
         cid = row.get("carrier_id")
-        if cid not in target_carriers:
+        carrier_name = POD_SOURCE_NAME_BY_CARRIER_ID.get(cid)
+        if carrier_name is None:
             continue
         dt = _parse_datetime(row.get("business_datetime"))
         if not dt:
             continue
         month_key = dt.strftime("%Y-%m")
-        key = (month_key, cid, target_carriers[cid])
+        key = (month_key, cid, carrier_name)
         grouped[key]["total_orders"] += 1
         if _row_has_pod(row, stock_tracking_ids):
             grouped[key]["with_pod"] += 1
@@ -590,13 +611,26 @@ def build_monthly_pod_coverage_overview(monthly_pod_rows: list[dict] | None, *, 
 def build_report_context():
     odoo_snapshot = load_odoo_missing_snapshot()
     compare_snapshot = load_pod_odoo_compare_snapshot()
+    stock_tracking_ids = _load_stock_tracking_pod_picking_ids() if odoo_snapshot else set()
     monthly_rows = build_monthly_tracking_rows(odoo_snapshot)
     monthly_overview_rows = build_monthly_tracking_overview(monthly_rows)
-    monthly_pod_rows = build_monthly_pod_coverage_rows(odoo_snapshot)
+    monthly_pod_rows = build_monthly_pod_coverage_rows(
+        odoo_snapshot,
+        stock_tracking_ids=stock_tracking_ids,
+    )
     monthly_pod_overview_rows = build_monthly_pod_coverage_overview(monthly_pod_rows)
-    odoo_analysis = build_odoo_analysis_context(odoo_snapshot)
-    pod_scope_analysis = build_pod_scope_context(odoo_snapshot)
-    all_time_analysis = build_all_time_tracking_context(odoo_snapshot)
+    odoo_analysis = build_odoo_analysis_context(
+        odoo_snapshot,
+        stock_tracking_ids=stock_tracking_ids,
+    )
+    pod_scope_analysis = build_pod_scope_context(
+        odoo_snapshot,
+        stock_tracking_ids=stock_tracking_ids,
+    )
+    all_time_analysis = build_all_time_tracking_context(
+        odoo_snapshot,
+        stock_tracking_ids=stock_tracking_ids,
+    )
     compare_analysis = build_compare_analysis_context(compare_snapshot)
     return {
         "odoo_snapshot": odoo_snapshot,

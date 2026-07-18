@@ -1,45 +1,67 @@
 {% extends "base.html" %}
+
+{% macro step_label(step_key) -%}
+  {% if step_key == "westerman_sync" %}Westerman API 同步
+  {% elif step_key == "westerman_pool_gate" %}Westerman 待拉取池门禁
+  {% elif step_key == "cmc_sync" %}CMC OneDrive 同步
+  {% elif step_key == "emtc_sync" %}EMTC Google Drive 同步
+  {% elif step_key == "phase1a" %}Phase 1A 识别
+  {% elif step_key == "phase1a_payload" %}Phase 1A 推送清单
+  {% elif step_key == "refresh_odoo_pod_index" %}刷新 Odoo POD 索引
+  {% elif step_key == "refresh_odoo_missing" %}刷新 Odoo 缺失报告
+  {% elif step_key == "refresh_pod_compare" %}刷新 POD 对比报告
+  {% elif step_key == "refresh_reports" %}刷新统一报告
+  {% elif step_key == "odoo_push" %}推送 POD 到 Odoo
+  {% else %}{{ step_key }}{% endif %}
+{%- endmacro %}
+
 {% block title %}{{ job.label }} · POD 同步控制台{% endblock %}
 {% block content %}
-  <section class="section two-col">
+  {% set active_job = job.status in ["queued", "running"] %}
+  {% set report_status = job.report.get("status", "") if job.report else "" %}
+  {% set report_degraded = job.report.get("degraded", false) if job.report else false %}
+  {% set effective_status = job.status %}
+  {% if not active_job and report_status == "partial" %}
+    {% set effective_status = "partial" %}
+  {% elif not active_job and (job.status == "failed" or report_status == "failed") %}
+    {% set effective_status = "failed" %}
+  {% elif not active_job and report_degraded %}
+    {% set effective_status = "degraded" %}
+  {% elif not active_job and report_status in ["ok", "success"] %}
+    {% set effective_status = "success" %}
+  {% endif %}
+
+  <section class="section">
     <div class="card">
       <div class="section-head section-head-tight">
         <div>
-          <p class="eyebrow">任务</p>
+          <p class="eyebrow">任务{% if active_job %}进度{% else %}结果{% endif %}</p>
           <h2>{{ job.label }}</h2>
         </div>
         <div class="header-actions">
-          <span class="badge badge-{{ job.status }}">{{ job_status_labels.get(job.status, job.status) }}</span>
+          <span class="badge badge-{{ 'warn' if effective_status in ['partial', 'degraded'] else effective_status }}" data-effective-status="{{ effective_status }}">
+            {% if effective_status == "partial" %}部分完成
+            {% elif effective_status == "degraded" %}成功但有警告
+            {% else %}{{ job_status_labels.get(effective_status, effective_status) }}{% endif %}
+          </span>
           <form method="post" action="{{ request.url_for('delete_job', job_id=job.job_id) }}" class="inline-action-form" onsubmit="return confirm('确认删除任务 {{ job.job_id }} 吗？')">
             <input type="hidden" name="redirect_to" value="{{ request.url_for('jobs_page') }}">
-            <button type="submit" class="danger-button" {% if job.status in ['queued', 'running'] %}disabled{% endif %}>删除任务</button>
+            <button type="submit" class="danger-button" {% if active_job %}disabled{% endif %}>删除任务</button>
           </form>
         </div>
       </div>
+      {% if active_job %}
+        <p class="status-inline muted" role="status" aria-live="polite">
+          {% if job.status == "queued" %}任务正在等待执行{% else %}任务正在执行{% endif %}，本页每 5 秒自动刷新一次。
+          <button id="jobAutoRefreshToggle" type="button" class="ghost-button">暂停自动刷新</button>
+        </p>
+      {% endif %}
       <ul class="compact-list">
         <li>任务 ID：{{ job.job_id }}</li>
         <li>创建时间：{{ job.created_at }}</li>
         <li>开始时间：{{ job.started_at or "无" }}</li>
         <li>结束时间：{{ job.finished_at or "无" }}</li>
         <li>退出码：{{ job.exit_code if job.exit_code is not none else "无" }}</li>
-      </ul>
-      <div class="divider"></div>
-      <p class="label">执行命令</p>
-      <pre class="terminal">{{ job.command_display }}</pre>
-      <a class="text-link" href="{{ request.url_for('job_log', job_id=job.job_id) }}">打开原始日志</a>
-    </div>
-
-    <div class="card">
-      <div class="section-head section-head-tight">
-        <div>
-          <p class="eyebrow">元数据</p>
-          <h2>执行上下文</h2>
-        </div>
-      </div>
-      <ul class="compact-list">
-        {% for key, value in job.metadata.items() %}
-          <li>{{ metadata_labels.get(key, key) }}：{{ display_value(value) }}</li>
-        {% endfor %}
       </ul>
       {% if phase1a_run %}
         <div class="divider"></div>
@@ -53,37 +75,90 @@
   <section class="section">
     <div class="section-head">
       <div>
-        <p class="eyebrow">执行报告</p>
+        <p class="eyebrow">业务摘要</p>
         <h2>任务执行成果摘要</h2>
       </div>
     </div>
     <div class="card">
       <div class="grid grid-cards" style="margin-bottom: 16px;">
-        <article class="card stat-card stat-card-inline">
+        <article class="card stat-card stat-card-inline" data-report-status="{{ report_status or ('ok' if job.report.ok else 'failed') }}">
           <p class="label">总体状态</p>
-          <h2 style="color: {% if job.report.ok %}var(--success){% else %}var(--danger){% endif %}">
-            {{ "成功" if job.report.ok else "失败" }}
-          </h2>
-          <p class="muted">{{ job.report.elapsed_seconds or 0 }} 秒</p>
+          {% if report_status == "partial" %}
+            <h2 style="color: var(--warn)">部分完成</h2>
+            <p class="muted">部分来源或步骤未完成，已完成的数据仍然保留。</p>
+          {% elif report_degraded %}
+            <h2 style="color: var(--warn)">成功，但有警告</h2>
+            <p class="muted">业务步骤已完成，但辅助报告未全部刷新；请先查看警告再对账。</p>
+          {% elif report_status in ["ok", "success"] or (not report_status and job.report.ok) %}
+            <h2 style="color: var(--success)">成功</h2>
+            <p class="muted">计划内步骤已完成。</p>
+          {% else %}
+            <h2 style="color: var(--danger)">失败</h2>
+            <p class="muted">任务未完成，请查看失败步骤。</p>
+          {% endif %}
+          <p class="muted">耗时 {{ job.report.elapsed_seconds or 0 }} 秒</p>
         </article>
         {% if job.report.failed_step %}
         <article class="card stat-card stat-card-inline stat-card-alert">
-          <p class="label">失败步骤</p>
-          <h2>{{ job.report.failed_step }}</h2>
-          <p class="muted">{{ job.report.error or "" }}</p>
+          <p class="label">{% if report_status == "partial" %}未完成步骤{% else %}失败步骤{% endif %}</p>
+          <h2>{{ step_label(job.report.failed_step) }}</h2>
+          {% if job.report.error %}<p class="muted">{{ job.report.error }}</p>{% endif %}
         </article>
         {% endif %}
       </div>
 
-      {# Data Report #}
+      {% if job.report.warnings %}
+      <div id="report-warnings" class="flash flash-error" role="alert">
+        <div>
+          <strong>任务警告</strong>
+          <ul class="compact-list">
+            {% for warning in job.report.warnings %}
+              <li>{{ step_label(warning.step or "unknown") }}：{{ warning.error or warning.warning or warning.detail or warning.status or "未完成" }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+      </div>
+      {% endif %}
+
       {% if job.report.data_report %}
       <p class="label" style="margin-bottom: 10px;">数据成果</p>
       <div class="list-stack" style="margin-bottom: 20px;">
 
-        {# CMC Sync Report #}
+        {% if job.report.data_report.westerman_sync %}
+        <div style="margin-bottom: 16px;">
+          <p style="font-weight: 600; margin-bottom: 6px;">Westerman API 同步</p>
+          <div class="grid grid-cards">
+            <article class="card stat-card stat-card-inline">
+              <p class="label">候选出库单</p>
+              <h2>{{ job.report.data_report.westerman_sync.candidate_count or 0 }}</h2>
+            </article>
+            <article class="card stat-card stat-card-inline">
+              <p class="label">本次检查</p>
+              <h2>{{ job.report.data_report.westerman_sync.checked_count or 0 }}</h2>
+            </article>
+            <article class="card stat-card stat-card-inline">
+              <p class="label">等待 POD</p>
+              <h2>{{ job.report.data_report.westerman_sync.waiting_pod_count or 0 }}</h2>
+            </article>
+            <article class="card stat-card stat-card-inline">
+              <p class="label">下载 POD</p>
+              <h2>{{ job.report.data_report.westerman_sync.downloaded_count or 0 }}</h2>
+            </article>
+            <article class="card stat-card stat-card-inline">
+              <p class="label">待重试</p>
+              <h2>{{ job.report.data_report.westerman_sync.retry_count or 0 }}</h2>
+            </article>
+            <article class="card stat-card stat-card-inline{% if job.report.data_report.westerman_sync.failed_count %} stat-card-alert{% endif %}">
+              <p class="label">失败</p>
+              <h2>{{ job.report.data_report.westerman_sync.failed_count or 0 }}</h2>
+            </article>
+          </div>
+        </div>
+        {% endif %}
+
         {% if job.report.data_report.cmc_sync %}
         <div style="margin-bottom: 16px;">
-          <p style="font-weight: 600; margin-bottom: 6px;">📁 CMC OneDrive 同步</p>
+          <p style="font-weight: 600; margin-bottom: 6px;">CMC OneDrive 同步</p>
           <div class="grid grid-cards">
             <article class="card stat-card stat-card-inline">
               <p class="label">下载文件</p>
@@ -93,7 +168,7 @@
               <p class="label">跳过文件</p>
               <h2>{{ job.report.data_report.cmc_sync.skipped_files or 0 }}</h2>
             </article>
-            <article class="card stat-card stat-card-inline">
+            <article class="card stat-card stat-card-inline{% if job.report.data_report.cmc_sync.failed_files %} stat-card-alert{% endif %}">
               <p class="label">失败文件</p>
               <h2>{{ job.report.data_report.cmc_sync.failed_files or 0 }}</h2>
             </article>
@@ -101,10 +176,9 @@
         </div>
         {% endif %}
 
-        {# EMTC Sync Report #}
         {% if job.report.data_report.emtc_sync %}
         <div style="margin-bottom: 16px;">
-          <p style="font-weight: 600; margin-bottom: 6px;">📁 EMTC Google Drive 同步</p>
+          <p style="font-weight: 600; margin-bottom: 6px;">EMTC Google Drive 同步</p>
           <div class="grid grid-cards">
             <article class="card stat-card stat-card-inline">
               <p class="label">下载文件</p>
@@ -114,7 +188,7 @@
               <p class="label">跳过文件</p>
               <h2>{{ job.report.data_report.emtc_sync.skipped_files or 0 }}</h2>
             </article>
-            <article class="card stat-card stat-card-inline">
+            <article class="card stat-card stat-card-inline{% if job.report.data_report.emtc_sync.failed_files %} stat-card-alert{% endif %}">
               <p class="label">失败文件</p>
               <h2>{{ job.report.data_report.emtc_sync.failed_files or 0 }}</h2>
             </article>
@@ -122,10 +196,9 @@
         </div>
         {% endif %}
 
-        {# Phase 1A Report #}
         {% if job.report.data_report.phase1a %}
         <div style="margin-bottom: 16px;">
-          <p style="font-weight: 600; margin-bottom: 6px;">🔍 Phase 1A 识别（批次：{{ job.report.data_report.phase1a.run_name or "-" }}）</p>
+          <p style="font-weight: 600; margin-bottom: 6px;">Phase 1A 识别（批次：{{ job.report.data_report.phase1a.run_name or "-" }}）</p>
           <div class="grid grid-cards">
             <article class="card stat-card stat-card-inline">
               <p class="label">文档总数</p>
@@ -147,65 +220,78 @@
         </div>
         {% endif %}
 
-        {# Odoo Push Report #}
         {% if job.report.data_report.odoo_push %}
+        {% set push_result = job.report.data_report.odoo_push %}
         <div style="margin-bottom: 16px;">
-          <p style="font-weight: 600; margin-bottom: 6px;">🚀 Odoo 推送</p>
+          <p style="font-weight: 600; margin-bottom: 6px;">Odoo 推送</p>
           <div class="grid grid-cards">
             <article class="card stat-card stat-card-inline">
-              <p class="label">处理总数</p>
-              <h2>{{ job.report.data_report.odoo_push.total or 0 }}</h2>
+              <p class="label">输入文档</p>
+              <h2>{{ push_result.get("input_total", push_result.get("total", 0)) }}</h2>
+            </article>
+            <article class="card stat-card stat-card-inline">
+              <p class="label">唯一目标</p>
+              <h2>{{ push_result.get("selected_target_count", push_result.get("total", 0)) }}</h2>
+            </article>
+            <article class="card stat-card stat-card-inline">
+              <p class="label">合并文档</p>
+              <h2>{{ push_result.get("coalesced_count", 0) }}</h2>
+            </article>
+            <article class="card stat-card stat-card-inline">
+              <p class="label">实际处理</p>
+              <h2>{{ push_result.get("attempted", push_result.get("total", 0)) }}</h2>
             </article>
             <article class="card stat-card stat-card-inline">
               <p class="label">成功推送</p>
-              <h2 style="color: var(--success)">{{ job.report.data_report.odoo_push.tracking_pushed or 0 }}</h2>
+              <h2 style="color: var(--success)">{{ (push_result.get("tracking_pushed", 0) or 0) + (push_result.get("picking_pushed", 0) or 0) }}</h2>
             </article>
             <article class="card stat-card stat-card-inline">
               <p class="label">已有跳过</p>
-              <h2>{{ job.report.data_report.odoo_push.skipped_existing or 0 }}</h2>
+              <h2>{{ (push_result.get("skipped_existing", 0) or 0) + (push_result.get("tracking_skipped_same", 0) or 0) + (push_result.get("picking_skipped_same", 0) or 0) }}</h2>
             </article>
             <article class="card stat-card stat-card-inline stat-card-alert">
               <p class="label">未找到</p>
-              <h2>{{ job.report.data_report.odoo_push.tracking_not_found or 0 }}</h2>
+              <h2>{{ (push_result.get("tracking_not_found", 0) or 0) + (push_result.get("picking_not_found", 0) or 0) }}</h2>
             </article>
             <article class="card stat-card stat-card-inline stat-card-alert">
               <p class="label">失败</p>
-              <h2>{{ job.report.data_report.odoo_push.failed or 0 }}</h2>
+              <h2>{{ push_result.get("failed", 0) or 0 }}</h2>
             </article>
           </div>
           {% if job.report.data_report.odoo_push.by_source %}
           <p style="font-weight: 600; margin: 12px 0 6px;">按来源分布</p>
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>来源</th>
-                <th>推送</th>
-                <th>未找到</th>
-                <th>失败</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for source, stats in job.report.data_report.odoo_push.by_source.items() %}
-              <tr>
-                <td>{{ source }}</td>
-                <td>{{ stats.tracking_pushed or 0 }}</td>
-                <td>{{ stats.not_found or 0 }}</td>
-                <td>{{ stats.failed or 0 }}</td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
+          <div class="files-table-wrap">
+            <table class="files-table">
+              <thead>
+                <tr>
+                  <th>来源</th>
+                  <th>推送</th>
+                  <th>未找到</th>
+                  <th>失败</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for source, stats in push_result.by_source.items() %}
+                <tr>
+                  <td>{{ source }}</td>
+                  <td>{{ (stats.tracking_pushed or 0) + (stats.picking_pushed or 0) }}</td>
+                  <td>{{ stats.not_found or 0 }}</td>
+                  <td>{{ stats.failed or 0 }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
           {% endif %}
         </div>
         {% endif %}
-
       </div>
       {% endif %}
 
       {% if job.report.steps %}
-      <p class="label" style="margin-bottom: 10px;">各步骤详情</p>
-      <div class="list-stack">
-        <table class="data-table">
+      <p id="step-status" class="label" style="margin-bottom: 10px;">各步骤状态</p>
+      <div class="files-table-wrap">
+        <table class="files-table">
           <thead>
             <tr>
               <th>步骤</th>
@@ -216,21 +302,12 @@
           <tbody>
             {% for step in job.report.steps %}
             <tr>
-              <td>
-                {% if step.step == "cmc_sync" %}CMC OneDrive 同步
-                {% elif step.step == "emtc_sync" %}EMTC Google Drive 同步
-                {% elif step.step == "phase1a" %}Phase 1A 识别
-                {% elif step.step == "refresh_odoo_missing" %}刷新 Odoo 缺失报告
-                {% elif step.step == "refresh_pod_compare" %}刷新 POD 对比报告
-                {% elif step.step == "refresh_reports" %}刷新统一报告
-                {% elif step.step == "odoo_push" %}推送 POD 到 Odoo
-                {% else %}{{ step.step }}{% endif %}
-              </td>
+              <td>{{ step_label(step.step) }}</td>
               <td>
                 {% if step.ok %}
-                  <span style="color: var(--success); font-weight: 600;">✓ 成功</span>
+                  <span class="badge badge-success">成功</span>
                 {% else %}
-                  <span style="color: var(--danger); font-weight: 600;">✗ 失败</span>
+                  <span class="badge badge-failed">失败</span>
                 {% endif %}
               </td>
               <td class="mono">{{ step.detail or "-" }}</td>
@@ -245,14 +322,81 @@
   {% endif %}
 
   <section class="section">
-    <div class="section-head">
-      <div>
-        <p class="eyebrow">日志</p>
-        <h2>任务日志输出</h2>
+    <div class="card">
+      <div class="section-head section-head-tight">
+        <div>
+          <p class="eyebrow">下一步</p>
+          <h2>{% if active_job %}任务仍在处理中{% elif effective_status == "failed" %}先排查失败步骤{% elif effective_status == "partial" %}先处理未完成步骤{% elif effective_status == "degraded" %}先查看报告警告{% else %}继续核对业务结果{% endif %}</h2>
+        </div>
+        <div class="header-actions">
+          {% if effective_status == "failed" %}
+            <a class="action-button" href="#technical-details">查看失败详情</a>
+          {% elif effective_status == "partial" %}
+            <a class="action-button" href="#step-status">查看未完成步骤</a>
+            <a class="secondary-button" href="{{ request.url_for('reconcile_page') }}">查看当前对账</a>
+          {% elif effective_status == "degraded" %}
+            <a class="action-button" href="#report-warnings">查看警告</a>
+            <a class="secondary-button" href="{{ request.url_for('reconcile_page') }}">查看当前对账</a>
+          {% elif not active_job %}
+            <a class="action-button" href="{{ request.url_for('reconcile_page') }}">查看总结对账</a>
+          {% endif %}
+          <a class="secondary-button" href="{{ request.url_for('jobs_page') }}">返回任务中心</a>
+        </div>
       </div>
     </div>
-    <div class="card">
-      <pre class="terminal tall-terminal">{{ log_text or "还没有日志输出。" }}</pre>
-    </div>
   </section>
+
+  <section class="section">
+    <details id="technical-details" class="details-card details-card-block" {% if effective_status == "failed" %}open{% endif %}>
+      <summary>技术详情：执行命令、上下文和日志</summary>
+      <div style="padding: 0 20px 20px;">
+        <p class="label">执行上下文</p>
+        {% if job.metadata %}
+          <ul class="compact-list">
+            {% for key, value in job.metadata.items() %}
+              <li>{{ metadata_labels.get(key, key) }}：{{ display_value(value) }}</li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="muted">没有额外执行上下文。</p>
+        {% endif %}
+        <div class="divider"></div>
+        <p class="label">执行命令</p>
+        <pre class="terminal">{{ job.command_display }}</pre>
+        <a class="text-link" href="{{ request.url_for('job_log', job_id=job.job_id) }}">打开完整原始日志</a>
+        <div class="divider"></div>
+        <p class="label">最近日志输出</p>
+        <pre class="terminal tall-terminal">{{ log_text or "还没有日志输出。" }}</pre>
+      </div>
+    </details>
+  </section>
+
+  {% if active_job %}
+  <script>
+    (() => {
+      const toggle = document.getElementById("jobAutoRefreshToggle");
+      let refreshEnabled = true;
+      let timer = null;
+
+      const scheduleRefresh = () => {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => {
+          if (refreshEnabled && !document.hidden) {
+            window.location.reload();
+            return;
+          }
+          scheduleRefresh();
+        }, 5000);
+      };
+
+      toggle?.addEventListener("click", () => {
+        refreshEnabled = !refreshEnabled;
+        toggle.textContent = refreshEnabled ? "暂停自动刷新" : "恢复自动刷新";
+        if (refreshEnabled) scheduleRefresh();
+        else window.clearTimeout(timer);
+      });
+      scheduleRefresh();
+    })();
+  </script>
+  {% endif %}
 {% endblock %}

@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .odoo_missing_report import load_odoo_missing_snapshot
+from .pod_sources import POD_SOURCE_NAME_BY_CARRIER_ID, POD_SOURCE_NAMES
 from .xlsx_utils import build_xlsx_workbook
 
 
@@ -57,13 +58,12 @@ def _count_odoo_orders_with_pod_by_year() -> dict[tuple[str, str], int]:
     if not snapshot:
         return {}
 
-    carrier_map = {24: "EMTC", 25: "CMC"}
     stock_tracking_ids = _load_stock_tracking_pod_picking_ids()
 
     counts: dict[tuple[str, str], int] = defaultdict(int)
     for row in snapshot.get("total_detail_rows") or []:
         cid = row.get("carrier_id")
-        source = carrier_map.get(cid)
+        source = POD_SOURCE_NAME_BY_CARRIER_ID.get(cid)
         if not source:
             continue
         if not _row_has_pod(row, stock_tracking_ids):
@@ -80,12 +80,10 @@ def _count_odoo_orders_by_year() -> dict[tuple[str, str], int]:
     if not snapshot:
         return {}
 
-    carrier_map = {24: "EMTC", 25: "CMC"}
-
     counts: dict[tuple[str, str], int] = defaultdict(int)
     for row in snapshot.get("total_detail_rows") or []:
         cid = row.get("carrier_id")
-        source = carrier_map.get(cid)
+        source = POD_SOURCE_NAME_BY_CARRIER_ID.get(cid)
         if not source:
             continue
         year = _extract_year(row.get("business_datetime"))
@@ -100,7 +98,7 @@ def build_annual_pod_report_data() -> dict:
     odoo_counts = _count_odoo_orders_by_year()
 
     years = sorted(set(y for _, y in {**with_pod_counts, **odoo_counts}.keys()))
-    sources = ["CMC", "EMTC"]
+    sources = list(POD_SOURCE_NAMES)
 
     rows = []
     for year in years:
@@ -121,20 +119,18 @@ def build_annual_pod_report_data() -> dict:
 
 
 def build_monthly_pod_report_data() -> dict:
-    """Build monthly POD coverage report data from Odoo snapshot (CMC + EMTC only)."""
+    """Build monthly POD coverage for every configured POD source."""
     snapshot = load_odoo_missing_snapshot()
     if not snapshot:
         return {"months": [], "carriers": [], "rows": []}
-
-    # Only CMC (25) and EMTC (24)
-    target_carriers = {24: "EMTC", 25: "CMC"}
 
     stock_tracking_ids = _load_stock_tracking_pod_picking_ids()
     grouped = defaultdict(lambda: {"total_orders": 0, "with_pod": 0})
 
     for row in snapshot.get("total_detail_rows") or []:
         cid = row.get("carrier_id")
-        if cid not in target_carriers:
+        carrier = POD_SOURCE_NAME_BY_CARRIER_ID.get(cid)
+        if carrier is None:
             continue
         dt = row.get("business_datetime")
         if not dt:
@@ -142,14 +138,13 @@ def build_monthly_pod_report_data() -> dict:
         month_key = str(dt)[:7] if len(str(dt)) >= 7 else None
         if not month_key:
             continue
-        carrier = target_carriers[cid]
         key = (month_key, carrier)
         grouped[key]["total_orders"] += 1
         if _row_has_pod(row, stock_tracking_ids):
             grouped[key]["with_pod"] += 1
 
     months = sorted(set(m for m, _ in grouped.keys()), reverse=True)
-    carriers = ["CMC", "EMTC"]
+    carriers = list(POD_SOURCE_NAMES)
 
     rows = []
     for month_key in months:

@@ -27,10 +27,10 @@
       </article>
 
       <article class="card stat-card {% if comparison and comparison.missing_count > 0 %}stat-card-alert{% endif %}">
-        <p class="label">当前待推送</p>
+        <p class="label">索引待预检目标</p>
         {% if comparison %}
           <h2>{{ comparison.missing_count }} 条</h2>
-          <p class="muted">基于 {{ comparison.index_fetched_at or "未知时间" }} 的 Odoo 索引。</p>
+          <p class="muted">索引仅作 URL 提示，提交时会实时检查 Odoo 唯一目标。</p>
         {% else %}
           <h2>未刷新</h2>
           <p class="muted">先刷新 Odoo 索引后再推送。</p>
@@ -72,19 +72,29 @@
         {% if comparison %}
           <div class="odoo-push-metrics">
             <div>
-              <span>Payload 就绪</span>
-              <strong>{{ comparison.total_ready }}</strong>
+              <span>输入文档</span>
+              <strong>{{ comparison.input_total }}</strong>
             </div>
             <div>
-              <span>目标 URL 已一致</span>
+              <span>唯一目标</span>
+              <strong>{{ comparison.selected_target_count }}</strong>
+            </div>
+            <div>
+              <span>已合并文档</span>
+              <strong>{{ comparison.coalesced_count }}</strong>
+            </div>
+            <div>
+              <span>索引 URL 命中（待实时确认）</span>
               <strong class="metric-success">{{ comparison.existing_count }}</strong>
             </div>
             <div>
-              <span>待写入/更新</span>
+              <span>索引未命中/待核对</span>
               <strong class="{% if comparison.missing_count > 0 %}metric-warn{% else %}metric-success{% endif %}">{{ comparison.missing_count }}</strong>
             </div>
           </div>
           <p class="odoo-push-meta">
+            门禁后文档：{{ comparison.eligible_document_count }} ·
+            Westerman 门禁：{{ comparison.westerman_pool_gate_status }}{% if comparison.westerman_pool_filtered %}（过滤 {{ comparison.westerman_pool_filtered }} 条）{% endif %} ·
             索引时间：{{ comparison.index_fetched_at or "-" }} · 索引总量：{{ comparison.index_total or 0 }} 条
           </p>
         {% else %}
@@ -114,13 +124,8 @@
             <strong>等待索引结果</strong>
             <p>推送前需要先知道 Odoo 里已有多少 POD。请完成第 1 步。</p>
           </div>
-        {% elif comparison.missing_count <= 0 %}
-          <div class="odoo-push-callout odoo-push-callout-ok">
-            <strong>全部目标 URL 已一致</strong>
-            <p>当前 payload 的目标 POD URL 与 Odoo 完全一致，无需执行写入。</p>
-          </div>
         {% else %}
-          <form method="post" action="{{ request.url_for('action_odoo_push') }}" class="form-grid odoo-push-form" data-submit-state data-pending-notice="推送任务已提交，正在后台执行...">
+          <form id="odooPushForm" method="post" action="{{ request.url_for('action_odoo_push') }}" class="form-grid odoo-push-form">
             <input type="hidden" name="config_path" value="config.local.json">
 
             <label>Payload 路径
@@ -148,12 +153,13 @@
                 <span>跳过目标 URL 已完全一致的记录</span>
               </label>
               <label class="toggle">
-                <input type="checkbox" name="dry_run" value="on">
-                <span>仅预览，不写入</span>
+                <input id="odooPushDryRun" type="checkbox" name="dry_run" value="on" checked>
+                <span>安全预览，不写入（默认）</span>
               </label>
             </div>
 
-            <button type="submit" class="action-button" data-loading-text="提交中...">开始写入/更新 {{ comparison.missing_count }} 条记录</button>
+            <p id="odooPushPreflightStatus" class="field-hint">当前为安全预览；提交前会按当前来源和数量上限重新预检。</p>
+            <button id="odooPushSubmit" type="submit" class="action-button">实时预检并安全预览（不写入）</button>
           </form>
         {% endif %}
 
@@ -175,7 +181,9 @@
       <div>
         <p class="eyebrow">历史记录</p>
         <h2>最近推送</h2>
+        <p class="muted">预览或写入任务完成后，到总结对账确认业务覆盖结果。</p>
       </div>
+      <a class="secondary-button" href="{{ request.url_for('reconcile_page') }}">下一步：查看总结对账</a>
     </div>
 
     {% if history %}
@@ -194,6 +202,9 @@
             {% for rec in history %}
               {% set skipped_count = (rec.tracking_skipped_same or 0) + (rec.skipped_existing or 0) %}
               {% set not_found_count = (rec.tracking_not_found or 0) + (rec.picking_not_found or 0) %}
+              {% set input_total = rec.get("input_total", rec.get("total", 0)) %}
+              {% set eligible_total = rec.get("eligible_document_count", rec.get("total", 0)) %}
+              {% set selected_total = rec.get("selected_target_count", rec.get("total", 0)) %}
               <tr class="file-row">
                 <td>
                   <div class="file-primary">
@@ -204,16 +215,28 @@
                 <td>
                   {% if rec.status == "success" %}
                     <span class="badge badge-success">成功</span>
+                  {% elif rec.status == "partial" %}
+                    <span class="badge badge-warn">部分完成</span>
                   {% elif rec.status == "failed" %}
                     <span class="badge badge-failed">失败</span>
-                  {% else %}
+                  {% elif rec.status == "running" %}
                     <span class="badge badge-running">运行中</span>
+                  {% else %}
+                    <span class="badge badge-muted">{{ rec.status or "未知" }}</span>
                   {% endif %}
                   <p class="file-meta">{{ "预览" if rec.dry_run else "写入" }}</p>
                 </td>
                 <td>
                   <div class="odoo-push-counts">
-                    <span>总数 <strong>{{ rec.total or 0 }}</strong></span>
+                    <span>输入文档 <strong>{{ input_total }}</strong></span>
+                    <span>门禁后文档 <strong>{{ eligible_total }}</strong></span>
+                    <span>唯一目标 <strong>{{ selected_total }}</strong></span>
+                    <span>合并文档 <strong>{{ rec.coalesced_count or 0 }}</strong></span>
+                    <span>实际处理 <strong>{{ rec.attempted or 0 }}</strong></span>
+                    <span>完成 <strong>{{ rec.completed or 0 }}</strong></span>
+                    <span>未完成 <strong>{{ rec.incomplete or 0 }}</strong></span>
+                    <span>可重试 <strong>{{ rec.retryable or 0 }}</strong></span>
+                    <span>需人工 <strong>{{ rec.manual_review or 0 }}</strong></span>
                     <span>推送 <strong>{{ rec.tracking_pushed or 0 }}</strong></span>
                     <span>跳过 <strong>{{ skipped_count }}</strong></span>
                     <span>未找到 <strong>{{ not_found_count }}</strong></span>
@@ -274,6 +297,94 @@
         .catch(() => {
           setStatus("异常", "badge-failed", "异常", "网络错误");
         });
+    })();
+
+    (() => {
+      const form = document.getElementById("odooPushForm");
+      if (!form) return;
+      const dryRun = document.getElementById("odooPushDryRun");
+      const submit = document.getElementById("odooPushSubmit");
+      const status = document.getElementById("odooPushPreflightStatus");
+
+      function setIdleState() {
+        submit.disabled = false;
+        submit.classList.remove("is-loading");
+        if (dryRun.checked) {
+          submit.textContent = "安全预览（提交前重新预检，不写入）";
+          status.textContent = "当前为安全预览；会创建留痕任务，但不会写入 Odoo。";
+        } else {
+          submit.textContent = "预检后确认写入 Odoo";
+          status.textContent = "当前为真实写入模式；提交时会先重新预检，再要求你确认唯一目标和待写数量。";
+        }
+      }
+
+      dryRun.addEventListener("change", setIdleState);
+      setIdleState();
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        submit.disabled = true;
+        submit.classList.add("is-loading");
+        submit.textContent = "正在重新预检...";
+        status.textContent = "正在按当前来源、数量上限、Westerman 门禁和精确 URL 去重规则计算。";
+
+        try {
+          const preflightForm = new FormData(form);
+          preflightForm.delete("confirm_write");
+          const response = await fetch("{{ request.url_for('api_odoo_push_preflight') }}", {
+            method: "POST",
+            body: preflightForm,
+          });
+          const result = await response.json();
+          if (!response.ok || !result.ok) {
+            throw new Error(result.error || `HTTP ${response.status}`);
+          }
+
+          const inputDocuments = Number(result.input_total || 0);
+          const uniqueTargets = Number(result.selected_target_count || 0);
+          const coalesced = Number(result.coalesced_count || 0);
+          const pendingWrites = Number(result.pending_write_count || 0);
+          const selectedForRun = Number(result.selected_for_run_count || 0);
+          const readyToWrite = Number(result.ready_to_push_count || 0);
+          const manualReview = Number(result.manual_review_count || 0);
+          const preflightErrors = Number(result.preflight_error_count || 0);
+          status.textContent = `预检完成：输入 ${inputDocuments} 文档 · 唯一目标 ${uniqueTargets} · 合并 ${coalesced} · URL 待写 ${pendingWrites} · 本次选中 ${selectedForRun} · Odoo 可写 ${readyToWrite} · 需人工 ${manualReview} · 预检错误 ${preflightErrors}。`;
+
+          if (dryRun.checked) {
+            form.submit();
+            return;
+          }
+          if (readyToWrite <= 0) {
+            throw new Error("预检未找到可写入目标，已取消真实写入。");
+          }
+
+          const confirmed = window.confirm(
+            `确认真实写入 Odoo？\n\n` +
+            `输入文档：${inputDocuments}\n` +
+            `唯一目标：${uniqueTargets}\n` +
+            `合并文档：${coalesced}\n` +
+            `URL 待写目标：${pendingWrites}\n` +
+            `本次 Odoo 可写：${readyToWrite}\n\n` +
+            `需人工确认：${manualReview}\n` +
+            `预检错误：${preflightErrors}\n\n` +
+            `这不是预览，确认后会创建真实写入任务。`
+          );
+          if (!confirmed) {
+            setIdleState();
+            return;
+          }
+
+          const confirmation = document.createElement("input");
+          confirmation.type = "hidden";
+          confirmation.name = "confirm_write";
+          confirmation.value = "on";
+          form.appendChild(confirmation);
+          form.submit();
+        } catch (error) {
+          setIdleState();
+          status.textContent = `预检失败：${error.message || error}`;
+        }
+      });
     })();
   </script>
 {% endblock %}

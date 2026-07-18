@@ -1,6 +1,25 @@
 {% extends "base.html" %}
-{% block title %}概览 · POD 同步控制台{% endblock %}
+{% block title %}工作台 · POD 同步控制台{% endblock %}
 {% block content %}
+  <section class="section workflow-home" aria-labelledby="workflowHomeTitle">
+    <div class="workflow-home-copy">
+      <p class="eyebrow">日常工作台</p>
+      <h2 id="workflowHomeTitle">同步、识别、推送和对账，一条流程完成</h2>
+      <p class="lede">先按已保存的流程配置启动任务；任务完成后，可直接检查识别结果、处理 Odoo 推送或查看总结对账。</p>
+      <div class="workflow-home-actions">
+        <a class="action-button" href="{{ request.url_for('sync_page') }}">进入同步工作台</a>
+        <a class="secondary-button" href="{{ request.url_for('reconcile_page') }}">查看总结对账</a>
+      </div>
+    </div>
+    <ol class="workflow-rail" aria-label="POD 日常流程">
+      <li><a href="{{ request.url_for('sync_page') }}"><span>1</span>同步</a></li>
+      <li><a href="{{ request.url_for('phase1a_page') }}"><span>2</span>识别</a></li>
+      <li><a href="{{ request.url_for('odoo_push_page') }}"><span>3</span>推送</a></li>
+      <li><a href="{{ request.url_for('reconcile_page') }}"><span>4</span>对账</a></li>
+      <li><a href="{{ request.url_for('jobs_page') }}"><span>5</span>追踪</a></li>
+    </ol>
+  </section>
+
   <section class="grid grid-cards">
     <article class="card stat-card">
       <p class="label">配置文件</p>
@@ -54,7 +73,7 @@
     </div>
   </section>
 
-  <section class="section two-col">
+  <section class="section overview-activity-grid">
     <div class="card">
       <div class="section-head section-head-tight">
         <div>

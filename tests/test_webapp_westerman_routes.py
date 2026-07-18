@@ -81,8 +81,7 @@ class WestermanWebRouteTests(unittest.TestCase):
         self.assertIn('name="step_{{ step.key }}"', self.scheduler_template)
         self.assertIn('name="pipeline_westerman_limit"', self.scheduler_template)
         self.assertIn('name="pipeline_westerman_workers"', self.scheduler_template)
-        self.assertIn('name="westerman_limit"', self.scheduler_template)
-        self.assertIn('name="westerman_workers"', self.scheduler_template)
+        self.assertIn('name="use_saved_scheduler_config"', self.scheduler_template)
 
     def test_sync_template_exposes_pipeline_pool_and_atomic_controls(self):
         self.assertIn('(\"westerman_sync\", \"Westerman\")', self.template)

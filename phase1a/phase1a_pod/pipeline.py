@@ -256,9 +256,18 @@ def resolve_run_context(config):
     base_output_dir = Path(config["output_dir"])
     if config.get("auto_run_dir"):
         output_root = ensure_directory(base_output_dir)
-        run_name = _next_run_name(output_root)
-        output_dir = ensure_directory(output_root / run_name)
-        return run_name, output_dir
+        # Reserve the run directory atomically.  Two jobs can calculate the
+        # same next sequence before either starts writing; mkdir(exist_ok=False)
+        # turns that race into a retry instead of letting both jobs share one
+        # output directory.
+        while True:
+            run_name = _next_run_name(output_root)
+            output_dir = output_root / run_name
+            try:
+                output_dir.mkdir(exist_ok=False)
+            except FileExistsError:
+                continue
+            return run_name, output_dir
 
     output_dir = ensure_directory(base_output_dir)
     return output_dir.resolve().name, output_dir

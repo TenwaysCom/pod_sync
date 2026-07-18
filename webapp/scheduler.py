@@ -13,6 +13,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from clients.common.sync_integrity import exclusive_file_lock
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "runtime" / "scheduler.json"
 DEFAULT_LOG_PATH = PROJECT_ROOT / "runtime" / "scheduler.log"
@@ -36,13 +38,27 @@ def _parse_iso(value: str | None) -> datetime | None:
 
 
 DEFAULT_STEPS = [
-    {"key": "westerman_sync", "label": "Westerman API 同步", "default": False},
+    {"key": "westerman_sync", "label": "Westerman API 同步", "default": True},
     {"key": "cmc_sync", "label": "CMC OneDrive 同步", "default": True},
     {"key": "emtc_sync", "label": "EMTC Google Drive 同步", "default": True},
     {"key": "phase1a", "label": "Phase 1A 识别", "default": True},
     {"key": "refresh_reports", "label": "刷新统一报告", "default": True},
     {"key": "odoo_push", "label": "推送 POD 到 Odoo", "default": False},
 ]
+
+
+def validate_pipeline_steps(steps: dict | None) -> None:
+    """Reject scheduler step combinations that cannot produce a useful run."""
+
+    supplied_steps = steps if isinstance(steps, dict) else {}
+    effective_steps = {
+        step["key"]: bool(supplied_steps.get(step["key"], step["default"]))
+        for step in DEFAULT_STEPS
+    }
+    if not any(effective_steps.values()):
+        raise ValueError("流水线至少需要启用一个执行步骤。")
+    if effective_steps["odoo_push"] and not effective_steps["phase1a"]:
+        raise ValueError("启用 Odoo 推送时必须同时启用 Phase 1A 识别。")
 
 
 def _default_config():
@@ -94,10 +110,15 @@ class Scheduler:
         job_store,
         config_path: Path | str | None = None,
         log_path: Path | str | None = None,
+        claim_path: Path | str | None = None,
     ):
         self.job_store = job_store
         self.config_path = Path(config_path or DEFAULT_CONFIG_PATH)
         self.log_path = Path(log_path or DEFAULT_LOG_PATH)
+        self.claim_path = Path(
+            claim_path
+            or self.config_path.with_name(f".{self.config_path.name}.claim.lock")
+        )
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -106,6 +127,7 @@ class Scheduler:
     def _ensure_dirs(self):
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.claim_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _log(self, message: str):
         ts = _fmt_iso(_utc_now())
@@ -135,21 +157,23 @@ class Scheduler:
 
     def save_config(self, cfg: dict):
         with self._lock:
-            self._save_config_raw(cfg)
+            with exclusive_file_lock(self.claim_path):
+                self._save_config_raw(cfg)
 
     def update_config(self, patch: dict) -> dict:
         with self._lock:
-            cfg = self.load_config()
-            for key in ("enabled", "interval_hours"):
-                if key in patch:
-                    cfg[key] = patch[key]
-            if "steps" in patch:
-                cfg["steps"] = {**cfg.get("steps", {}), **patch["steps"]}
-            if "pipeline_options" in patch:
-                cfg["pipeline_options"] = {**cfg.get("pipeline_options", {}), **patch["pipeline_options"]}
-            cfg["updated_at"] = _fmt_iso(_utc_now())
-            self._save_config_raw(cfg)
-            return cfg
+            with exclusive_file_lock(self.claim_path):
+                cfg = self.load_config()
+                for key in ("enabled", "interval_hours"):
+                    if key in patch:
+                        cfg[key] = patch[key]
+                if "steps" in patch:
+                    cfg["steps"] = {**cfg.get("steps", {}), **patch["steps"]}
+                if "pipeline_options" in patch:
+                    cfg["pipeline_options"] = {**cfg.get("pipeline_options", {}), **patch["pipeline_options"]}
+                cfg["updated_at"] = _fmt_iso(_utc_now())
+                self._save_config_raw(cfg)
+                return cfg
 
     def compute_next_run(self, cfg: dict) -> datetime | None:
         interval = int(cfg.get("interval_hours", 24))
@@ -170,6 +194,7 @@ class Scheduler:
         opts = cfg.get("pipeline_options", {})
         steps = cfg.get("steps", {})
         try:
+            validate_pipeline_steps(steps)
             label, command, metadata = build_pipeline_command(
                 config_path=opts.get("config_path", "config.local.json"),
                 cmc_incremental=bool(opts.get("cmc_incremental", True)),
@@ -183,7 +208,7 @@ class Scheduler:
                 westerman_workers=int(opts.get("westerman_workers", 3) or 3),
                 skip_cmc=not steps.get("cmc_sync", True),
                 skip_emtc=not steps.get("emtc_sync", True),
-                skip_westerman=not steps.get("westerman_sync", False),
+                skip_westerman=not steps.get("westerman_sync", True),
                 skip_phase1a=not steps.get("phase1a", True),
                 skip_reports=not steps.get("refresh_reports", True),
                 skip_odoo_push=not steps.get("odoo_push", False),
@@ -203,19 +228,41 @@ class Scheduler:
 
     def tick(self):
         with self._lock:
-            cfg = self.load_config()
-            if not cfg.get("enabled", False):
-                return
+            # Every uvicorn worker owns a scheduler thread. Hold one shared
+            # process lock across due-check, job creation, and next-run commit
+            # so only one worker can claim a given scheduled occurrence.
+            with exclusive_file_lock(self.claim_path):
+                cfg = self.load_config()
+                if not cfg.get("enabled", False):
+                    return
 
-            next_run_at = _parse_iso(cfg.get("next_run_at"))
-            if next_run_at is None or next_run_at <= _utc_now():
-                job_id = self._run_pipeline_job()
-                cfg["last_run_at"] = _fmt_iso(_utc_now())
-                cfg["last_run_job_id"] = job_id
-                cfg["last_run_ok"] = None  # Will be reconciled later if needed
-                cfg["next_run_at"] = _fmt_iso(self.compute_next_run(cfg)) if job_id else None
-                self.save_config(cfg)
-                self._log(f"Tick executed. Next run at {cfg['next_run_at']}")
+                next_run_at = _parse_iso(cfg.get("next_run_at"))
+                if next_run_at is None or next_run_at <= _utc_now():
+                    attempt_at = _fmt_iso(_utc_now())
+                    job_id = self._run_pipeline_job()
+                    cfg["last_attempt_at"] = attempt_at
+                    cfg["last_attempt_ok"] = bool(job_id)
+                    if job_id:
+                        cfg["last_run_at"] = attempt_at
+                        cfg["last_run_job_id"] = job_id
+                        cfg["last_run_ok"] = None  # Will be reconciled later if needed
+                        next_run = self.compute_next_run(cfg)
+                    else:
+                        # Command construction failed before a job existed. Keep
+                        # last_run_* truthful and persist a future retry so the
+                        # minute loop cannot hammer the same invalid config.
+                        retry_cfg = dict(cfg)
+                        retry_cfg["last_run_at"] = attempt_at
+                        next_run = self.compute_next_run(retry_cfg)
+                    cfg["next_run_at"] = _fmt_iso(next_run) if next_run else None
+                    self._save_config_raw(cfg)
+                    if job_id:
+                        self._log(f"Tick executed. Next run at {cfg['next_run_at']}")
+                    else:
+                        self._log(
+                            "Tick could not create a job. "
+                            f"Retry scheduled at {cfg['next_run_at']}"
+                        )
 
     def _loop(self):
         self._log("Scheduler loop started")
@@ -235,12 +282,13 @@ class Scheduler:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return False
-            cfg = self.load_config()
-            if cfg.get("enabled", False) and not cfg.get("next_run_at"):
-                nxt = self.compute_next_run(cfg)
-                if nxt:
-                    cfg["next_run_at"] = _fmt_iso(nxt)
-                    self.save_config(cfg)
+            with exclusive_file_lock(self.claim_path):
+                cfg = self.load_config()
+                if cfg.get("enabled", False) and not cfg.get("next_run_at"):
+                    nxt = self.compute_next_run(cfg)
+                    if nxt:
+                        cfg["next_run_at"] = _fmt_iso(nxt)
+                        self._save_config_raw(cfg)
             self._stop_event.clear()
             self._thread = threading.Thread(target=self._loop, daemon=True)
             self._thread.start()
@@ -265,6 +313,8 @@ class Scheduler:
             "last_run_at": cfg.get("last_run_at"),
             "last_run_job_id": cfg.get("last_run_job_id"),
             "last_run_ok": cfg.get("last_run_ok"),
+            "last_attempt_at": cfg.get("last_attempt_at"),
+            "last_attempt_ok": cfg.get("last_attempt_ok"),
             "is_running": self._thread is not None and self._thread.is_alive(),
             "steps": cfg.get("steps", {}),
             "step_definitions": DEFAULT_STEPS,

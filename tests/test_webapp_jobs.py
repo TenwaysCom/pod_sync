@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 import json
 import os
+import subprocess
+import threading
 from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +17,14 @@ from webapp.jobs import JobStore
 
 
 class WebAppJobTests(unittest.TestCase):
+    def _wait_for_finished(self, store, job_id, attempts=80):
+        for _ in range(attempts):
+            current = store.get_job(job_id)
+            if current["status"] not in {"queued", "running"}:
+                return current
+            time.sleep(0.05)
+        self.fail(f"Job {job_id} did not finish in time.")
+
     def test_job_store_runs_subprocess_and_captures_log(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = JobStore(Path(tmpdir) / "jobs")
@@ -36,6 +46,62 @@ class WebAppJobTests(unittest.TestCase):
             self.assertEqual(current["status"], "success")
             self.assertEqual(current["exit_code"], 0)
             self.assertIn("job runner ok", store.read_log(job["job_id"]))
+
+    def test_job_store_captures_indented_pipeline_report_on_partial_exit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = JobStore(Path(tmpdir) / "jobs")
+            report = {
+                "ok": False,
+                "status": "partial",
+                "data_report": {
+                    "westerman_sync": {
+                        "candidate_count": 71,
+                        "downloaded_count": 1,
+                    }
+                },
+            }
+            code = (
+                "import json, sys; "
+                f"print(json.dumps({report!r}, ensure_ascii=False, indent=2)); "
+                "sys.exit(1)"
+            )
+            job = store.start_job(
+                action="pipeline",
+                label="Partial pipeline",
+                command=[sys.executable, "-c", code],
+            )
+
+            for _ in range(50):
+                current = store.get_job(job["job_id"])
+                if current["status"] not in {"queued", "running"}:
+                    break
+                time.sleep(0.1)
+            else:
+                self.fail("Job did not finish in time.")
+
+            self.assertEqual(current["status"], "failed")
+            self.assertEqual(current["exit_code"], 1)
+            self.assertEqual(current["report"], report)
+
+    def test_report_extractor_ignores_earlier_json_and_reads_final_pretty_object(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = JobStore(Path(tmpdir) / "jobs")
+            job_id = "job-pretty-report"
+            expected = {
+                "ok": True,
+                "status": "ok",
+                "steps": [{"name": "sync", "ok": True}],
+            }
+            (store.root_dir / f"{job_id}.log").write_text(
+                "$ pipeline\n"
+                '{"probe": "earlier"}\n'
+                "pipeline output\n"
+                + json.dumps(expected, ensure_ascii=False, indent=2)
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(store._extract_report_from_log(job_id), expected)
 
     def test_read_log_redacts_sensitive_urls_and_tails(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -232,6 +298,183 @@ class WebAppJobTests(unittest.TestCase):
             self.assertTrue(ok)
             self.assertIsNone(error)
             self.assertIsNone(store.get_job(job_id))
+
+    def test_concurrent_pipeline_jobs_attach_their_reported_phase1a_runs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = JobStore(root / "jobs")
+            store._semaphore = threading.Semaphore(2)
+            output_root = root / "phase1a-out"
+            config_path = root / "phase1a.json"
+            config_path.write_text(
+                json.dumps({"output_dir": str(output_root), "auto_run_dir": True}),
+                encoding="utf-8",
+            )
+
+            summaries = {}
+            for run_name, generated_at in (
+                ("run-a", "2026-07-18T10:00:00Z"),
+                ("run-b", "2026-07-18T10:01:00Z"),
+            ):
+                run_dir = output_root / run_name
+                run_dir.mkdir(parents=True)
+                summary_path = run_dir / "phase1a_summary.json"
+                summary_path.write_text(
+                    json.dumps({"generated_at": generated_at, "artifacts": {"owner": run_name}}),
+                    encoding="utf-8",
+                )
+                summaries[run_name] = summary_path
+
+            jobs = {}
+            for run_name, delay in (("run-a", 0.15), ("run-b", 0.05)):
+                summary_path = summaries[run_name]
+                report = {
+                    "ok": True,
+                    "status": "ok",
+                    "data_report": {
+                        "phase1a": {
+                            "run_name": run_name,
+                            "summary_path": str(summary_path),
+                            "output_dir": str(summary_path.parent),
+                            "payload_path": str(summary_path.parent / "odoo_backfill_payload.json"),
+                        }
+                    },
+                }
+                code = (
+                    "import json, time; "
+                    f"time.sleep({delay}); "
+                    f"print(json.dumps({report!r}, ensure_ascii=False, indent=2))"
+                )
+                jobs[run_name] = store.start_job(
+                    action="run_pipeline",
+                    label=run_name,
+                    command=[sys.executable, "-c", code],
+                    metadata={"phase1a_config_path": str(config_path)},
+                )
+
+            completed = {
+                run_name: self._wait_for_finished(store, job["job_id"])
+                for run_name, job in jobs.items()
+            }
+            for run_name, current in completed.items():
+                self.assertEqual(current["status"], "success")
+                self.assertEqual(current["phase1a_run_name"], run_name)
+                self.assertEqual(current["phase1a_summary_path"], str(summaries[run_name].resolve()))
+                self.assertEqual(current["phase1a_artifacts"], {"owner": run_name})
+
+    def test_legacy_pipeline_report_without_summary_path_falls_back_to_latest_run(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = JobStore(root / "jobs")
+            output_root = root / "phase1a-out"
+            run_dir = output_root / "legacy-run"
+            run_dir.mkdir(parents=True)
+            summary_path = run_dir / "phase1a_summary.json"
+            summary_path.write_text(
+                json.dumps({"generated_at": "2026-07-18T10:00:00Z", "artifacts": {"legacy": True}}),
+                encoding="utf-8",
+            )
+            config_path = root / "phase1a.json"
+            config_path.write_text(
+                json.dumps({"output_dir": str(output_root), "auto_run_dir": True}),
+                encoding="utf-8",
+            )
+            legacy_report = {
+                "ok": True,
+                "data_report": {"phase1a": {"run_name": "legacy-run"}},
+            }
+            code = f"import json; print(json.dumps({legacy_report!r}, indent=2))"
+            job = store.start_job(
+                action="run_pipeline",
+                label="legacy",
+                command=[sys.executable, "-c", code],
+                metadata={"phase1a_config_path": str(config_path)},
+            )
+
+            current = self._wait_for_finished(store, job["job_id"])
+
+            self.assertEqual(current["phase1a_run_name"], "legacy-run")
+            self.assertEqual(current["phase1a_summary_path"], str(summary_path.resolve()))
+
+    @unittest.skipIf(os.name == "nt", "fcntl owner locking is POSIX-only")
+    def test_reconcile_does_not_recover_job_while_another_process_owns_it(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = JobStore(Path(tmpdir) / "jobs")
+            job_id = "job-cross-process-owner"
+            payload = {
+                "job_id": job_id,
+                "action": "test",
+                "label": "Owned job",
+                "status": "running",
+                "created_at": "2026-07-18T10:00:00Z",
+                "started_at": "2026-07-18T10:00:01Z",
+                "finished_at": None,
+                "exit_code": None,
+                "pid": 99999999,
+                "metadata": {},
+            }
+            store._write_job(payload)
+            locker_code = (
+                "import fcntl, sys; "
+                "handle=open(sys.argv[1], 'a+'); "
+                "fcntl.flock(handle.fileno(), fcntl.LOCK_EX); "
+                "print('locked', flush=True); sys.stdin.read(1)"
+            )
+            locker = subprocess.Popen(
+                [sys.executable, "-c", locker_code, str(store._owner_lock_path(job_id))],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                self.assertEqual(locker.stdout.readline().strip(), "locked")
+                with mock.patch("webapp.jobs.process_exists", return_value=False):
+                    self.assertEqual(store.get_job(job_id)["status"], "running")
+                    locker.stdin.write("x")
+                    locker.stdin.flush()
+                    locker.wait(timeout=5)
+                    recovered = store.get_job(job_id)
+                self.assertEqual(recovered["status"], "failed")
+                self.assertEqual(recovered["exit_code"], -2)
+            finally:
+                if locker.stdin:
+                    locker.stdin.close()
+                if locker.stdout:
+                    locker.stdout.close()
+                if locker.poll() is None:
+                    locker.terminate()
+                    locker.wait(timeout=5)
+
+    def test_reconcile_rereads_success_written_before_owner_lock_is_acquired(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = JobStore(Path(tmpdir) / "jobs")
+            job_id = "job-owner-finished"
+            stale = {
+                "job_id": job_id,
+                "action": "test",
+                "status": "running",
+                "started_at": "2026-07-18T10:00:01Z",
+                "finished_at": None,
+                "exit_code": None,
+                "pid": 99999999,
+            }
+            store._write_job(stale)
+
+            def acquire_after_owner_finishes(_job_id, *, blocking):
+                completed = dict(stale, status="success", exit_code=0, pid=None)
+                store._write_job(completed)
+                return object()
+
+            with (
+                mock.patch.object(store, "_acquire_owner_lock", side_effect=acquire_after_owner_finishes),
+                mock.patch.object(store, "_release_owner_lock"),
+                mock.patch("webapp.jobs.process_exists", return_value=False) as exists,
+            ):
+                current = store.get_job(job_id)
+
+            self.assertEqual(current["status"], "success")
+            self.assertEqual(current["exit_code"], 0)
+            exists.assert_not_called()
 
 
 if __name__ == "__main__":

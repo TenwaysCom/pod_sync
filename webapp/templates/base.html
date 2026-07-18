@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}?v={{ static_version|default('20260603') }}">
 </head>
 <body>
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
   <header class="topbar">
     <div class="shell topbar-inner">
       <div class="brand-block">
@@ -21,24 +22,31 @@
   </header>
 
   <div class="shell">
-    <nav class="nav" style="justify-content: space-between; align-items: center;">
-      <div style="display: flex; flex-wrap: wrap;">
-      <a class="{% if page_id == 'overview' %}active{% endif %}" href="{{ request.url_for('overview') }}">概览</a>
-      <a class="{% if page_id == 'sync' %}active{% endif %}" href="{{ request.url_for('sync_page') }}">同步</a>
-      <a class="{% if page_id == 'files' %}active{% endif %}" href="{{ request.url_for('files_page') }}">文件</a>
-      <a class="{% if page_id == 'phase1a' %}active{% endif %}" href="{{ request.url_for('phase1a_page') }}">识别</a>
-      <a class="nav-critical {% if page_id == 'reconcile' %}active{% endif %}" href="{{ request.url_for('reconcile_page') }}">总结对账</a>
-      <a class="{% if page_id == 'odoo_push' %}active{% endif %}" href="{{ request.url_for('odoo_push_page') }}">Odoo 推送</a>
-      <a class="{% if page_id == 'scheduler' %}active{% endif %}" href="{{ request.url_for('scheduler_page') }}">定时任务</a>
-      <a class="{% if page_id == 'jobs' %}active{% endif %}" href="{{ request.url_for('jobs_page') }}">任务</a>
-      <a class="{% if page_id == 'report' %}active{% endif %}" href="{{ request.url_for('report_page') }}">详细报告</a>
+    <nav class="nav" aria-label="主导航">
+      <div class="nav-primary">
+        <a class="{% if page_id == 'overview' %}active{% endif %}" {% if page_id == 'overview' %}aria-current="page"{% endif %} href="{{ request.url_for('overview') }}">工作台</a>
+        <a class="{% if page_id == 'phase1a' %}active{% endif %}" {% if page_id == 'phase1a' %}aria-current="page"{% endif %} href="{{ request.url_for('phase1a_page') }}">识别结果</a>
+        <a class="{% if page_id == 'odoo_push' %}active{% endif %}" {% if page_id == 'odoo_push' %}aria-current="page"{% endif %} href="{{ request.url_for('odoo_push_page') }}">Odoo 推送</a>
+        <a class="{% if page_id == 'reconcile' %}active{% endif %}" {% if page_id == 'reconcile' %}aria-current="page"{% endif %} href="{{ request.url_for('reconcile_page') }}">总结对账</a>
+        <a class="{% if page_id == 'jobs' %}active{% endif %}" {% if page_id == 'jobs' %}aria-current="page"{% endif %} href="{{ request.url_for('jobs_page') }}">任务中心</a>
       </div>
-      <form method="post" action="{{ request.url_for('logout') }}" style="display:inline-flex; align-items:center; padding: 10px 14px;">
-        <button type="submit" class="ghost-button" style="min-height: 32px; padding: 6px 12px; font-size: 0.85rem;">退出登录</button>
-      </form>
+      <div class="nav-utility">
+        <details class="nav-tools" {% if page_id in ['sync', 'files', 'scheduler', 'report', 'odoo_missing', 'compare'] %}data-active="true"{% endif %}>
+          <summary>工具</summary>
+          <div class="nav-tools-menu">
+            <a class="{% if page_id == 'sync' %}active{% endif %}" {% if page_id == 'sync' %}aria-current="page"{% endif %} href="{{ request.url_for('sync_page') }}">同步与巡检</a>
+            <a class="{% if page_id == 'files' %}active{% endif %}" {% if page_id == 'files' %}aria-current="page"{% endif %} href="{{ request.url_for('files_page') }}">文件</a>
+            <a class="{% if page_id == 'scheduler' %}active{% endif %}" {% if page_id == 'scheduler' %}aria-current="page"{% endif %} href="{{ request.url_for('scheduler_page') }}">定时任务</a>
+            <a class="{% if page_id in ['report', 'odoo_missing', 'compare'] %}active{% endif %}" {% if page_id in ['report', 'odoo_missing', 'compare'] %}aria-current="page"{% endif %} href="{{ request.url_for('report_page') }}">详细报告</a>
+            <form method="post" action="{{ request.url_for('logout') }}" class="nav-tools-logout">
+              <button type="submit" class="ghost-button">退出</button>
+            </form>
+          </div>
+        </details>
+      </div>
     </nav>
 
-    <div id="flashStack" class="flash-stack">
+    <div id="flashStack" class="flash-stack" role="status" aria-live="polite" aria-atomic="true">
       {% if flash.notice %}
         <div class="flash flash-ok" data-flash kind="notice">
           <span>{{ flash.notice }}</span>
@@ -46,14 +54,16 @@
         </div>
       {% endif %}
       {% if flash.error %}
-        <div class="flash flash-error" data-flash kind="error">
+        <div class="flash flash-error" data-flash data-flash-persistent kind="error" role="alert">
           <span>{{ flash.error }}</span>
           <button type="button" class="flash-close" data-flash-close aria-label="关闭提示">关闭</button>
         </div>
       {% endif %}
     </div>
 
-    {% block content %}{% endblock %}
+    <main id="main-content" tabindex="-1">
+      {% block content %}{% endblock %}
+    </main>
   </div>
 
   <script>
@@ -83,6 +93,24 @@
 
       const flashStack = document.getElementById("flashStack");
 
+      const primaryNav = document.querySelector(".nav-primary");
+      const activePrimaryNav = primaryNav?.querySelector('[aria-current="page"]');
+      if (primaryNav && activePrimaryNav) {
+        const centerActivePrimaryNav = () => {
+          if (primaryNav.scrollWidth <= primaryNav.clientWidth) return;
+          const navRect = primaryNav.getBoundingClientRect();
+          const activeRect = activePrimaryNav.getBoundingClientRect();
+          const activeCenter = (
+            activeRect.left - navRect.left + primaryNav.scrollLeft + (activeRect.width / 2)
+          );
+          primaryNav.scrollLeft = Math.max(0, activeCenter - (navRect.width / 2));
+        };
+        centerActivePrimaryNav();
+        window.addEventListener("load", () => {
+          window.requestAnimationFrame(centerActivePrimaryNav);
+        }, { once: true });
+      }
+
       function dismissFlash(node) {
         if (!node) return;
         node.classList.add("is-hiding");
@@ -99,12 +127,18 @@
         const flash = document.createElement("div");
         flash.className = `flash ${kind === "error" ? "flash-error" : "flash-ok"}`;
         flash.setAttribute("data-flash", "");
+        if (kind === "error") {
+          flash.setAttribute("data-flash-persistent", "");
+          flash.setAttribute("role", "alert");
+        }
         flash.innerHTML = `<span></span><button type="button" class="flash-close" data-flash-close aria-label="关闭提示">关闭</button>`;
         flash.querySelector("span").textContent = message;
         flash.querySelector("[data-flash-close]")?.addEventListener("click", () => dismissFlash(flash));
         flashStack.appendChild(flash);
         flashStack.classList.add("has-flash");
-        window.setTimeout(() => dismissFlash(flash), 3200);
+        if (kind !== "error") {
+          window.setTimeout(() => dismissFlash(flash), 3200);
+        }
         return flash;
       }
 
@@ -121,7 +155,9 @@
       }
       flashes.forEach((flash) => {
         flash.querySelector("[data-flash-close]")?.addEventListener("click", () => dismissFlash(flash));
-        window.setTimeout(() => dismissFlash(flash), 3200);
+        if (!flash.hasAttribute("data-flash-persistent")) {
+          window.setTimeout(() => dismissFlash(flash), 3200);
+        }
       });
 
       document.querySelectorAll("form[data-submit-state]").forEach((form) => {

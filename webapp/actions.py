@@ -397,7 +397,9 @@ def build_pipeline_command(
         "--westerman-workers", str(westerman_workers),
     ]
     if not cmc_incremental:
-        command.append("--full-sync")
+        command.append("--cmc-full-sync")
+    if not emtc_incremental:
+        command.append("--emtc-full-sync")
     if cmc_limit > 0:
         command.extend(["--cmc-limit", str(cmc_limit)])
     if emtc_limit > 0:
@@ -430,7 +432,15 @@ def build_pipeline_command(
         parts.append("报告")
     if not skip_odoo_push:
         parts.append("推送")
-    mode_label = "增量" if cmc_incremental and emtc_incremental else "全量"
+    if cmc_incremental and emtc_incremental:
+        mode_label = "增量"
+    elif not cmc_incremental and not emtc_incremental:
+        mode_label = "全量"
+    else:
+        mode_label = (
+            f"CMC {'增量' if cmc_incremental else '全量'} / "
+            f"EMTC {'增量' if emtc_incremental else '全量'}"
+        )
     label = f"流水线 / {mode_label} / {' + '.join(parts)}" if parts else "流水线 / 无步骤"
     metadata = {
         "category": "pipeline",

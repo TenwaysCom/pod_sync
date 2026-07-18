@@ -4,6 +4,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -1384,6 +1385,29 @@ class Phase1APipelineTests(unittest.TestCase):
             self.assertEqual(summary["run_name"], "202604270002")
             self.assertEqual(Path(summary["output_dir"]).name, "202604270002")
             self.assertEqual(summary["job_id"], "pod-recognition-202604270002")
+
+    def test_auto_run_dir_reservation_is_unique_across_concurrent_jobs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "out"
+            config = {"output_dir": str(output_root), "auto_run_dir": True}
+            fake_now = datetime.fromisoformat("2026-04-27T14:30:00+08:00")
+
+            with mock.patch.object(pipeline, "datetime") as mock_datetime:
+                mock_datetime.now.return_value = fake_now
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    contexts = list(
+                        executor.map(lambda _index: pipeline.resolve_run_context(config), range(8))
+                    )
+
+            run_names = [run_name for run_name, _output_dir in contexts]
+            output_dirs = [output_dir for _run_name, output_dir in contexts]
+            self.assertEqual(len(set(run_names)), 8)
+            self.assertEqual(len(set(output_dirs)), 8)
+            self.assertEqual(
+                sorted(run_names),
+                [f"20260427{sequence:04d}" for sequence in range(1, 9)],
+            )
+            self.assertTrue(all(output_dir.is_dir() for output_dir in output_dirs))
 
     def test_dedupes_duplicate_manifest_records_before_matching(self):
         with tempfile.TemporaryDirectory() as tmpdir:

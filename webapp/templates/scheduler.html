@@ -40,6 +40,12 @@
       </article>
     </div>
 
+    {% if scheduler_status.last_attempt_ok is sameas false %}
+      <div class="flash flash-error scheduler-attempt-warning" role="alert">
+        <span>最近一次调度尝试（{{ scheduler_status.last_attempt_at or "-" }}）未能创建任务；不会按分钟重复触发，将在 {{ scheduler_status.next_run_at or "修复配置后" }} 再试。</span>
+      </div>
+    {% endif %}
+
     <div class="scheduler-step-strip" aria-label="当前定时流水线步骤">
       {% for step in scheduler_status.step_definitions %}
         {% set enabled = scheduler_status.steps.get(step.key, step.default) %}
@@ -67,7 +73,7 @@
           </div>
         </div>
 
-        <form method="post" action="{{ request.url_for('action_update_scheduler') }}" class="form-grid scheduler-form" data-submit-state>
+        <form id="schedulerConfigForm" method="post" action="{{ request.url_for('action_update_scheduler') }}" class="form-grid scheduler-form" data-submit-state>
           <div class="scheduler-form-section">
             <p class="label">基础设置</p>
             <div class="scheduler-form-row">
@@ -125,10 +131,14 @@
             </div>
           </div>
 
-          <input type="hidden" name="pipeline_cmc_limit" value="0">
-          <input type="hidden" name="pipeline_emtc_limit" value="0">
-          <input type="hidden" name="pipeline_cmc_incremental" value="on">
-          <input type="hidden" name="pipeline_emtc_incremental" value="on">
+          <input type="hidden" name="pipeline_cmc_limit" value="{{ scheduler_status.pipeline_options.cmc_limit or 0 }}">
+          <input type="hidden" name="pipeline_emtc_limit" value="{{ scheduler_status.pipeline_options.emtc_limit or 0 }}">
+          {% if scheduler_status.pipeline_options.cmc_incremental %}
+            <input type="hidden" name="pipeline_cmc_incremental" value="on">
+          {% endif %}
+          {% if scheduler_status.pipeline_options.emtc_incremental %}
+            <input type="hidden" name="pipeline_emtc_incremental" value="on">
+          {% endif %}
 
           <button type="submit" class="action-button" data-loading-text="保存中...">保存配置</button>
         </form>
@@ -138,18 +148,10 @@
         <article class="card scheduler-run-card">
           <h3>手动触发</h3>
           <p class="muted">使用当前定时配置立即执行一次流水线，适合保存配置后做验证。</p>
-          <form method="post" action="{{ request.url_for('action_run_pipeline') }}" class="form-grid" data-submit-state data-pending-notice="流水线已提交，正在后台执行...">
-            <input type="hidden" name="config_path" value="{{ scheduler_status.pipeline_options.config_path or 'config.local.json' }}">
-            <input type="hidden" name="phase1a_config_path" value="{{ scheduler_status.pipeline_options.phase1a_config_path or 'phase1a/examples/phase1a_from_sync.example.json' }}">
-            <input type="hidden" name="cmc_incremental" value="on">
-            <input type="hidden" name="emtc_incremental" value="on">
-            <input type="hidden" name="cmc_limit" value="0">
-            <input type="hidden" name="emtc_limit" value="0">
-            <input type="hidden" name="cmc_workers" value="{{ scheduler_status.pipeline_options.cmc_workers or 3 }}">
-            <input type="hidden" name="emtc_workers" value="{{ scheduler_status.pipeline_options.emtc_workers or 3 }}">
-            <input type="hidden" name="westerman_limit" value="{{ scheduler_status.pipeline_options.westerman_limit or 0 }}">
-            <input type="hidden" name="westerman_workers" value="{{ scheduler_status.pipeline_options.westerman_workers or 3 }}">
-            <button type="submit" class="action-button" data-loading-text="提交中...">立即执行一次流水线</button>
+          <form id="schedulerRunForm" method="post" action="{{ request.url_for('action_run_pipeline') }}" class="form-grid" data-submit-state data-pending-notice="流水线已提交，正在后台执行...">
+            <input type="hidden" name="use_saved_scheduler_config" value="on">
+            <button id="schedulerRunButton" type="submit" class="action-button" data-loading-text="提交中...">立即按已保存配置执行</button>
+            <p id="schedulerRunHint" class="field-hint scheduler-run-hint" role="status" aria-live="polite">使用当前已保存配置；修改参数后请先保存。</p>
           </form>
         </article>
 
@@ -177,4 +179,35 @@
       </aside>
     </div>
   </section>
+
+  <script>
+    (() => {
+      const configForm = document.getElementById("schedulerConfigForm");
+      const runButton = document.getElementById("schedulerRunButton");
+      const runHint = document.getElementById("schedulerRunHint");
+      if (!configForm || !runButton || !runHint) return;
+
+      const signature = () => JSON.stringify(
+        Array.from(new FormData(configForm).entries())
+          .filter(([name]) => name !== "csrf_token")
+          .sort(([leftName, leftValue], [rightName, rightValue]) =>
+            `${leftName}:${leftValue}`.localeCompare(`${rightName}:${rightValue}`)
+          )
+      );
+      const savedSignature = signature();
+
+      const updateRunState = () => {
+        const hasUnsavedChanges = signature() !== savedSignature;
+        runButton.disabled = hasUnsavedChanges;
+        runHint.classList.toggle("is-warning", hasUnsavedChanges);
+        runHint.textContent = hasUnsavedChanges
+          ? "检测到未保存修改：请先保存配置，再执行流水线。"
+          : "使用当前已保存配置；修改参数后请先保存。";
+      };
+
+      configForm.addEventListener("input", updateRunState);
+      configForm.addEventListener("change", updateRunState);
+      updateRunState();
+    })();
+  </script>
 {% endblock %}

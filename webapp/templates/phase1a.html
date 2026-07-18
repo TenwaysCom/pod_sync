@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}POD 识别 · POD 同步控制台{% endblock %}
+{% block title %}识别结果 · POD 同步控制台{% endblock %}
 {% block content %}
   <section class="grid grid-cards">
     <article class="card stat-card">
@@ -33,9 +33,9 @@
             <h2>运行 POD 识别</h2>
           </div>
         </div>
-        <form method="post" action="{{ request.url_for('action_phase1a') }}" class="form-grid">
+        <form method="post" action="{{ request.url_for('action_phase1a') }}" class="form-grid" data-submit-state data-pending-notice="POD 识别任务已提交...">
           <label>识别配置文件<input name="config_path" value="{{ ui_defaults.phase1a_config_path }}"></label>
-          <button type="submit">运行 POD 识别</button>
+          <button type="submit" data-loading-text="提交中...">运行 POD 识别</button>
         </form>
         <ul class="compact-list">
           <li>当前默认模式：`仅解析直推`。</li>
@@ -81,6 +81,7 @@
           <div class="header-actions">
             <button class="secondary-button" type="button" data-open-phase-rules>识别规则</button>
             {% if latest_run %}
+              <a class="action-button" href="{{ request.url_for('odoo_push_page') }}">下一步：去 Odoo 推送</a>
               <a class="text-link" href="{{ request.url_for('phase1a_run_detail', run_name=latest_run.run_name) }}?status=">全部文档</a>
               <form method="post" action="{{ request.url_for('delete_phase1a_run_action', run_name=latest_run.run_name) }}" class="inline-action-form" onsubmit="return confirm('确认删除运行 {{ latest_run.run_name }} 吗？')">
                 <input type="hidden" name="redirect_to" value="{{ request.url.path }}">

@@ -14,10 +14,15 @@
       <div class="section-head section-head-tight">
         <div>
           <p class="eyebrow">对账入口</p>
-          <h2 class="reconcile-title-critical">总结对账</h2>
+          <h2>总结对账</h2>
           <p class="lede">按 Odoo 出库业务月份筛选对账范围，POD 文件池保持全量，用来判断当前单据池的 POD 覆盖风险。</p>
         </div>
-        <button class="secondary-button" type="button" data-open-reconcile-note>查看说明</button>
+        <div class="header-actions">
+          <form method="post" action="{{ request.url_for('action_refresh_report') }}" class="inline-action-form" data-submit-state data-pending-notice="对账数据刷新任务已提交...">
+            <button class="secondary-button" type="submit" data-loading-text="提交中...">刷新对账数据</button>
+          </form>
+          <button class="secondary-button" type="button" data-open-reconcile-note>查看说明</button>
+        </div>
       </div>
       <div class="reconcile-toolbar">
         <div class="reconcile-tabs">
@@ -30,7 +35,7 @@
             </a>
           {% endfor %}
         </div>
-        <form class="reconcile-range-form" method="get" action="{{ request.url_for('reconcile_page') }}">
+        <form id="reconcileRangeForm" class="reconcile-range-form" method="get" action="{{ request.url_for('reconcile_page') }}">
           <input type="hidden" name="kind" value="{{ selected_source.slug }}">
           <input type="hidden" name="odoo_state_filter" value="1">
           <div class="reconcile-filter-row">
@@ -64,6 +69,7 @@
               {% endif %}
             </div>
           </div>
+          <p id="reconcileRangeError" class="field-hint is-warning" role="alert" hidden>开始月份不能晚于结束月份。</p>
           <fieldset class="reconcile-state-panel">
             <legend class="reconcile-state-head">
               <span class="reconcile-state-title">包含出库状态</span>
@@ -296,6 +302,10 @@
             <div>
               <p class="eyebrow">明细</p>
               <h2>{{ selected_source.label }} POD 文件在 Odoo 中的命中情况</h2>
+              <p class="muted">本页只做对账，不直接写入 Odoo。需要回写时，请前往 <a class="text-link" href="{{ request.url_for('odoo_push_page') }}">Odoo 推送</a> 完成门禁、合并、预检和留痕任务。</p>
+            </div>
+            <div class="header-actions">
+              <a class="action-button" href="{{ request.url_for('odoo_push_page') }}">打开标准推送页</a>
             </div>
           </div>
           <div class="toolbar filter-toolbar">
@@ -336,11 +346,10 @@
                   <th>Odoo 命中</th>
                   <th>源路径</th>
                   <th>链接</th>
-                  <th>操作</th>
                 </tr>
               </thead>
               <tbody id="podToOdooBody">
-                <tr class="file-row"><td colspan="6" class="empty-cell">展开后加载明细。</td></tr>
+                <tr class="file-row"><td colspan="5" class="empty-cell">展开后加载明细。</td></tr>
               </tbody>
             </table>
           </div>
@@ -411,6 +420,29 @@
     })();
 
     (() => {
+      const form = document.getElementById("reconcileRangeForm");
+      const startMonth = document.getElementById("reconcileStartMonth");
+      const endMonth = document.getElementById("reconcileEndMonth");
+      const error = document.getElementById("reconcileRangeError");
+      if (!form || !startMonth || !endMonth || !error) return;
+
+      const validateRange = () => {
+        const invalid = Boolean(startMonth.value && endMonth.value && startMonth.value > endMonth.value);
+        error.hidden = !invalid;
+        endMonth.setCustomValidity(invalid ? "开始月份不能晚于结束月份。" : "");
+        return !invalid;
+      };
+      startMonth.addEventListener("change", validateRange);
+      endMonth.addEventListener("change", validateRange);
+      form.addEventListener("submit", (event) => {
+        if (!validateRange()) {
+          event.preventDefault();
+          endMonth.reportValidity();
+        }
+      });
+    })();
+
+    (() => {
       const stateInputs = Array.from(document.querySelectorAll(".reconcile-state-tag input"));
       const stateCount = document.querySelector("[data-state-count]");
       const selectAllButton = document.querySelector("[data-state-select-all]");
@@ -459,6 +491,8 @@
       function createPager(config) {
         const state = { page: 1, pageSize: 25, query: "", status: "" };
         let debounceTimer = null;
+        let activeRequest = null;
+        let requestSequence = 0;
 
         function updateSelectOptions(select, options, currentValue) {
           select.innerHTML = options.map((item) => {
@@ -473,6 +507,9 @@
         }
 
         async function loadRows() {
+          const requestId = ++requestSequence;
+          activeRequest?.abort();
+          activeRequest = new AbortController();
           const params = new URLSearchParams({
             kind: config.kind,
             start_month: config.startMonth,
@@ -487,11 +524,15 @@
             (config.odooStates || []).forEach((value) => params.append("odoo_state", value));
           }
           config.meta.textContent = "正在加载…";
-          const response = await fetch(`${config.endpoint}?${params.toString()}`, { cache: "no-store" });
+          const response = await fetch(`${config.endpoint}?${params.toString()}`, {
+            cache: "no-store",
+            signal: activeRequest.signal,
+          });
           if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
           }
           const payload = await response.json();
+          if (requestId !== requestSequence) return;
           updateSelectOptions(config.status, payload.status_options, state.status);
           config.renderRows(payload.items);
           config.meta.textContent = payload.total
@@ -506,7 +547,9 @@
           if (resetPage) state.page = 1;
           if (debounceTimer) window.clearTimeout(debounceTimer);
           debounceTimer = window.setTimeout(() => {
-            loadRows().catch(showLoadError);
+            loadRows().catch((error) => {
+              if (error.name !== "AbortError") showLoadError(error);
+            });
           }, 180);
         }
 
@@ -539,7 +582,9 @@
           scheduleReload(false);
         });
 
-        loadRows().catch(showLoadError);
+        loadRows().catch((error) => {
+          if (error.name !== "AbortError") showLoadError(error);
+        });
       }
 
       function mountPagerOnFirstOpen(config) {
@@ -613,40 +658,6 @@
         },
       });
 
-      async function pushToOdoo(item, btn) {
-        btn.disabled = true;
-        btn.textContent = "推送中...";
-        try {
-          const form = new FormData();
-          form.append("match_key", item.match_key || "");
-          form.append("match_key_type", "{{ selected_source.match_key_type }}");
-          form.append("file_url", item.sample_document?.file_url || "");
-          form.append("local_path", item.sample_document?.local_relative_path || "");
-          form.append("source_name", "{{ selected_source.source_name }}");
-
-          const resp = await fetch("{{ request.url_for('api_reconcile_push_to_odoo') }}", {
-            method: "POST",
-            body: form,
-          });
-          const data = await resp.json();
-          if (data.ok && (data.status === "pushed_tracking" || data.status === "created_tracking")) {
-            btn.textContent = "已推送";
-            btn.style.color = "var(--ok-color)";
-          } else if (data.status === "skipped_same") {
-            btn.textContent = "已有";
-            btn.style.color = "var(--ok-color)";
-          } else {
-            btn.textContent = data.status || "失败";
-            btn.style.color = "var(--error-color)";
-            btn.title = data.error || "";
-          }
-        } catch (err) {
-          btn.textContent = "失败";
-          btn.style.color = "var(--error-color)";
-          btn.title = String(err);
-        }
-      }
-
       mountPagerOnFirstOpen({
         details: document.getElementById("podToOdooDetails"),
         endpoint: "{{ request.url_for('api_reconcile_pod_to_odoo') }}",
@@ -665,17 +676,13 @@
         indicator: document.getElementById("podToOdooIndicator"),
         meta: document.getElementById("podToOdooMeta"),
         body: document.getElementById("podToOdooBody"),
-        colspan: 6,
+        colspan: 5,
         renderRows(items) {
           if (!items.length) {
-            this.body.innerHTML = '<tr class="file-row"><td colspan="6" class="empty-cell">当前筛选下没有明细。</td></tr>';
+            this.body.innerHTML = '<tr class="file-row"><td colspan="5" class="empty-cell">当前筛选下没有明细。</td></tr>';
             return;
           }
-          this.body.innerHTML = items.map((item, idx) => {
-            const canPush = item.compare_status === "found_in_odoo";
-            const btnHtml = canPush
-              ? `<button type="button" class="secondary-button push-to-odoo-btn" style="padding: 4px 10px; font-size: 12px;" data-idx="${idx}">推送</button>`
-              : `<span class="muted" style="font-size: 12px;">-</span>`;
+          this.body.innerHTML = items.map((item) => {
             return `
             <tr class="file-row">
               <td>
@@ -706,15 +713,9 @@
                   return links.join(" · ") || "-";
                 })() : '-'}
               </td>
-              <td>${btnHtml}</td>
             </tr>
           `}).join("");
 
-          // Attach click handlers
-          this.body.querySelectorAll(".push-to-odoo-btn").forEach((btn) => {
-            const idx = Number(btn.dataset.idx);
-            btn.addEventListener("click", () => pushToOdoo(items[idx], btn));
-          });
         },
       });
     </script>

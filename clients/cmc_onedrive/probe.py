@@ -19,6 +19,8 @@ if str(PROJECT_ROOT) not in sys.path:
 from clients.common.sync_integrity import (
     append_manifest_entry,
     build_manifest_entry,
+    load_manifest_skip_index,
+    manifest_entry_is_current,
     normalize_runtime_config,
     resolve_manifest_path,
     safe_relative_path,
@@ -1100,22 +1102,9 @@ def download_and_record_file(
 
 
 def load_skip_index(manifest_path):
-    """基于 manifest 建立增量跳过索引：source_file_id -> (source_modified_time, local_path)"""
-    if not manifest_path.exists():
-        return {}
-    from clients.common.sync_integrity import load_manifest_entries
-    entries = {}
-    try:
-        for entry in load_manifest_entries(manifest_path):
-            file_id = entry.get("source_file_id")
-            if file_id:
-                entries[file_id] = (
-                    entry.get("source_modified_time"),
-                    entry.get("local_path"),
-                )
-    except (json.JSONDecodeError, OSError):
-        return {}
-    return entries
+    """基于 manifest 建立增量跳过索引：source_file_id -> 最新完整记录。"""
+
+    return load_manifest_skip_index(manifest_path)
 
 
 def sync_all_files(session, cfg, download_cfg, headers, timeout, items, explicit_output_dir=None, shared_access=None, workers=1, incremental=False):
@@ -1123,6 +1112,7 @@ def sync_all_files(session, cfg, download_cfg, headers, timeout, items, explicit
     output_dir = resolve_output_dir(explicit_output_dir, download_cfg, cfg)
     manifest_path = resolve_manifest_path("onedrive", cfg, download_cfg, explicit_output_dir=explicit_output_dir)
     skip_index = load_skip_index(manifest_path) if incremental else {}
+    verify_incremental_hash = bool(download_cfg.get("verify_incremental_hash", True))
     summary = {"event": "sync_summary", "source": "onedrive", "downloaded_files": 0, "skipped_files": 0, "failed_files": 0, "downloaded_bytes": 0}
 
     def _download_one(item):
@@ -1172,8 +1162,11 @@ def sync_all_files(session, cfg, download_cfg, headers, timeout, items, explicit
             total_seen += 1
             file_id = item.get("id")
             if incremental and not item.get("_cursor_replayed_changed") and file_id in skip_index:
-                mtime, local_path = skip_index[file_id]
-                if mtime == item.get("modified_time") and local_path and Path(local_path).exists():
+                if manifest_entry_is_current(
+                    skip_index[file_id],
+                    source_modified_time=item.get("modified_time"),
+                    verify_hash=verify_incremental_hash,
+                ):
                     summary["skipped_files"] += 1
                     continue
             try:
@@ -1201,8 +1194,11 @@ def sync_all_files(session, cfg, download_cfg, headers, timeout, items, explicit
                 total_seen += 1
                 file_id = item.get("id")
                 if incremental and not item.get("_cursor_replayed_changed") and file_id in skip_index:
-                    mtime, local_path = skip_index[file_id]
-                    if mtime == item.get("modified_time") and local_path and Path(local_path).exists():
+                    if manifest_entry_is_current(
+                        skip_index[file_id],
+                        source_modified_time=item.get("modified_time"),
+                        verify_hash=verify_incremental_hash,
+                    ):
                         summary["skipped_files"] += 1
                         continue
 

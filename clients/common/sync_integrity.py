@@ -237,6 +237,23 @@ def load_manifest_entries(manifest_path):
     return entries
 
 
+def load_manifest_skip_index(manifest_path):
+    """Return the latest manifest entry for each stable source file id."""
+
+    path = Path(manifest_path)
+    if not path.exists():
+        return {}
+    entries = {}
+    try:
+        for entry in load_manifest_entries(path):
+            file_id = entry.get("source_file_id")
+            if file_id:
+                entries[str(file_id)] = entry
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return entries
+
+
 def verify_manifest_entry(entry, verify_hash=True):
     local_path = Path(entry["local_path"])
     checks = []
@@ -270,3 +287,30 @@ def verify_manifest_entry(entry, verify_hash=True):
         "actual_size": actual_size,
         "actual_sha256": actual_sha256,
     }
+
+
+def manifest_entry_is_current(
+    entry,
+    *,
+    source_modified_time,
+    verify_hash=True,
+):
+    """Validate source version and local bytes before an incremental skip.
+
+    Legacy entries without a recorded local size or SHA-256 are deliberately
+    downloaded once more so the new manifest can establish a trustworthy
+    idempotency record.
+    """
+
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("source_modified_time") != source_modified_time:
+        return False
+    if normalize_size(entry.get("local_size")) is None:
+        return False
+    if verify_hash and not entry.get("sha256"):
+        return False
+    try:
+        return verify_manifest_entry(entry, verify_hash=verify_hash)["status"] == "ok"
+    except (KeyError, OSError, TypeError, ValueError):
+        return False

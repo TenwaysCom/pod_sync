@@ -234,6 +234,32 @@ class WebAppActionTests(unittest.TestCase):
             self.assertTrue(metadata["skip_westerman"])
             self.assertNotIn("Westerman", label)
 
+    def test_build_pipeline_command_preserves_independent_incremental_modes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.local.json"
+            phase1a_path = tmp / "phase1a.json"
+            config_path.write_text("{}", encoding="utf-8")
+            phase1a_path.write_text("{}", encoding="utf-8")
+
+            label, command, metadata = actions.build_pipeline_command(
+                config_path=str(config_path),
+                phase1a_config_path=str(phase1a_path),
+                cmc_incremental=True,
+                emtc_incremental=False,
+                cmc_limit=0,
+                emtc_limit=0,
+                cmc_workers=3,
+                emtc_workers=3,
+            )
+
+            self.assertNotIn("--cmc-full-sync", command)
+            self.assertIn("--emtc-full-sync", command)
+            self.assertNotIn("--full-sync", command)
+            self.assertIn("CMC 增量 / EMTC 全量", label)
+            self.assertTrue(metadata["cmc_incremental"])
+            self.assertFalse(metadata["emtc_incremental"])
+
     def test_pipeline_westerman_failure_is_visible_but_phase1a_continues(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -271,7 +297,12 @@ class WebAppActionTests(unittest.TestCase):
             with (
                 mock.patch.object(pipeline_runner, "PROJECT_ROOT", tmp),
                 mock.patch.object(pipeline_runner, "_run_step", side_effect=fake_run_step),
-                mock.patch.object(pipeline_runner, "_get_latest_phase1a_summary", return_value=None),
+                mock.patch.object(pipeline_runner, "_phase1a_summary_snapshot", return_value={}),
+                mock.patch.object(
+                    pipeline_runner,
+                    "_current_phase1a_result",
+                    return_value=({}, payload_path),
+                ),
                 mock.patch(
                     "webapp.odoo_push.push_payload",
                     return_value={"ok": True, "total": 0},
@@ -288,6 +319,7 @@ class WebAppActionTests(unittest.TestCase):
 
             self.assertEqual(labels, ["Westerman API 同步", "Phase 1A 识别"])
             self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "partial")
             self.assertTrue(result["degraded"])
             self.assertEqual(result["failed_step"], "westerman_sync")
             self.assertEqual(result["soft_failed_steps"], ["westerman_sync"])
@@ -345,7 +377,12 @@ class WebAppActionTests(unittest.TestCase):
                     pipeline_runner, "_run_step", side_effect=fake_run_step
                 ),
                 mock.patch.object(
-                    pipeline_runner, "_get_latest_phase1a_summary", return_value=None
+                    pipeline_runner, "_phase1a_summary_snapshot", return_value={}
+                ),
+                mock.patch.object(
+                    pipeline_runner,
+                    "_current_phase1a_result",
+                    return_value=({}, payload_path),
                 ),
                 mock.patch(
                     "webapp.odoo_push.push_payload",
@@ -362,6 +399,7 @@ class WebAppActionTests(unittest.TestCase):
                 )
 
             self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "partial")
             self.assertTrue(result["degraded"])
             self.assertEqual(result["soft_failed_steps"], ["westerman_sync"])
             self.assertEqual(
@@ -409,7 +447,12 @@ class WebAppActionTests(unittest.TestCase):
             with (
                 mock.patch.object(pipeline_runner, "PROJECT_ROOT", tmp),
                 mock.patch.object(pipeline_runner, "_run_step", side_effect=fake_run_step),
-                mock.patch.object(pipeline_runner, "_get_latest_phase1a_summary", return_value=None),
+                mock.patch.object(pipeline_runner, "_phase1a_summary_snapshot", return_value={}),
+                mock.patch.object(
+                    pipeline_runner,
+                    "_current_phase1a_result",
+                    return_value=({}, payload_path),
+                ),
                 mock.patch("webapp.odoo_push.push_payload", return_value=push_result),
             ):
                 result = pipeline_runner.run_pipeline(
@@ -471,8 +514,13 @@ class WebAppActionTests(unittest.TestCase):
                 ),
                 mock.patch.object(
                     pipeline_runner,
-                    "_get_latest_phase1a_summary",
-                    return_value=phase_summary,
+                    "_phase1a_summary_snapshot",
+                    return_value={},
+                ),
+                mock.patch.object(
+                    pipeline_runner,
+                    "_current_phase1a_result",
+                    return_value=(phase_summary, tmp / "unused-payload.json"),
                 ),
             ):
                 result = pipeline_runner.run_pipeline(
@@ -551,7 +599,12 @@ class WebAppActionTests(unittest.TestCase):
             with (
                 mock.patch.object(pipeline_runner, "PROJECT_ROOT", tmp),
                 mock.patch.object(pipeline_runner, "_run_step", side_effect=fake_run_step),
-                mock.patch.object(pipeline_runner, "_get_latest_phase1a_summary", return_value=None),
+                mock.patch.object(pipeline_runner, "_phase1a_summary_snapshot", return_value={}),
+                mock.patch.object(
+                    pipeline_runner,
+                    "_current_phase1a_result",
+                    return_value=({}, payload_path),
+                ),
                 mock.patch(
                     "webapp.odoo_push.push_payload",
                     return_value={"ok": True, "total": 0},
@@ -639,7 +692,12 @@ class WebAppActionTests(unittest.TestCase):
             with (
                 mock.patch.object(pipeline_runner, "PROJECT_ROOT", tmp),
                 mock.patch.object(pipeline_runner, "_run_step", side_effect=fake_run_step),
-                mock.patch.object(pipeline_runner, "_get_latest_phase1a_summary", return_value=None),
+                mock.patch.object(pipeline_runner, "_phase1a_summary_snapshot", return_value={}),
+                mock.patch.object(
+                    pipeline_runner,
+                    "_current_phase1a_result",
+                    return_value=({}, payload_path),
+                ),
                 mock.patch(
                     "webapp.odoo_push.push_payload",
                     return_value={"ok": True, "total": 0},
@@ -738,6 +796,327 @@ class WebAppActionTests(unittest.TestCase):
 
             self.assertEqual(resolved, (tmp / "downloads" / "pod").resolve())
 
+    def test_pipeline_push_uses_payload_from_current_phase_run_not_stale_latest(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.local.json"
+            phase_path = root / "phase1a.json"
+            output_root = root / "phase1a" / "out"
+            stale_dir = output_root / "999999999999"
+            stale_dir.mkdir(parents=True)
+            stale_payload = stale_dir / "odoo_backfill_payload.json"
+            stale_payload.write_text(json.dumps({"items": []}), encoding="utf-8")
+            (stale_dir / "phase1a_summary.json").write_text(
+                json.dumps({"run_name": "stale"}), encoding="utf-8"
+            )
+            config_path.write_text("{}", encoding="utf-8")
+            phase_path.write_text(
+                json.dumps(
+                    {"output_dir": str(output_root), "auto_run_dir": True}
+                ),
+                encoding="utf-8",
+            )
+
+            current_dir = output_root / "202607180001"
+            current_payload = current_dir / "odoo_backfill_payload.json"
+            current_summary_path = current_dir / "phase1a_summary.json"
+            generated_at = "2026-07-18T01:02:03Z"
+            summary = {
+                "job_id": "pod-recognition-current",
+                "run_name": "202607180001",
+                "generated_at": generated_at,
+                "output_dir": str(current_dir),
+                "artifacts": {
+                    "payload_json": str(current_payload),
+                    "summary_json": str(current_summary_path),
+                },
+            }
+
+            def fake_run_step(label, _command):
+                self.assertEqual(label, "Phase 1A 识别")
+                current_dir.mkdir(parents=True)
+                current_payload.write_text(
+                    json.dumps(
+                        {
+                            "job_id": summary["job_id"],
+                            "generated_at": generated_at,
+                            "items": [],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                current_summary_path.write_text(
+                    json.dumps(summary), encoding="utf-8"
+                )
+                return 0, json.dumps(summary)
+
+            with (
+                mock.patch.object(pipeline_runner, "PROJECT_ROOT", root),
+                mock.patch.object(
+                    pipeline_runner, "_run_step", side_effect=fake_run_step
+                ),
+                mock.patch(
+                    "webapp.odoo_push.push_payload",
+                    return_value={"ok": True, "status": "ok", "total": 0},
+                ) as push_payload,
+            ):
+                result = pipeline_runner.run_pipeline(
+                    config_path=str(config_path),
+                    phase1a_config_path=str(phase_path),
+                    skip_westerman=True,
+                    skip_cmc=True,
+                    skip_emtc=True,
+                    skip_reports=True,
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(
+            push_payload.call_args.kwargs["payload_path"], str(current_payload)
+        )
+        self.assertNotEqual(
+            push_payload.call_args.kwargs["payload_path"], str(stale_payload)
+        )
+        self.assertEqual(
+            result["data_report"]["odoo_push"]["payload_origin"],
+            "current_phase1a_run",
+        )
+        self.assertEqual(
+            result["data_report"]["phase1a"]["summary_path"],
+            str(current_summary_path.resolve()),
+        )
+        self.assertEqual(
+            result["data_report"]["phase1a"]["output_dir"],
+            str(current_dir.resolve()),
+        )
+        self.assertEqual(
+            result["data_report"]["phase1a"]["payload_path"],
+            str(current_payload.resolve()),
+        )
+
+    def test_current_phase_result_falls_back_to_only_changed_summary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "phase1a.json"
+            output_dir = root / "phase1a-output"
+            payload_path = output_dir / "odoo_backfill_payload.json"
+            summary_path = output_dir / "phase1a_summary.json"
+            config_path.write_text(
+                json.dumps({"output_dir": str(output_dir)}), encoding="utf-8"
+            )
+            before = pipeline_runner._phase1a_summary_snapshot(config_path)
+            output_dir.mkdir()
+            payload = {
+                "job_id": "pod-recognition-current",
+                "generated_at": "2026-07-18T01:02:03Z",
+                "items": [],
+            }
+            summary = {
+                "job_id": payload["job_id"],
+                "run_name": output_dir.name,
+                "generated_at": payload["generated_at"],
+                "output_dir": str(output_dir),
+                "artifacts": {
+                    "payload_json": str(payload_path),
+                    "summary_json": str(summary_path),
+                },
+            }
+            payload_path.write_text(json.dumps(payload), encoding="utf-8")
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+            detected_summary, detected_payload = (
+                pipeline_runner._current_phase1a_result(
+                    output="wrapper suppressed child stdout",
+                    config_path=config_path,
+                    before=before,
+                )
+            )
+
+        self.assertEqual(detected_summary["job_id"], payload["job_id"])
+        self.assertEqual(detected_payload, payload_path.resolve())
+
+    def test_current_phase_result_rejects_unchanged_old_summary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "phase1a.json"
+            output_dir = root / "phase1a-output"
+            output_dir.mkdir()
+            payload_path = output_dir / "odoo_backfill_payload.json"
+            summary_path = output_dir / "phase1a_summary.json"
+            config_path.write_text(
+                json.dumps({"output_dir": str(output_dir)}), encoding="utf-8"
+            )
+            payload = {
+                "job_id": "pod-recognition-stale",
+                "generated_at": "2026-07-17T01:02:03Z",
+                "items": [],
+            }
+            summary = {
+                "job_id": payload["job_id"],
+                "run_name": output_dir.name,
+                "generated_at": payload["generated_at"],
+                "output_dir": str(output_dir),
+                "artifacts": {
+                    "payload_json": str(payload_path),
+                    "summary_json": str(summary_path),
+                },
+            }
+            payload_path.write_text(json.dumps(payload), encoding="utf-8")
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            before = pipeline_runner._phase1a_summary_snapshot(config_path)
+
+            with self.assertRaisesRegex(
+                ValueError, "summary was not produced by this run"
+            ):
+                pipeline_runner._current_phase1a_result(
+                    output=json.dumps(summary),
+                    config_path=config_path,
+                    before=before,
+                )
+
+    def test_pipeline_skipped_phase_fails_closed_instead_of_using_stale_payload(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.local.json"
+            phase_path = root / "phase1a.json"
+            stale_payload = (
+                root
+                / "phase1a"
+                / "out"
+                / "999999999999"
+                / "odoo_backfill_payload.json"
+            )
+            stale_payload.parent.mkdir(parents=True)
+            stale_payload.write_text(json.dumps({"items": []}), encoding="utf-8")
+            config_path.write_text("{}", encoding="utf-8")
+            phase_path.write_text("{}", encoding="utf-8")
+
+            with mock.patch("webapp.odoo_push.push_payload") as push_payload:
+                result = pipeline_runner.run_pipeline(
+                    config_path=str(config_path),
+                    phase1a_config_path=str(phase_path),
+                    skip_westerman=True,
+                    skip_cmc=True,
+                    skip_emtc=True,
+                    skip_phase1a=True,
+                    skip_reports=True,
+                )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["failed_step"], "odoo_push_payload")
+        self.assertIn("--odoo-push-payload", result["error"])
+        push_payload.assert_not_called()
+
+    def test_pipeline_allows_explicit_payload_only_when_phase_is_skipped(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.local.json"
+            phase_path = root / "phase1a.json"
+            payload_path = root / "explicit-payload.json"
+            config_path.write_text("{}", encoding="utf-8")
+            phase_path.write_text("{}", encoding="utf-8")
+            payload_path.write_text(json.dumps({"items": []}), encoding="utf-8")
+
+            with mock.patch(
+                "webapp.odoo_push.push_payload",
+                return_value={"ok": True, "status": "ok", "total": 0},
+            ) as push_payload:
+                result = pipeline_runner.run_pipeline(
+                    config_path=str(config_path),
+                    phase1a_config_path=str(phase_path),
+                    skip_westerman=True,
+                    skip_cmc=True,
+                    skip_emtc=True,
+                    skip_phase1a=True,
+                    skip_reports=True,
+                    odoo_push_payload_path=str(payload_path),
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            result["data_report"]["odoo_push"]["payload_origin"], "explicit"
+        )
+        self.assertEqual(
+            push_payload.call_args.kwargs["payload_path"], str(payload_path)
+        )
+
+    def test_partial_push_refreshes_reports_before_pipeline_returns_partial(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.local.json"
+            phase_path = root / "phase1a.json"
+            payload_path = root / "explicit-payload.json"
+            config_path.write_text("{}", encoding="utf-8")
+            phase_path.write_text("{}", encoding="utf-8")
+            payload_path.write_text(json.dumps({"items": []}), encoding="utf-8")
+            push_result = {
+                "ok": False,
+                "status": "partial",
+                "total": 2,
+                "input_total": 3,
+                "eligible_document_count": 3,
+                "selected_target_count": 2,
+                "coalesced_count": 1,
+                "superseded_count": 1,
+                "attempted": 2,
+                "completed": 1,
+                "incomplete": 1,
+                "retryable": 1,
+                "failed": 1,
+            }
+
+            with (
+                mock.patch(
+                    "webapp.odoo_push.push_payload", return_value=push_result
+                ),
+                mock.patch(
+                    "webapp.odoo_pull.fetch_and_save_index",
+                    return_value=mock.Mock(
+                        summary=lambda: {},
+                        shadow_status="",
+                        coverage_status="complete",
+                    ),
+                ),
+                mock.patch(
+                    "webapp.odoo_missing_report.refresh_odoo_missing_snapshot",
+                    return_value={"warnings": [], "shadow_comparison": {}},
+                ),
+                mock.patch(
+                    "webapp.odoo_pod_compare.refresh_pod_odoo_compare_snapshot"
+                ) as compare_mock,
+            ):
+                result = pipeline_runner.run_pipeline(
+                    config_path=str(config_path),
+                    phase1a_config_path=str(phase_path),
+                    skip_westerman=True,
+                    skip_cmc=True,
+                    skip_emtc=True,
+                    skip_phase1a=True,
+                    odoo_push_payload_path=str(payload_path),
+                )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["failed_step"], "odoo_push")
+        self.assertEqual(result["data_report"]["odoo_push"]["status"], "partial")
+        self.assertEqual(result["data_report"]["odoo_push"]["input_total"], 3)
+        self.assertEqual(
+            result["data_report"]["odoo_push"]["selected_target_count"], 2
+        )
+        self.assertEqual(
+            result["data_report"]["odoo_push"]["coalesced_count"], 1
+        )
+        self.assertEqual(result["data_report"]["odoo_push"]["attempted"], 2)
+        self.assertTrue(
+            next(
+                step
+                for step in result["steps"]
+                if step["step"] == "refresh_odoo_pod_index"
+            )["ok"]
+        )
+        compare_mock.assert_called_once()
+
     def test_report_only_pipeline_fails_and_skips_dependent_compare_on_missing_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.local.json"
@@ -832,7 +1211,12 @@ class WebAppActionTests(unittest.TestCase):
             with (
                 mock.patch.object(pipeline_runner, "_run_step", return_value=(0, "")),
                 mock.patch.object(
-                    pipeline_runner, "_get_latest_phase1a_summary", return_value=None
+                    pipeline_runner, "_phase1a_summary_snapshot", return_value={}
+                ),
+                mock.patch.object(
+                    pipeline_runner,
+                    "_current_phase1a_result",
+                    return_value=({}, root / "unused-payload.json"),
                 ),
                 mock.patch(
                     "webapp.odoo_pull.fetch_and_save_index",

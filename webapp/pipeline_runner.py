@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -116,17 +117,134 @@ def _parse_last_json_object(output: str) -> dict | None:
     return result
 
 
-def _get_latest_phase1a_summary() -> dict | None:
-    summary_paths = sorted(
-        (PROJECT_ROOT / "phase1a" / "out").glob("*/phase1a_summary.json"),
-        reverse=True,
+def _resolve_phase1a_output_root(config_path: Path) -> tuple[Path, bool]:
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    output_dir = config.get("output_dir")
+    if not output_dir:
+        raise ValueError("Phase 1A config is missing output_dir")
+    root = Path(str(output_dir))
+    if not root.is_absolute():
+        root = config_path.parent / root
+    return root.resolve(), bool(config.get("auto_run_dir"))
+
+
+def _phase1a_summary_snapshot(
+    config_path: Path,
+) -> dict[Path, tuple[int, int, str]]:
+    """Capture only summaries that the configured Phase run can overwrite."""
+
+    output_root, auto_run_dir = _resolve_phase1a_output_root(config_path)
+    paths = (
+        output_root.glob("*/phase1a_summary.json")
+        if auto_run_dir
+        else [output_root / "phase1a_summary.json"]
     )
-    if not summary_paths:
-        return None
+    snapshot: dict[Path, tuple[int, int, str]] = {}
+    for path in paths:
+        try:
+            stat = path.stat()
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            continue
+        snapshot[path.resolve()] = (stat.st_mtime_ns, stat.st_size, digest)
+    return snapshot
+
+
+def _validate_phase1a_payload(
+    payload_path: str | Path,
+    *,
+    summary: dict | None = None,
+) -> Path:
+    candidate = Path(payload_path)
+    if not candidate.is_absolute():
+        candidate = PROJECT_ROOT / candidate
+    candidate = candidate.resolve()
+    if not candidate.is_file():
+        raise ValueError(f"Phase 1A payload does not exist: {candidate}")
     try:
-        return json.loads(summary_paths[0].read_text(encoding="utf-8"))
-    except Exception:
-        return None
+        payload = json.loads(candidate.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Phase 1A payload is not valid JSON: {candidate}") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+        raise ValueError(f"Phase 1A payload has no items list: {candidate}")
+
+    if summary is not None:
+        output_dir = Path(str(summary.get("output_dir") or "")).resolve()
+        artifacts = summary.get("artifacts")
+        artifact_path = (
+            artifacts.get("payload_json") if isinstance(artifacts, dict) else None
+        )
+        if not artifact_path or Path(str(artifact_path)).resolve() != candidate:
+            raise ValueError("Phase 1A summary payload artifact does not match")
+        if candidate.parent != output_dir:
+            raise ValueError("Phase 1A payload is outside the reported output_dir")
+        for key in ("job_id", "generated_at"):
+            expected = summary.get(key)
+            if expected and payload.get(key) != expected:
+                raise ValueError(f"Phase 1A payload {key} does not match this run")
+    return candidate
+
+
+def _current_phase1a_result(
+    *,
+    output: str,
+    config_path: Path,
+    before: dict[Path, tuple[int, int, str]],
+) -> tuple[dict, Path]:
+    """Resolve the summary/payload produced by this exact Phase subprocess.
+
+    The subprocess JSON is authoritative. A changed-summary fallback exists for
+    wrappers that suppress stdout, but a pre-existing global latest artifact is
+    never accepted.
+    """
+
+    output_root, auto_run_dir = _resolve_phase1a_output_root(config_path)
+    summary = _parse_last_json_object(output)
+    summary_path: Path | None = None
+    if isinstance(summary, dict):
+        artifacts = summary.get("artifacts")
+        reported_summary = (
+            artifacts.get("summary_json") if isinstance(artifacts, dict) else None
+        )
+        if reported_summary:
+            summary_path = Path(str(reported_summary)).resolve()
+    if summary_path is None:
+        after = _phase1a_summary_snapshot(config_path)
+        changed = [
+            path for path, signature in after.items() if before.get(path) != signature
+        ]
+        if len(changed) != 1:
+            raise ValueError(
+                "cannot identify exactly one Phase 1A summary created by this run"
+            )
+        summary_path = changed[0]
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("current Phase 1A summary is unreadable") from exc
+
+    try:
+        stat = summary_path.stat()
+        digest = hashlib.sha256(summary_path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise ValueError("current Phase 1A summary file is missing") from exc
+    if before.get(summary_path) == (stat.st_mtime_ns, stat.st_size, digest):
+        raise ValueError("Phase 1A summary was not produced by this run")
+
+    reported_output = Path(str(summary.get("output_dir") or "")).resolve()
+    if summary_path.parent != reported_output:
+        raise ValueError("Phase 1A summary is outside its reported output_dir")
+    if auto_run_dir:
+        if reported_output.parent != output_root:
+            raise ValueError("Phase 1A summary is outside the configured output root")
+    elif reported_output != output_root:
+        raise ValueError("Phase 1A summary does not match configured output_dir")
+
+    artifacts = summary.get("artifacts")
+    payload_path = artifacts.get("payload_json") if isinstance(artifacts, dict) else None
+    if not payload_path:
+        raise ValueError("current Phase 1A summary has no payload_json artifact")
+    return summary, _validate_phase1a_payload(payload_path, summary=summary)
 
 
 def _westerman_is_opted_in(config_path: Path) -> bool:
@@ -160,6 +278,7 @@ def run_pipeline(
     skip_reports: bool = False,
     skip_odoo_push: bool = False,
     odoo_push_limit: int = 0,
+    odoo_push_payload_path: str | None = None,
 ) -> dict:
     resolved_sync_config = resolve_project_path(config_path, DEFAULT_SYNC_CONFIG_REL)
     resolved_phase1a_config = resolve_project_path(
@@ -176,6 +295,41 @@ def run_pipeline(
     warnings: list[dict] = []
     excluded_push_source_types = {"westerman_api"} if skip_westerman else set()
     overall_start = time.time()
+    current_phase1a_payload: Path | None = None
+
+    if not skip_odoo_push and skip_phase1a and not odoo_push_payload_path:
+        return {
+            "ok": False,
+            "status": "failed",
+            "degraded": False,
+            "failed_step": "odoo_push_payload",
+            "soft_failed_steps": [],
+            "error": (
+                "Odoo push requires the payload produced by this Pipeline run; "
+                "when Phase 1A is skipped, pass --odoo-push-payload explicitly"
+            ),
+            "steps": [],
+            "data_report": {},
+            "elapsed_seconds": 0.0,
+        }
+    if (
+        not skip_odoo_push
+        and not skip_phase1a
+        and odoo_push_payload_path
+    ):
+        return {
+            "ok": False,
+            "status": "failed",
+            "degraded": False,
+            "failed_step": "odoo_push_payload",
+            "soft_failed_steps": [],
+            "error": (
+                "--odoo-push-payload is only valid together with --skip-phase1a"
+            ),
+            "steps": [],
+            "data_report": {},
+            "elapsed_seconds": 0.0,
+        }
 
     def record(step: str, ok: bool, detail: str = ""):
         steps.append({"step": step, "ok": ok, "detail": detail})
@@ -318,14 +472,41 @@ def run_pipeline(
 
     # Step 4: Phase 1A
     if not skip_phase1a:
+        try:
+            phase1a_before = _phase1a_summary_snapshot(resolved_phase1a_config)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "status": "failed",
+                "failed_step": "phase1a",
+                "degraded": bool(soft_failed_steps),
+                "soft_failed_steps": soft_failed_steps,
+                "error": f"cannot snapshot Phase 1A output: {exc}",
+                "steps": steps,
+                "data_report": data_report,
+                "elapsed_seconds": round(time.time() - overall_start, 1),
+            }
         cmd = [
             sys.executable,
             str(PROJECT_ROOT / "phase1a" / "run_phase1a.py"),
             "--config", str(resolved_phase1a_config),
         ]
-        rc, _ = _run_step("Phase 1A 识别", cmd)
-        phase1a_summary = _get_latest_phase1a_summary()
+        rc, phase1a_output = _run_step("Phase 1A 识别", cmd)
+        phase1a_summary = None
+        phase1a_payload_error = None
+        if rc == 0:
+            try:
+                phase1a_summary, current_phase1a_payload = _current_phase1a_result(
+                    output=phase1a_output,
+                    config_path=resolved_phase1a_config,
+                    before=phase1a_before,
+                )
+            except Exception as exc:
+                phase1a_payload_error = str(exc)
         if phase1a_summary:
+            phase1a_output_dir = Path(
+                str(phase1a_summary.get("output_dir") or current_phase1a_payload.parent)
+            ).resolve()
             phase1a_report = {
                 "document_count": phase1a_summary.get("document_count", 0),
                 "ready_document_count": phase1a_summary.get("ready_document_count", 0),
@@ -334,6 +515,12 @@ def run_pipeline(
                 "matched_document_count": phase1a_summary.get("matched_document_count", 0),
                 "unmatched_document_count": phase1a_summary.get("unmatched_document_count", 0),
                 "run_name": phase1a_summary.get("run_name", ""),
+                # Bind the Job report to this exact Phase subprocess.  The Job
+                # UI must not rediscover the globally latest run later because
+                # another concurrent pipeline may have finished in between.
+                "summary_path": str(phase1a_output_dir / "phase1a_summary.json"),
+                "output_dir": str(phase1a_output_dir),
+                "payload_path": str(current_phase1a_payload.resolve()),
             }
             westerman_gate = phase1a_summary.get("westerman_source_gate")
             if isinstance(westerman_gate, dict):
@@ -368,9 +555,23 @@ def run_pipeline(
         if rc != 0:
             return {
                 "ok": False,
+                "status": "failed",
                 "failed_step": "phase1a",
                 "degraded": bool(soft_failed_steps),
                 "soft_failed_steps": soft_failed_steps,
+                "steps": steps,
+                "data_report": data_report,
+                "elapsed_seconds": round(time.time() - overall_start, 1),
+            }
+        if phase1a_payload_error:
+            record("phase1a_payload", False, phase1a_payload_error)
+            return {
+                "ok": False,
+                "status": "failed",
+                "failed_step": "phase1a_payload",
+                "degraded": bool(soft_failed_steps),
+                "soft_failed_steps": soft_failed_steps,
+                "error": phase1a_payload_error,
                 "steps": steps,
                 "data_report": data_report,
                 "elapsed_seconds": round(time.time() - overall_start, 1),
@@ -381,27 +582,74 @@ def run_pipeline(
         print("\n" + "=" * 60)
         print("STEP: 推送 POD 链接到 Odoo")
         print("=" * 60)
-        payload_dir = PROJECT_ROOT / "phase1a" / "out"
-        payload_files = sorted(payload_dir.glob("*/odoo_backfill_payload.json"), reverse=True)
-        if not payload_files:
-            print("[SKIP] 未找到 odoo_backfill_payload.json，跳过推送")
-            record("odoo_push", True, "no_payload_found")
-            data_report["odoo_push"] = {"status": "skipped", "reason": "no_payload_found"}
+        try:
+            if skip_phase1a:
+                selected_payload = _validate_phase1a_payload(
+                    odoo_push_payload_path or ""
+                )
+                payload_origin = "explicit"
+            elif current_phase1a_payload is not None:
+                selected_payload = current_phase1a_payload
+                payload_origin = "current_phase1a_run"
+            else:
+                raise ValueError("current Phase 1A run did not produce a payload")
+        except Exception as exc:
+            err = str(exc)
+            print(f"[FAILED] 无法绑定本轮推送 payload: {err}")
+            record("odoo_push", False, err)
+            data_report["odoo_push"] = {
+                "status": "failed",
+                "payload_origin": "unresolved",
+                "error": err,
+            }
+            return {
+                "ok": False,
+                "status": "failed",
+                "failed_step": "odoo_push_payload",
+                "degraded": bool(soft_failed_steps),
+                "soft_failed_steps": soft_failed_steps,
+                "error": err,
+                "steps": steps,
+                "data_report": data_report,
+                "elapsed_seconds": round(time.time() - overall_start, 1),
+            }
         else:
-            latest_payload = str(payload_files[0])
-            print(f"Using payload: {latest_payload}")
+            selected_payload_str = str(selected_payload)
+            print(
+                f"Using payload ({payload_origin}): {selected_payload_str}"
+            )
             try:
                 from webapp.odoo_push import push_payload
                 result = push_payload(
                     config_path=config_path,
-                    payload_path=latest_payload,
+                    payload_path=selected_payload_str,
                     dry_run=False,
                     limit=odoo_push_limit,
                     excluded_source_types=excluded_push_source_types or None,
                 )
-                if result.get("ok"):
+                push_status = result.get("status") or (
+                    "ok" if result.get("ok") else "failed"
+                )
+                if push_status in {"ok", "partial"}:
                     data_report["odoo_push"] = {
+                        "status": push_status,
+                        "payload_path": selected_payload_str,
+                        "payload_origin": payload_origin,
                         "total": result.get("total", 0),
+                        "input_total": result.get("input_total", result.get("total", 0)),
+                        "eligible_document_count": result.get(
+                            "eligible_document_count", result.get("input_total", 0)
+                        ),
+                        "selected_target_count": result.get(
+                            "selected_target_count", result.get("total", 0)
+                        ),
+                        "coalesced_count": result.get("coalesced_count", 0),
+                        "superseded_count": result.get("superseded_count", 0),
+                        "attempted": result.get("attempted", result.get("total", 0)),
+                        "completed": result.get("completed", 0),
+                        "incomplete": result.get("incomplete", 0),
+                        "retryable": result.get("retryable", 0),
+                        "manual_review": result.get("manual_review", 0),
                         "tracking_pushed": result.get("tracking_pushed", 0),
                         "tracking_skipped_same": result.get("tracking_skipped_same", 0),
                         "tracking_not_found": result.get("tracking_not_found", 0),
@@ -409,6 +657,10 @@ def run_pipeline(
                         "picking_skipped_same": result.get("picking_skipped_same", 0),
                         "picking_not_found": result.get("picking_not_found", 0),
                         "skipped_existing": result.get("skipped_existing", 0),
+                        "source_excluded": result.get("source_excluded", 0),
+                        "ambiguous": result.get("ambiguous", 0),
+                        "needs_review": result.get("needs_review", 0),
+                        "missing_required": result.get("missing_required", 0),
                         "failed": result.get("failed", 0),
                         "westerman_pool_gate_status": result.get(
                             "westerman_pool_gate_status", "not_applicable"
@@ -430,9 +682,15 @@ def run_pipeline(
                         ),
                         "by_source": result.get("by_source", {}),
                     }
-                    detail = f"total={result.get('total',0)}, pushed={result.get('tracking_pushed',0)+result.get('picking_pushed',0)}, skipped={result.get('skipped_existing',0)+result.get('tracking_skipped_same',0)+result.get('picking_skipped_same',0)}, not_found={result.get('tracking_not_found',0)+result.get('picking_not_found',0)}, failed={result.get('failed',0)}"
-                    print(f"[OK] 推送完成: {detail}")
-                    record("odoo_push", True, detail)
+                    detail = f"status={push_status}, input_documents={result.get('input_total',result.get('total',0))}, selected_targets={result.get('selected_target_count',result.get('total',0))}, coalesced={result.get('coalesced_count',0)}, attempted={result.get('attempted',result.get('total',0))}, completed={result.get('completed',0)}, incomplete={result.get('incomplete',0)}, retryable={result.get('retryable',0)}, pushed={result.get('tracking_pushed',0)+result.get('picking_pushed',0)}, skipped={result.get('skipped_existing',0)+result.get('tracking_skipped_same',0)+result.get('picking_skipped_same',0)}, not_found={result.get('tracking_not_found',0)+result.get('picking_not_found',0)}, failed={result.get('failed',0)}"
+                    if push_status == "ok":
+                        print(f"[OK] 推送完成: {detail}")
+                        record("odoo_push", True, detail)
+                    else:
+                        print(f"[PARTIAL] 推送部分完成，将继续刷新报告: {detail}")
+                        record("odoo_push", False, detail)
+                        if "odoo_push" not in soft_failed_steps:
+                            soft_failed_steps.append("odoo_push")
                     westerman_gate_status = result.get(
                         "westerman_pool_gate_status", "not_applicable"
                     )
@@ -443,11 +701,41 @@ def run_pipeline(
                     ):
                         soft_failed_steps.append("westerman_pool_gate")
                 else:
-                    err = result.get("error", "unknown")
+                    data_report["odoo_push"] = {
+                        "status": "failed",
+                        "payload_path": selected_payload_str,
+                        "payload_origin": payload_origin,
+                        "total": result.get("total", 0),
+                        "input_total": result.get("input_total", result.get("total", 0)),
+                        "eligible_document_count": result.get(
+                            "eligible_document_count", result.get("input_total", 0)
+                        ),
+                        "selected_target_count": result.get(
+                            "selected_target_count", result.get("total", 0)
+                        ),
+                        "coalesced_count": result.get("coalesced_count", 0),
+                        "superseded_count": result.get("superseded_count", 0),
+                        "attempted": result.get("attempted", result.get("total", 0)),
+                        "completed": result.get("completed", 0),
+                        "incomplete": result.get("incomplete", 0),
+                        "retryable": result.get("retryable", 0),
+                        "manual_review": result.get("manual_review", 0),
+                        "ambiguous": result.get("ambiguous", 0),
+                        "needs_review": result.get("needs_review", 0),
+                        "missing_required": result.get("missing_required", 0),
+                        "failed": result.get("failed", 0),
+                        "by_source": result.get("by_source", {}),
+                    }
+                    err = result.get("error") or (
+                        f"all selected POD items remain incomplete "
+                        f"(incomplete={result.get('incomplete', 0)}, "
+                        f"retryable={result.get('retryable', 0)})"
+                    )
                     print(f"[FAILED] 推送失败: {err}")
                     record("odoo_push", False, err)
                     return {
                         "ok": False,
+                        "status": "failed",
                         "failed_step": "odoo_push",
                         "degraded": bool(soft_failed_steps),
                         "soft_failed_steps": soft_failed_steps,
@@ -461,6 +749,7 @@ def run_pipeline(
                 record("odoo_push", False, str(exc))
                 return {
                     "ok": False,
+                    "status": "failed",
                     "failed_step": "odoo_push",
                     "degraded": bool(soft_failed_steps),
                     "soft_failed_steps": soft_failed_steps,
@@ -579,6 +868,7 @@ def run_pipeline(
     if soft_failed_steps:
         return {
             "ok": False,
+            "status": "partial",
             "degraded": True,
             "failed_step": soft_failed_steps[0],
             "soft_failed_steps": soft_failed_steps,
@@ -596,6 +886,7 @@ def run_pipeline(
     if warnings and not successful_business_step:
         return {
             "ok": False,
+            "status": "failed",
             "degraded": True,
             "failed_step": warnings[0]["step"],
             "soft_failed_steps": [],
@@ -606,6 +897,7 @@ def run_pipeline(
         }
     return {
         "ok": True,
+        "status": "ok",
         "degraded": bool(warnings),
         "soft_failed_steps": [],
         "warnings": warnings,
@@ -620,6 +912,16 @@ def main():
     parser.add_argument("--config", default="config.local.json", help="Path to sync config JSON")
     parser.add_argument("--phase1a-config", default=None, help="Path to Phase 1A config JSON")
     parser.add_argument("--full-sync", action="store_true", help="Disable incremental mode (full sync)")
+    parser.add_argument(
+        "--cmc-full-sync",
+        action="store_true",
+        help="Disable incremental mode for CMC only",
+    )
+    parser.add_argument(
+        "--emtc-full-sync",
+        action="store_true",
+        help="Disable incremental mode for EMTC only",
+    )
     parser.add_argument("--cmc-limit", type=int, default=0, help="CMC download limit (0=unlimited)")
     parser.add_argument("--emtc-limit", type=int, default=0, help="EMTC download limit (0=unlimited)")
     parser.add_argument("--cmc-workers", type=int, default=3, help="CMC concurrent workers")
@@ -638,12 +940,20 @@ def main():
     parser.add_argument("--skip-reports", action="store_true")
     parser.add_argument("--skip-odoo-push", action="store_true", help="Skip pushing POD links to Odoo")
     parser.add_argument("--odoo-push-limit", type=int, default=0, help="Max items to push to Odoo (0=unlimited)")
+    parser.add_argument(
+        "--odoo-push-payload",
+        default=None,
+        help=(
+            "Explicit Phase 1A payload to reuse; only valid with "
+            "--skip-phase1a"
+        ),
+    )
     args = parser.parse_args()
 
     result = run_pipeline(
         config_path=args.config,
-        cmc_incremental=not args.full_sync,
-        emtc_incremental=not args.full_sync,
+        cmc_incremental=not (args.full_sync or args.cmc_full_sync),
+        emtc_incremental=not (args.full_sync or args.emtc_full_sync),
         phase1a_config_path=args.phase1a_config,
         cmc_limit=args.cmc_limit,
         emtc_limit=args.emtc_limit,
@@ -658,6 +968,7 @@ def main():
         skip_reports=args.skip_reports,
         skip_odoo_push=args.skip_odoo_push,
         odoo_push_limit=args.odoo_push_limit,
+        odoo_push_payload_path=args.odoo_push_payload,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     sys.exit(0 if result["ok"] else 1)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import sqlite3
 from collections import Counter, defaultdict
 from datetime import datetime
 from functools import lru_cache
@@ -16,6 +17,7 @@ from .xlsx_utils import build_xlsx_workbook
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CONFIG_PATH = PROJECT_ROOT / "config.local.json"
 POD_INDEX_PATH = PROJECT_ROOT / "runtime" / "odoo_push" / "odoo_pod_index.json"
 
 RECONCILE_SOURCE_CONFIGS = {
@@ -170,7 +172,8 @@ def _dedupe_pod_index_entries(entries):
     return deduped
 
 
-def _load_pod_index_by_key(config):
+def _load_pod_index_by_key(config, *, config_path: str | Path | None = None):
+    config_path = Path(config_path or CONFIG_PATH)
     try:
         from .odoo_reconcile_cache import (
             load_cached_pod_state,
@@ -178,42 +181,46 @@ def _load_pod_index_by_key(config):
             resolve_read_backend,
         )
 
-        full_cfg = load_config("config.local.json")
+        full_cfg = load_config(str(config_path))
         if resolve_read_backend(full_cfg) == "xmlrpc":
-            cache_state = load_cached_pod_state(full_cfg=full_cfg)
-            entries_by_key = defaultdict(list)
-            for row in cache_state.get("rows") or []:
-                for source_key in _pod_index_key_sources(config):
-                    raw_key = (
-                        row.get("tracking_number")
-                        if source_key == "by_tracking_number"
-                        else row.get("picking_name")
-                    )
-                    normalized_key = _normalize_match_key(raw_key, config["match_key_type"])
-                    if not normalized_key:
-                        continue
-                    entries_by_key[normalized_key].append(
-                        {
-                            "tracking_number": row.get("tracking_number"),
-                            "picking_name": row.get("picking_name"),
-                            "pod_link": row.get("pod_link"),
-                            "index_key": raw_key,
-                            "index_source": source_key,
-                        }
-                    )
-            return (
-                {
-                    key: _dedupe_pod_index_entries(entries)
-                    for key, entries in entries_by_key.items()
-                },
-                {
-                    "fetched_at": cache_state.get("last_success_at"),
-                    "updated_at": cache_state.get("last_success_at"),
-                    "total_loaded": len(cache_state.get("rows") or []),
-                    "cache_generation": cache_state.get("generation"),
-                },
+            cache_state = load_cached_pod_state(
+                str(config_path),
+                full_cfg=full_cfg,
             )
-    except (OSError, ValueError, RuntimeError, json.JSONDecodeError):
+            if cache_state.get("available"):
+                entries_by_key = defaultdict(list)
+                for row in cache_state.get("rows") or []:
+                    for source_key in _pod_index_key_sources(config):
+                        raw_key = (
+                            row.get("tracking_number")
+                            if source_key == "by_tracking_number"
+                            else row.get("picking_name")
+                        )
+                        normalized_key = _normalize_match_key(raw_key, config["match_key_type"])
+                        if not normalized_key:
+                            continue
+                        entries_by_key[normalized_key].append(
+                            {
+                                "tracking_number": row.get("tracking_number"),
+                                "picking_name": row.get("picking_name"),
+                                "pod_link": row.get("pod_link"),
+                                "index_key": raw_key,
+                                "index_source": source_key,
+                            }
+                        )
+                return (
+                    {
+                        key: _dedupe_pod_index_entries(entries)
+                        for key, entries in entries_by_key.items()
+                    },
+                    {
+                        "fetched_at": cache_state.get("last_success_at"),
+                        "updated_at": cache_state.get("last_success_at"),
+                        "total_loaded": len(cache_state.get("rows") or []),
+                        "cache_generation": cache_state.get("generation"),
+                    },
+                )
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError, sqlite3.Error):
         # Keep the last saved JSON index available during a cache/config outage.
         pass
 
@@ -431,6 +438,14 @@ def _normalize_start_month(value: str | None):
     return _normalize_month(value)
 
 
+def _normalize_month_range(start_month: str | None, end_month: str | None):
+    normalized_start = _normalize_month(start_month)
+    normalized_end = _normalize_month(end_month)
+    if normalized_start and normalized_end and normalized_start > normalized_end:
+        raise ValueError("开始月份不能晚于结束月份。")
+    return normalized_start, normalized_end
+
+
 def _month_bucket(value: str | None):
     parsed = _parse_datetime(value)
     if not parsed:
@@ -454,8 +469,7 @@ def _row_on_or_after_month(value: str | None, start_month: str):
 
 
 def _row_in_month_range(value: str | None, start_month: str, end_month: str):
-    normalized_start = _normalize_month(start_month)
-    normalized_end = _normalize_month(end_month)
+    normalized_start, normalized_end = _normalize_month_range(start_month, end_month)
     if not normalized_start and not normalized_end:
         return True
     bucket = _month_bucket(value)
@@ -829,8 +843,7 @@ def _apply_start_month_filter(
     *,
     include_rows: bool = True,
 ):
-    normalized_start = _normalize_month(start_month)
-    normalized_end = _normalize_month(end_month)
+    normalized_start, normalized_end = _normalize_month_range(start_month, end_month)
     odoo_rows = dataset.get("_odoo_rows", [])
     all_odoo_rows = dataset.get("_all_odoo_rows", odoo_rows)
     pod_docs = dataset.get("_pod_docs", [])
@@ -924,6 +937,7 @@ def _load_reconcile_dataset_cached(
     odoo_signature: tuple[int, int],
     pod_index_signature: tuple[int, int],
     storage_root: str,
+    config_path: str,
 ):
     config = _resolve_reconcile_source(source_slug)
     run = get_latest_phase1a_run()
@@ -939,7 +953,10 @@ def _load_reconcile_dataset_cached(
         return None
 
     parsed_rows = list(_read_json(parsed_path) or [])
-    pod_index_by_key, pod_index_meta = _load_pod_index_by_key(config)
+    pod_index_by_key, pod_index_meta = _load_pod_index_by_key(
+        config,
+        config_path=config_path,
+    )
     odoo_rows = []
     all_odoo_rows = []
     for row in odoo_snapshot.get("total_detail_rows") or []:
@@ -998,6 +1015,7 @@ def _load_reconcile_base_dataset(kind: str = DEFAULT_RECONCILE_KIND):
         _file_signature(ODOO_SNAPSHOT_PATH),
         _file_signature(POD_INDEX_PATH),
         str(resolve_storage_dir()),
+        str(CONFIG_PATH),
     )
 
 

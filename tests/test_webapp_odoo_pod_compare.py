@@ -14,6 +14,12 @@ from webapp import odoo_pod_compare
 
 
 class OdooPodCompareTests(unittest.TestCase):
+    def test_westerman_source_maps_to_current_eu_carrier(self):
+        self.assertEqual(
+            odoo_pod_compare._resolve_carrier_context("Westerman"),
+            {"carrier_id": 38, "carrier_name": "Westerman"},
+        )
+
     def _build_tracking_priority_snapshot(
         self,
         *,

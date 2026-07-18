@@ -41,24 +41,51 @@
     {% if visible_jobs %}
       <div class="list-stack jobs-list">
         {% for job in visible_jobs %}
+          {% set report_status = job.report.get("status", "") if job.report else "" %}
+          {% set report_degraded = job.report.get("degraded", false) if job.report else false %}
+          {% set active_job = job.status in ["queued", "running"] %}
+          {% set effective_status = job.status %}
+          {% if not active_job and report_status == "partial" %}
+            {% set effective_status = "partial" %}
+          {% elif not active_job and (job.status == "failed" or report_status == "failed") %}
+            {% set effective_status = "failed" %}
+          {% elif not active_job and report_degraded %}
+            {% set effective_status = "degraded" %}
+          {% elif not active_job and report_status in ["ok", "success"] %}
+            {% set effective_status = "success" %}
+          {% endif %}
           <div class="list-item list-item-shell">
             <div class="list-item-main">
               <div>
                 <strong>{{ job.label }}</strong>
-                <p class="wrap-anywhere">{{ job.created_at }} · {{ job.command_display }}</p>
+                <p class="wrap-anywhere">{{ job.created_at }} · <code>{{ job.job_id }}</code></p>
+                <p class="muted">
+                  {% if effective_status == "queued" %}等待可用执行槽位
+                  {% elif effective_status == "running" %}正在执行，打开详情可查看最新进度
+                  {% elif effective_status == "partial" %}部分完成，请查看未完成步骤后再对账
+                  {% elif effective_status == "degraded" %}业务步骤已完成，但报告刷新存在警告
+                  {% elif effective_status == "success" %}任务已完成，可查看业务成果
+                  {% else %}任务执行失败，请查看失败步骤和技术日志{% endif %}
+                </p>
               </div>
               <div class="list-metrics">
-                <span class="badge badge-{{ job.status }}">{{ job_status_labels.get(job.status, job.status) }}</span>
+                <span class="badge badge-{{ 'warn' if effective_status in ['partial', 'degraded'] else effective_status }}" data-effective-status="{{ effective_status }}">
+                  {% if effective_status == "partial" %}部分完成
+                  {% elif effective_status == "degraded" %}成功但有警告
+                  {% else %}{{ job_status_labels.get(effective_status, effective_status) }}{% endif %}
+                </span>
                 {% if job.exit_code is not none %}
                   <span>退出码 {{ job.exit_code }}</span>
                 {% endif %}
               </div>
             </div>
             <div class="jobs-row-actions">
-              <a class="secondary-button" href="{{ request.url_for('job_detail', job_id=job.job_id) }}">打开</a>
+              <a class="action-button" href="{{ request.url_for('job_detail', job_id=job.job_id) }}">
+                {% if active_job %}查看运行进度{% else %}查看任务结果{% endif %}
+              </a>
               <form method="post" action="{{ request.url_for('delete_job', job_id=job.job_id) }}" class="inline-action-form" onsubmit="return confirm('确认删除任务 {{ job.job_id }} 吗？')">
                 <input type="hidden" name="redirect_to" value="{{ request.url.path }}">
-                <button type="submit" class="danger-button" {% if job.status in ['queued', 'running'] %}disabled{% endif %}>删除</button>
+                <button type="submit" class="ghost-button" {% if active_job %}disabled{% endif %}>删除记录</button>
               </form>
             </div>
           </div>
@@ -117,6 +144,9 @@
         {% for rec in push_runs %}
           {% set skipped_count = (rec.tracking_skipped_same or 0) + (rec.skipped_existing or 0) %}
           {% set not_found_count = (rec.tracking_not_found or 0) + (rec.picking_not_found or 0) %}
+          {% set input_total = rec.get("input_total", rec.get("total", 0)) %}
+          {% set eligible_total = rec.get("eligible_document_count", rec.get("total", 0)) %}
+          {% set selected_total = rec.get("selected_target_count", rec.get("total", 0)) %}
           <div class="jobs-history-row jobs-history-row-wide">
             <div>
               <strong>{{ rec.started_at or rec.push_id }}</strong>
@@ -125,11 +155,24 @@
             <div class="jobs-history-metrics">
               {% if rec.status == "success" %}
                 <span class="badge badge-success">成功</span>
+              {% elif rec.status == "partial" %}
+                <span class="badge badge-warn">部分完成</span>
               {% elif rec.status == "failed" %}
                 <span class="badge badge-failed">失败</span>
-              {% else %}
+              {% elif rec.status == "running" %}
                 <span class="badge badge-running">运行中</span>
+              {% else %}
+                <span class="badge badge-muted">{{ rec.status or "未知" }}</span>
               {% endif %}
+              <span>输入文档 {{ input_total }}</span>
+              <span>门禁后文档 {{ eligible_total }}</span>
+              <span>唯一目标 {{ selected_total }}</span>
+              <span>合并 {{ rec.coalesced_count or 0 }}</span>
+              <span>实际处理 {{ rec.attempted or 0 }}</span>
+              <span>完成 {{ rec.completed or 0 }}</span>
+              <span>未完成 {{ rec.incomplete or 0 }}</span>
+              <span>可重试 {{ rec.retryable or 0 }}</span>
+              <span>需人工 {{ rec.manual_review or 0 }}</span>
               <span>推送 {{ rec.tracking_pushed or 0 }}</span>
               <span>跳过 {{ skipped_count }}</span>
               <span>未找到 {{ not_found_count }}</span>

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import json
 import sys
 from pathlib import Path
@@ -88,7 +89,7 @@ from .phase1a_runs import (
 )
 from .remote_counts import load_remote_count_snapshot
 from .reporting import build_report_context
-from .scheduler import Scheduler
+from .scheduler import Scheduler, validate_pipeline_steps
 from .signed_urls import (
     is_valid_file_url_secret,
     select_file_url_secret,
@@ -430,12 +431,34 @@ class TemplateRequestProxy:
         return str(self._request.app.url_path_for(name, **path_params))
 
 
-app = FastAPI(title="POD 同步控制台")
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 job_store = JobStore(JOB_DIR)
 scheduler = Scheduler(job_store)
-scheduler.start()
+
+
+def _scheduler_start_disabled() -> bool:
+    return os.environ.get("POD_SYNC_DISABLE_SCHEDULER", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+@asynccontextmanager
+async def app_lifespan(_app: FastAPI):
+    scheduler_started = False
+    if not _scheduler_start_disabled():
+        scheduler_started = bool(scheduler.start())
+    try:
+        yield
+    finally:
+        if scheduler_started:
+            scheduler.stop()
+
+
+app = FastAPI(title="POD 同步控制台", lifespan=app_lifespan)
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
 def render(request: Request, template_name: str, *, page_id: str, **context):
@@ -694,31 +717,19 @@ async def odoo_push_page(request: Request):
                 # Compare with saved index
                 saved_index = load_saved_index()
                 if saved_index:
-                    from .odoo_push import (
-                        load_config as load_odoo_push_config,
-                        payload_item_has_same_target_pod_url,
+                    from .odoo_push import build_payload_push_summary
+
+                    comparison = build_payload_push_summary(
+                        config_path="config.local.json",
+                        payload_path=str(payload_path),
+                        existing_index=saved_index,
                     )
-                    full_cfg = load_odoo_push_config("config.local.json")
-                    existing_items = []
-                    missing_items = []
-                    for item in payload.get("items", []):
-                        if item.get("identifier_status") != "ready":
-                            continue
-                        if payload_item_has_same_target_pod_url(
-                            item,
-                            saved_index,
-                            full_cfg,
-                        ):
-                            existing_items.append(item)
-                        else:
-                            missing_items.append(item)
-                    comparison = {
-                        "total_ready": len(existing_items) + len(missing_items),
-                        "existing_count": len(existing_items),
-                        "missing_count": len(missing_items),
-                        "index_fetched_at": saved_index.fetched_at,
-                        "index_total": saved_index.total_loaded,
-                    }
+                    comparison.update(
+                        {
+                            "index_fetched_at": saved_index.fetched_at,
+                            "index_total": saved_index.total_loaded,
+                        }
+                    )
             except Exception:
                 pass
     return render(
@@ -807,13 +818,19 @@ async def reconcile_page(
         (item for item in list_reconcile_sources() if item["slug"] == (kind or "").strip().lower()),
         list_reconcile_sources()[0],
     )
-    dataset = load_filtered_reconcile_summary(
-        selected_source["slug"],
-        start_month,
-        end_month,
-        odoo_state,
-        odoo_state_filter,
-    )
+    try:
+        dataset = load_filtered_reconcile_summary(
+            selected_source["slug"],
+            start_month,
+            end_month,
+            odoo_state,
+            odoo_state_filter,
+        )
+    except ValueError as exc:
+        return redirect_with_error(
+            f"/reconcile?kind={selected_source['slug']}",
+            str(exc),
+        )
     return render(
         request,
         "emtc_reconcile.html",
@@ -844,7 +861,10 @@ async def reconcile_export(
     odoo_state: list[str] | None = Query(default=None),
     odoo_state_filter: bool = False,
 ):
-    payload = build_reconcile_export_workbook(kind, start_month, end_month, odoo_state, odoo_state_filter)
+    try:
+        payload = build_reconcile_export_workbook(kind, start_month, end_month, odoo_state, odoo_state_filter)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     if payload is None:
         raise HTTPException(status_code=404, detail="还没有可导出的对账数据。")
     return Response(
@@ -865,7 +885,10 @@ async def reconcile_odoo_export(
     odoo_state: list[str] | None = Query(default=None),
     odoo_state_filter: bool = False,
 ):
-    payload = build_reconcile_odoo_export_workbook(kind, start_month, end_month, odoo_state, odoo_state_filter)
+    try:
+        payload = build_reconcile_odoo_export_workbook(kind, start_month, end_month, odoo_state, odoo_state_filter)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     if payload is None:
         raise HTTPException(status_code=404, detail="还没有可导出的 Odoo -> POD 明细。")
     return Response(
@@ -886,7 +909,10 @@ async def reconcile_pod_export(
     odoo_state: list[str] | None = Query(default=None),
     odoo_state_filter: bool = False,
 ):
-    payload = build_reconcile_pod_export_workbook(kind, start_month, end_month, odoo_state, odoo_state_filter)
+    try:
+        payload = build_reconcile_pod_export_workbook(kind, start_month, end_month, odoo_state, odoo_state_filter)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     if payload is None:
         raise HTTPException(status_code=404, detail="还没有可导出的 POD -> Odoo 明细。")
     return Response(
@@ -1023,17 +1049,20 @@ async def api_reconcile_odoo_to_pod(
     page: int = 1,
     page_size: int = 25,
 ):
-    payload = build_reconcile_odoo_to_pod_listing(
-        kind=kind,
-        start_month=start_month,
-        end_month=end_month,
-        odoo_state=odoo_state,
-        odoo_state_filter=odoo_state_filter,
-        query=q,
-        status=status,
-        page=page,
-        page_size=page_size,
-    )
+    try:
+        payload = build_reconcile_odoo_to_pod_listing(
+            kind=kind,
+            start_month=start_month,
+            end_month=end_month,
+            odoo_state=odoo_state,
+            odoo_state_filter=odoo_state_filter,
+            query=q,
+            status=status,
+            page=page,
+            page_size=page_size,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     if payload is None:
         raise HTTPException(status_code=404, detail="还没有可用的对账数据。")
     return JSONResponse(payload, headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"})
@@ -1051,17 +1080,20 @@ async def api_reconcile_pod_to_odoo(
     page: int = 1,
     page_size: int = 25,
 ):
-    payload = build_reconcile_pod_to_odoo_listing(
-        kind=kind,
-        start_month=start_month,
-        end_month=end_month,
-        odoo_state=odoo_state,
-        odoo_state_filter=odoo_state_filter,
-        query=q,
-        status=status,
-        page=page,
-        page_size=page_size,
-    )
+    try:
+        payload = build_reconcile_pod_to_odoo_listing(
+            kind=kind,
+            start_month=start_month,
+            end_month=end_month,
+            odoo_state=odoo_state,
+            odoo_state_filter=odoo_state_filter,
+            query=q,
+            status=status,
+            page=page,
+            page_size=page_size,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     if payload is None:
         raise HTTPException(status_code=404, detail="还没有可用的对账数据。")
     return JSONResponse(payload, headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"})
@@ -1076,31 +1108,19 @@ async def api_reconcile_push_to_odoo(
     local_path: str = Form(""),
     source_name: str = Form(""),
 ):
-    if not match_key or not match_key_type or not file_url:
-        raise HTTPException(status_code=400, detail="缺少必要参数：match_key, match_key_type, file_url")
-
-    from .odoo_push import push_single_item
-    from .actions import resolve_storage_dir
-
-    # local_path from reconcile is a relative path; resolve to absolute
-    absolute_local_path = None
-    if local_path:
-        storage = resolve_storage_dir()
-        absolute_local_path = str(storage / local_path)
-
-    result = push_single_item(
-        config_path="config.local.json",
-        match_key=match_key,
-        match_key_type=match_key_type,
-        file_url=file_url,
-        local_path=absolute_local_path,
-        source_name=source_name or "unknown",
-        dry_run=False,
+    # Fail closed for stale browser tabs and old API clients. Reconciliation is
+    # read-only; every Odoo mutation must go through the payload preflight,
+    # Westerman gate, coalescing, job log, and push history on /odoo-push.
+    return JSONResponse(
+        {
+            "ok": False,
+            "status": "blocked",
+            "error_code": "RECONCILE_DIRECT_PUSH_DISABLED",
+            "error": "总结对账页已禁止直接写入 Odoo，请前往标准 Odoo 推送页完成预检和留痕推送。",
+            "odoo_push_url": "/odoo-push",
+        },
+        status_code=409,
     )
-    if result.get("status") in {"pushed_tracking", "created_tracking", "skipped_same"}:
-        from . import emtc_reconcile
-        emtc_reconcile._load_reconcile_dataset_cached.cache_clear()
-    return JSONResponse(result)
 
 
 @app.get("/jobs", response_class=HTMLResponse)
@@ -1577,6 +1597,7 @@ async def action_run_pipeline(
     westerman_limit: int | None = Form(None),
     westerman_workers: int | None = Form(None),
     skip_westerman: bool = Form(False),
+    use_saved_scheduler_config: bool = Form(False),
     redirect_to: str = Form("/scheduler"),
 ):
     safe_redirect_to = normalize_redirect_target(redirect_to, "/scheduler")
@@ -1584,6 +1605,27 @@ async def action_run_pipeline(
     scheduler_cfg = scheduler.load_config()
     steps = scheduler_cfg.get("steps", {})
     pipeline_options = scheduler_cfg.get("pipeline_options", {})
+    try:
+        validate_pipeline_steps(steps)
+    except ValueError as exc:
+        return redirect_with_error(safe_redirect_to, str(exc))
+    if use_saved_scheduler_config:
+        # Take steps and options from the same locked scheduler snapshot. This
+        # prevents a stale browser form from mixing old options with steps that
+        # another page or worker has just saved.
+        config_path = str(pipeline_options.get("config_path", DEFAULT_SYNC_CONFIG_REL))
+        phase1a_config_path = str(
+            pipeline_options.get("phase1a_config_path", DEFAULT_PHASE1A_CONFIG_REL)
+        )
+        cmc_incremental = bool(pipeline_options.get("cmc_incremental", True))
+        emtc_incremental = bool(pipeline_options.get("emtc_incremental", True))
+        cmc_limit = int(pipeline_options.get("cmc_limit", 0) or 0)
+        emtc_limit = int(pipeline_options.get("emtc_limit", 0) or 0)
+        cmc_workers = int(pipeline_options.get("cmc_workers", 3) or 3)
+        emtc_workers = int(pipeline_options.get("emtc_workers", 3) or 3)
+        westerman_limit = int(pipeline_options.get("westerman_limit", 0) or 0)
+        westerman_workers = int(pipeline_options.get("westerman_workers", 3) or 3)
+        skip_westerman = False
     effective_westerman_limit = (
         westerman_limit
         if westerman_limit is not None
@@ -1608,7 +1650,7 @@ async def action_run_pipeline(
             westerman_workers=effective_westerman_workers,
             skip_cmc=not steps.get("cmc_sync", True),
             skip_emtc=not steps.get("emtc_sync", True),
-            skip_westerman=skip_westerman or not steps.get("westerman_sync", False),
+            skip_westerman=skip_westerman or not steps.get("westerman_sync", True),
             skip_phase1a=not steps.get("phase1a", True),
             skip_reports=not steps.get("refresh_reports", True),
             skip_odoo_push=not steps.get("odoo_push", False),
@@ -1655,17 +1697,23 @@ async def action_update_scheduler(
     if pipeline_westerman_workers is not None:
         pipeline_options["westerman_workers"] = max(1, min(12, pipeline_westerman_workers))
 
+    selected_steps = {
+        "cmc_sync": step_cmc_sync,
+        "emtc_sync": step_emtc_sync,
+        "westerman_sync": step_westerman_sync,
+        "phase1a": step_phase1a,
+        "refresh_reports": step_refresh_reports,
+        "odoo_push": step_odoo_push,
+    }
+    try:
+        validate_pipeline_steps(selected_steps)
+    except ValueError as exc:
+        return redirect_with_error("/scheduler", str(exc))
+
     patch = {
         "enabled": enabled in ("1", "on", "true", "yes"),
         "interval_hours": max(1, min(168, interval_hours)),
-        "steps": {
-            "cmc_sync": step_cmc_sync,
-            "emtc_sync": step_emtc_sync,
-            "westerman_sync": step_westerman_sync,
-            "phase1a": step_phase1a,
-            "refresh_reports": step_refresh_reports,
-            "odoo_push": step_odoo_push,
-        },
+        "steps": selected_steps,
         "pipeline_options": pipeline_options,
     }
     scheduler.update_config(patch)
@@ -1718,10 +1766,16 @@ async def action_odoo_push(
     config_path: str = Form(DEFAULT_SYNC_CONFIG_REL),
     payload_path: str = Form(""),
     dry_run: bool = Form(False),
+    confirm_write: bool = Form(False),
     limit: int = Form(0),
     missing_only: bool = Form(False),
     source_filter: str = Form(""),
 ):
+    if not dry_run and not confirm_write:
+        return redirect_with_error(
+            "/odoo-push",
+            "真实写入必须先完成预检并明确确认；本次未创建推送任务。",
+        )
     try:
         label, command, metadata = build_odoo_push_command(
             config_path=config_path,

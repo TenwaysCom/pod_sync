@@ -1,24 +1,29 @@
 {% extends "base.html" %}
 {% block title %}同步 · POD 同步控制台{% endblock %}
 {% block content %}
+  {% set pipeline_steps = [
+    ("westerman_sync", "Westerman"),
+    ("cmc_sync", "CMC"),
+    ("emtc_sync", "EMTC"),
+    ("phase1a", "识别"),
+    ("odoo_push", "Odoo 推送"),
+    ("refresh_reports", "报告")
+  ] %}
   <section class="section sync-workbench">
     <div class="sync-hero">
       <div class="sync-hero-main">
         <p class="eyebrow">同步工作台</p>
         <h2>日常 POD 同步</h2>
-        <div class="sync-step-row" aria-label="流水线步骤">
-          {% for step_key, step_label in [
-            ("westerman_sync", "Westerman"),
-            ("cmc_sync", "CMC"),
-            ("emtc_sync", "EMTC"),
-            ("phase1a", "识别"),
-            ("odoo_push", "Odoo"),
-            ("refresh_reports", "报告")
-          ] %}
+        <p class="sync-scope-note">本次范围来自“定时任务”中已保存的流程配置。</p>
+        <div class="sync-step-row" aria-label="本次流水线执行范围">
+          {% for step_key, step_label in pipeline_steps %}
             {% set enabled = scheduler_status.steps.get(step_key, False) %}
-            <span class="sync-step {% if enabled %}is-enabled{% else %}is-disabled{% endif %}">{{ step_label }}</span>
+            <span class="sync-step {% if enabled %}is-enabled{% else %}is-disabled{% endif %}">
+              {{ "将执行" if enabled else "将跳过" }} {{ step_label }}
+            </span>
           {% endfor %}
         </div>
+        <a class="text-link" href="{{ request.url_for('scheduler_page') }}">修改已保存流程配置</a>
       </div>
       <form method="post" action="{{ request.url_for('action_run_pipeline') }}" class="sync-run-form" data-submit-state data-pending-notice="日常同步任务已提交，正在后台执行...">
         <input type="hidden" name="redirect_to" value="/sync">
@@ -36,11 +41,11 @@
         <label>Westerman 并发
           <input type="number" name="westerman_workers" value="{{ scheduler_status.pipeline_options.get('westerman_workers', 3) }}" min="1" max="12">
         </label>
-        <button type="submit" class="action-button" data-loading-text="提交中...">启动日常同步</button>
+        <button type="submit" class="action-button" data-loading-text="提交中...">按上述流程范围启动任务</button>
       </form>
     </div>
 
-    <div class="sync-status-grid">
+    <div class="sync-status-grid" aria-live="polite">
       <article class="sync-status-tile">
         <span class="sync-status-label">任务队列</span>
         <strong>{{ sync_dashboard.running_count }}</strong>
@@ -175,7 +180,7 @@
     </div>
 
     <div class="grid forms-grid sync-tools-grid">
-      <details class="details-card sync-tool-card" open>
+      <details class="details-card sync-tool-card">
         <summary>CMC OneDrive</summary>
         <form method="post" action="{{ request.url_for('action_cmc_onedrive') }}" class="form-grid" data-submit-state data-pending-notice="CMC 同步任务已提交...">
           <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
@@ -200,7 +205,7 @@
         </form>
       </details>
 
-      <details class="details-card sync-tool-card" open>
+      <details class="details-card sync-tool-card">
         <summary>EMTC Google Drive</summary>
         <form method="post" action="{{ request.url_for('action_emtc_gdrive') }}" class="form-grid" data-submit-state data-pending-notice="EMTC 同步任务已提交...">
           <input type="hidden" name="config_path" value="{{ ui_defaults.sync_config_path }}">
