@@ -647,11 +647,11 @@ def _new_push_results(total, westerman_pool_filtered, westerman_gate):
 
 
 def _finalize_push_results(results: dict) -> dict:
-    """Derive one truthful batch outcome from the per-item counters.
+    """Derive technical execution and business backlog outcomes separately.
 
-    Existing count fields remain intact for callers that already consume them.
-    ``ok`` now means every selected record reached a terminal successful state;
-    callers that need the richer outcome should use ``status``.
+    A successful lookup which finds no unique Odoo target is a business backlog,
+    not a program failure.  Existing count fields remain intact so reports can
+    still reconcile every selected document.
     """
 
     not_found = int(results.get("tracking_not_found", 0) or 0) + int(
@@ -669,14 +669,15 @@ def _finalize_push_results(results: dict) -> dict:
         if gate_status not in {"ok", "not_applicable"}
         else 0
     )
+    failed = int(results.get("failed", 0) or 0)
     retryable = (
-        int(results.get("failed", 0) or 0)
+        failed
         + not_found
         + retryable_missing
         + gate_retryable
     )
     item_incomplete = (
-        int(results.get("failed", 0) or 0)
+        failed
         + not_found
         + int(results.get("ambiguous", 0) or 0)
         + int(results.get("needs_review", 0) or 0)
@@ -699,10 +700,13 @@ def _finalize_push_results(results: dict) -> dict:
         + int(results.get("missing_required", 0) or 0)
         - retryable_missing
     )
+    business_pending = not_found + manual_review
+    technical_failure_count = failed + retryable_missing + gate_retryable
+    technically_processed = completed + business_pending
 
-    if incomplete == 0:
+    if technical_failure_count == 0:
         status = "ok"
-    elif completed > 0:
+    elif technically_processed > 0:
         status = "partial"
     else:
         status = "failed"
@@ -711,6 +715,12 @@ def _finalize_push_results(results: dict) -> dict:
         {
             "status": status,
             "ok": status == "ok",
+            "execution_status": status,
+            "business_status": (
+                "attention" if business_pending > 0 else "complete"
+            ),
+            "business_pending": business_pending,
+            "technical_failure_count": technical_failure_count,
             "completed": completed,
             "incomplete": incomplete,
             "retryable": retryable,
@@ -728,6 +738,10 @@ def _failed_push_result(error: str, *, retryable: int = 0) -> dict:
     return {
         "ok": False,
         "status": "failed",
+        "execution_status": "failed",
+        "business_status": "unknown",
+        "business_pending": 0,
+        "technical_failure_count": max(1, retryable),
         "error": error,
         "total": retryable,
         "completed": 0,

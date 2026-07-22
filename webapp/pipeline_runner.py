@@ -292,6 +292,7 @@ def run_pipeline(
     steps: list[dict] = []
     data_report: dict[str, dict] = {}
     soft_failed_steps: list[str] = []
+    business_attention_steps: list[str] = []
     warnings: list[dict] = []
     excluded_push_source_types = {"westerman_api"} if skip_westerman else set()
     overall_start = time.time()
@@ -331,8 +332,17 @@ def run_pipeline(
             "elapsed_seconds": 0.0,
         }
 
-    def record(step: str, ok: bool, detail: str = ""):
-        steps.append({"step": step, "ok": ok, "detail": detail})
+    def record(
+        step: str,
+        ok: bool,
+        detail: str = "",
+        *,
+        status: str | None = None,
+    ):
+        entry = {"step": step, "ok": ok, "detail": detail}
+        if status:
+            entry["status"] = status
+        steps.append(entry)
 
     # Step 1: Westerman runs first so a CMC/EMTC outage cannot starve its
     # independent POD polling schedule. A provider failure is soft: other
@@ -627,12 +637,25 @@ def run_pipeline(
                     limit=odoo_push_limit,
                     excluded_source_types=excluded_push_source_types or None,
                 )
-                push_status = result.get("status") or (
-                    "ok" if result.get("ok") else "failed"
+                push_status = (
+                    result.get("execution_status")
+                    or result.get("status")
+                    or ("ok" if result.get("ok") else "failed")
+                )
+                push_business_status = result.get("business_status") or (
+                    "attention"
+                    if result.get("incomplete", 0) and not result.get("failed", 0)
+                    else "complete"
                 )
                 if push_status in {"ok", "partial"}:
                     data_report["odoo_push"] = {
                         "status": push_status,
+                        "execution_status": push_status,
+                        "business_status": push_business_status,
+                        "business_pending": result.get("business_pending", 0),
+                        "technical_failure_count": result.get(
+                            "technical_failure_count", result.get("failed", 0)
+                        ),
                         "payload_path": selected_payload_str,
                         "payload_origin": payload_origin,
                         "total": result.get("total", 0),
@@ -682,10 +705,15 @@ def run_pipeline(
                         ),
                         "by_source": result.get("by_source", {}),
                     }
-                    detail = f"status={push_status}, input_documents={result.get('input_total',result.get('total',0))}, selected_targets={result.get('selected_target_count',result.get('total',0))}, coalesced={result.get('coalesced_count',0)}, attempted={result.get('attempted',result.get('total',0))}, completed={result.get('completed',0)}, incomplete={result.get('incomplete',0)}, retryable={result.get('retryable',0)}, pushed={result.get('tracking_pushed',0)+result.get('picking_pushed',0)}, skipped={result.get('skipped_existing',0)+result.get('tracking_skipped_same',0)+result.get('picking_skipped_same',0)}, not_found={result.get('tracking_not_found',0)+result.get('picking_not_found',0)}, failed={result.get('failed',0)}"
+                    detail = f"status={push_status}, business_status={push_business_status}, input_documents={result.get('input_total',result.get('total',0))}, selected_targets={result.get('selected_target_count',result.get('total',0))}, coalesced={result.get('coalesced_count',0)}, attempted={result.get('attempted',result.get('total',0))}, completed={result.get('completed',0)}, incomplete={result.get('incomplete',0)}, retryable={result.get('retryable',0)}, pushed={result.get('tracking_pushed',0)+result.get('picking_pushed',0)}, skipped={result.get('skipped_existing',0)+result.get('tracking_skipped_same',0)+result.get('picking_skipped_same',0)}, not_found={result.get('tracking_not_found',0)+result.get('picking_not_found',0)}, failed={result.get('failed',0)}"
                     if push_status == "ok":
-                        print(f"[OK] 推送完成: {detail}")
-                        record("odoo_push", True, detail)
+                        if push_business_status == "attention":
+                            print(f"[OK] 推送执行成功，有业务待处理数据: {detail}")
+                            record("odoo_push", True, detail, status="attention")
+                            business_attention_steps.append("odoo_push")
+                        else:
+                            print(f"[OK] 推送完成: {detail}")
+                            record("odoo_push", True, detail)
                     else:
                         print(f"[PARTIAL] 推送部分完成，将继续刷新报告: {detail}")
                         record("odoo_push", False, detail)
@@ -703,6 +731,16 @@ def run_pipeline(
                 else:
                     data_report["odoo_push"] = {
                         "status": "failed",
+                        "execution_status": result.get(
+                            "execution_status", "failed"
+                        ),
+                        "business_status": result.get(
+                            "business_status", "unknown"
+                        ),
+                        "business_pending": result.get("business_pending", 0),
+                        "technical_failure_count": result.get(
+                            "technical_failure_count", result.get("failed", 0)
+                        ),
                         "payload_path": selected_payload_str,
                         "payload_origin": payload_origin,
                         "total": result.get("total", 0),
@@ -869,6 +907,10 @@ def run_pipeline(
         return {
             "ok": False,
             "status": "partial",
+            "business_status": (
+                "attention" if business_attention_steps else "complete"
+            ),
+            "business_attention_steps": business_attention_steps,
             "degraded": True,
             "failed_step": soft_failed_steps[0],
             "soft_failed_steps": soft_failed_steps,
@@ -898,6 +940,10 @@ def run_pipeline(
     return {
         "ok": True,
         "status": "ok",
+        "business_status": (
+            "attention" if business_attention_steps else "complete"
+        ),
+        "business_attention_steps": business_attention_steps,
         "degraded": bool(warnings),
         "soft_failed_steps": [],
         "warnings": warnings,

@@ -1117,6 +1117,66 @@ class WebAppActionTests(unittest.TestCase):
         )
         compare_mock.assert_called_once()
 
+    def test_business_attention_push_keeps_pipeline_successful(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.local.json"
+            phase_path = root / "phase1a.json"
+            payload_path = root / "explicit-payload.json"
+            config_path.write_text("{}", encoding="utf-8")
+            phase_path.write_text("{}", encoding="utf-8")
+            payload_path.write_text(json.dumps({"items": []}), encoding="utf-8")
+            push_result = {
+                "ok": True,
+                "status": "ok",
+                "execution_status": "ok",
+                "business_status": "attention",
+                "business_pending": 5009,
+                "technical_failure_count": 0,
+                "total": 40162,
+                "input_total": 40968,
+                "selected_target_count": 40162,
+                "coalesced_count": 806,
+                "attempted": 40162,
+                "completed": 35153,
+                "incomplete": 5009,
+                "retryable": 3929,
+                "tracking_pushed": 26,
+                "tracking_skipped_same": 35127,
+                "tracking_not_found": 3503,
+                "picking_not_found": 426,
+                "ambiguous": 642,
+                "needs_review": 438,
+                "failed": 0,
+            }
+
+            with mock.patch(
+                "webapp.odoo_push.push_payload", return_value=push_result
+            ):
+                result = pipeline_runner.run_pipeline(
+                    config_path=str(config_path),
+                    phase1a_config_path=str(phase_path),
+                    skip_westerman=True,
+                    skip_cmc=True,
+                    skip_emtc=True,
+                    skip_phase1a=True,
+                    skip_reports=True,
+                    odoo_push_payload_path=str(payload_path),
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["business_status"], "attention")
+        self.assertEqual(result["business_attention_steps"], ["odoo_push"])
+        self.assertEqual(
+            result["data_report"]["odoo_push"]["business_pending"], 5009
+        )
+        push_step = next(
+            step for step in result["steps"] if step["step"] == "odoo_push"
+        )
+        self.assertTrue(push_step["ok"])
+        self.assertEqual(push_step["status"], "attention")
+
     def test_report_only_pipeline_fails_and_skips_dependent_compare_on_missing_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.local.json"

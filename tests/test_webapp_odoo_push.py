@@ -1065,8 +1065,11 @@ class OdooPushTests(unittest.TestCase):
                     missing_only=True,
                 )
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["business_status"], "attention")
+        self.assertEqual(result["business_pending"], 1)
+        self.assertEqual(result["technical_failure_count"], 0)
         self.assertEqual(result["skipped_existing"], 0)
         self.assertEqual(result["ambiguous"], 1)
         self.assertEqual(result["details"][0]["status"], "multiple_tracking_records")
@@ -1153,7 +1156,7 @@ class OdooPushTests(unittest.TestCase):
         self.assertEqual(result["incomplete"], 0)
         self.assertEqual(result["retryable"], 0)
 
-    def test_push_payload_reports_partial_and_continues_after_review_items(self):
+    def test_push_payload_reports_business_attention_and_continues_after_review_items(self):
         payload = {
             "items": [
                 {
@@ -1201,8 +1204,11 @@ class OdooPushTests(unittest.TestCase):
                     payload_path=str(payload_path),
                 )
 
-        self.assertEqual(result["status"], "partial")
-        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["business_status"], "attention")
+        self.assertEqual(result["business_pending"], 2)
+        self.assertEqual(result["technical_failure_count"], 0)
         self.assertEqual(result["completed"], 1)
         self.assertEqual(result["incomplete"], 2)
         self.assertEqual(result["ambiguous"], 1)
@@ -1238,6 +1244,10 @@ class OdooPushTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "failed")
         self.assertFalse(result["ok"])
+        self.assertEqual(result["execution_status"], "failed")
+        self.assertEqual(result["business_status"], "complete")
+        self.assertEqual(result["business_pending"], 0)
+        self.assertEqual(result["technical_failure_count"], 2)
         self.assertEqual(result["completed"], 0)
         self.assertEqual(result["incomplete"], 2)
         self.assertEqual(result["failed"], 2)
@@ -1258,6 +1268,10 @@ class OdooPushTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["execution_status"], "failed")
+        self.assertEqual(result["business_status"], "unknown")
+        self.assertEqual(result["business_pending"], 0)
+        self.assertEqual(result["technical_failure_count"], 1)
         self.assertEqual(result["completed"], 0)
         self.assertEqual(result["incomplete"], 1)
         self.assertIn("JSONDecodeError", result["error"])
@@ -1681,7 +1695,11 @@ class OdooPushTests(unittest.TestCase):
         self.assertEqual(result["coalesced_count"], 0)
         self.assertEqual(result["attempted"], 1)
         self.assertEqual(result["completed"], 0)
-        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["business_status"], "attention")
+        self.assertEqual(result["business_pending"], 1)
+        self.assertEqual(result["technical_failure_count"], 0)
         self.assertEqual(result["ambiguous"], 1)
         self.assertEqual(result["manual_review"], 1)
         self.assertEqual(result["cross_source_conflict_count"], 1)
@@ -1692,6 +1710,37 @@ class OdooPushTests(unittest.TestCase):
         connect_mock.assert_not_called()
         search_mock.assert_not_called()
         write_mock.assert_not_called()
+
+    def test_business_backlog_does_not_turn_successful_execution_into_failure(self):
+        result = odoo_push._finalize_push_results(
+            {
+                "tracking_pushed": 26,
+                "tracking_skipped_same": 35127,
+                "tracking_not_found": 3503,
+                "picking_pushed": 0,
+                "picking_skipped_same": 0,
+                "picking_not_found": 426,
+                "skipped_existing": 0,
+                "ambiguous": 642,
+                "needs_review": 438,
+                "missing_required": 0,
+                "failed": 0,
+                "details": [],
+                "by_source": {},
+                "westerman_pool_gate_status": "ok",
+                "westerman_pool_filtered": 0,
+            }
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["execution_status"], "ok")
+        self.assertEqual(result["business_status"], "attention")
+        self.assertEqual(result["completed"], 35153)
+        self.assertEqual(result["business_pending"], 5009)
+        self.assertEqual(result["incomplete"], 5009)
+        self.assertEqual(result["retryable"], 3929)
+        self.assertEqual(result["technical_failure_count"], 0)
 
     def test_source_filter_is_applied_before_cross_source_coalescing(self):
         payload = {
@@ -2875,6 +2924,9 @@ class OdooPushTests(unittest.TestCase):
                         "attempted": 5,
                         "completed": 2,
                         "incomplete": 3,
+                        "business_status": "attention",
+                        "business_pending": 2,
+                        "technical_failure_count": 1,
                         "retryable": 1,
                         "manual_review": 2,
                         "ambiguous": 1,
@@ -2893,6 +2945,9 @@ class OdooPushTests(unittest.TestCase):
         self.assertEqual(saved["attempted"], 5)
         self.assertEqual(saved["completed"], 2)
         self.assertEqual(saved["incomplete"], 3)
+        self.assertEqual(saved["business_status"], "attention")
+        self.assertEqual(saved["business_pending"], 2)
+        self.assertEqual(saved["technical_failure_count"], 1)
         self.assertEqual(saved["retryable"], 1)
         self.assertEqual(saved["manual_review"], 2)
         self.assertEqual(saved["ambiguous"], 1)

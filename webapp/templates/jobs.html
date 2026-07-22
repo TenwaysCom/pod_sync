@@ -43,6 +43,7 @@
         {% for job in visible_jobs %}
           {% set report_status = job.report.get("status", "") if job.report else "" %}
           {% set report_degraded = job.report.get("degraded", false) if job.report else false %}
+          {% set report_business_status = job.report.get("business_status", "complete") if job.report else "complete" %}
           {% set active_job = job.status in ["queued", "running"] %}
           {% set effective_status = job.status %}
           {% if not active_job and report_status == "partial" %}
@@ -51,6 +52,8 @@
             {% set effective_status = "failed" %}
           {% elif not active_job and report_degraded %}
             {% set effective_status = "degraded" %}
+          {% elif not active_job and report_business_status == "attention" %}
+            {% set effective_status = "attention" %}
           {% elif not active_job and report_status in ["ok", "success"] %}
             {% set effective_status = "success" %}
           {% endif %}
@@ -64,14 +67,16 @@
                   {% elif effective_status == "running" %}正在执行，打开详情可查看最新进度
                   {% elif effective_status == "partial" %}部分完成，请查看未完成步骤后再对账
                   {% elif effective_status == "degraded" %}业务步骤已完成，但报告刷新存在警告
+                  {% elif effective_status == "attention" %}任务执行成功，存在未匹配或需人工确认的数据
                   {% elif effective_status == "success" %}任务已完成，可查看业务成果
                   {% else %}任务执行失败，请查看失败步骤和技术日志{% endif %}
                 </p>
               </div>
               <div class="list-metrics">
-                <span class="badge badge-{{ 'warn' if effective_status in ['partial', 'degraded'] else effective_status }}" data-effective-status="{{ effective_status }}">
+                <span class="badge badge-{{ 'warn' if effective_status in ['partial', 'degraded', 'attention'] else effective_status }}" data-effective-status="{{ effective_status }}">
                   {% if effective_status == "partial" %}部分完成
                   {% elif effective_status == "degraded" %}成功但有警告
+                  {% elif effective_status == "attention" %}成功，有待处理
                   {% else %}{{ job_status_labels.get(effective_status, effective_status) }}{% endif %}
                 </span>
                 {% if job.exit_code is not none %}
@@ -153,7 +158,9 @@
               <p class="wrap-anywhere"><code>{{ rec.push_id }}</code></p>
             </div>
             <div class="jobs-history-metrics">
-              {% if rec.status == "success" %}
+              {% if rec.status == "success" and rec.business_status == "attention" %}
+                <span class="badge badge-warn">成功，有待处理</span>
+              {% elif rec.status == "success" %}
                 <span class="badge badge-success">成功</span>
               {% elif rec.status == "partial" %}
                 <span class="badge badge-warn">部分完成</span>

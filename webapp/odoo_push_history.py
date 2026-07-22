@@ -116,6 +116,9 @@ def start_push_run(
         "started_at": _utc_now(),
         "finished_at": None,
         "status": "running",
+        "business_status": "unknown",
+        "business_pending": 0,
+        "technical_failure_count": 0,
         "config_path": config_path,
         "payload_path": payload_path,
         "dry_run": dry_run,
@@ -162,6 +165,15 @@ def finish_push_run(
                 if rec.get("push_id") == push_id:
                     rec["finished_at"] = _utc_now()
                     rec["status"] = status
+                    rec["business_status"] = result.get(
+                        "business_status", "unknown"
+                    )
+                    rec["business_pending"] = result.get(
+                        "business_pending", 0
+                    )
+                    rec["technical_failure_count"] = result.get(
+                        "technical_failure_count", result.get("failed", 0)
+                    )
                     rec["total"] = result.get("total", 0)
                     rec["input_total"] = result.get(
                         "input_total", result.get("total", 0)

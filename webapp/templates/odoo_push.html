@@ -213,7 +213,9 @@
                   </div>
                 </td>
                 <td>
-                  {% if rec.status == "success" %}
+                  {% if rec.status == "success" and rec.business_status == "attention" %}
+                    <span class="badge badge-warn">成功，有待处理</span>
+                  {% elif rec.status == "success" %}
                     <span class="badge badge-success">成功</span>
                   {% elif rec.status == "partial" %}
                     <span class="badge badge-warn">部分完成</span>

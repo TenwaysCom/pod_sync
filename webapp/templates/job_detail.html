@@ -20,6 +20,7 @@
   {% set active_job = job.status in ["queued", "running"] %}
   {% set report_status = job.report.get("status", "") if job.report else "" %}
   {% set report_degraded = job.report.get("degraded", false) if job.report else false %}
+  {% set report_business_status = job.report.get("business_status", "complete") if job.report else "complete" %}
   {% set effective_status = job.status %}
   {% if not active_job and report_status == "partial" %}
     {% set effective_status = "partial" %}
@@ -27,6 +28,8 @@
     {% set effective_status = "failed" %}
   {% elif not active_job and report_degraded %}
     {% set effective_status = "degraded" %}
+  {% elif not active_job and report_business_status == "attention" %}
+    {% set effective_status = "attention" %}
   {% elif not active_job and report_status in ["ok", "success"] %}
     {% set effective_status = "success" %}
   {% endif %}
@@ -39,9 +42,10 @@
           <h2>{{ job.label }}</h2>
         </div>
         <div class="header-actions">
-          <span class="badge badge-{{ 'warn' if effective_status in ['partial', 'degraded'] else effective_status }}" data-effective-status="{{ effective_status }}">
+          <span class="badge badge-{{ 'warn' if effective_status in ['partial', 'degraded', 'attention'] else effective_status }}" data-effective-status="{{ effective_status }}">
             {% if effective_status == "partial" %}部分完成
             {% elif effective_status == "degraded" %}成功但有警告
+            {% elif effective_status == "attention" %}成功，有待处理
             {% else %}{{ job_status_labels.get(effective_status, effective_status) }}{% endif %}
           </span>
           <form method="post" action="{{ request.url_for('delete_job', job_id=job.job_id) }}" class="inline-action-form" onsubmit="return confirm('确认删除任务 {{ job.job_id }} 吗？')">
@@ -89,6 +93,9 @@
           {% elif report_degraded %}
             <h2 style="color: var(--warn)">成功，但有警告</h2>
             <p class="muted">业务步骤已完成，但辅助报告未全部刷新；请先查看警告再对账。</p>
+          {% elif report_business_status == "attention" %}
+            <h2 style="color: var(--warn)">成功，有待处理</h2>
+            <p class="muted">程序执行正常，未匹配或需人工确认的数据已保留在对账结果中。</p>
           {% elif report_status in ["ok", "success"] or (not report_status and job.report.ok) %}
             <h2 style="color: var(--success)">成功</h2>
             <p class="muted">计划内步骤已完成。</p>
@@ -249,11 +256,11 @@
               <p class="label">已有跳过</p>
               <h2>{{ (push_result.get("skipped_existing", 0) or 0) + (push_result.get("tracking_skipped_same", 0) or 0) + (push_result.get("picking_skipped_same", 0) or 0) }}</h2>
             </article>
-            <article class="card stat-card stat-card-inline stat-card-alert">
+            <article class="card stat-card stat-card-inline">
               <p class="label">未找到</p>
-              <h2>{{ (push_result.get("tracking_not_found", 0) or 0) + (push_result.get("picking_not_found", 0) or 0) }}</h2>
+              <h2 style="color: var(--warn)">{{ (push_result.get("tracking_not_found", 0) or 0) + (push_result.get("picking_not_found", 0) or 0) }}</h2>
             </article>
-            <article class="card stat-card stat-card-inline stat-card-alert">
+            <article class="card stat-card stat-card-inline{% if push_result.get('failed', 0) %} stat-card-alert{% endif %}">
               <p class="label">失败</p>
               <h2>{{ push_result.get("failed", 0) or 0 }}</h2>
             </article>
@@ -304,7 +311,9 @@
             <tr>
               <td>{{ step_label(step.step) }}</td>
               <td>
-                {% if step.ok %}
+                {% if step.status == "attention" %}
+                  <span class="badge badge-warn">成功，有待处理</span>
+                {% elif step.ok %}
                   <span class="badge badge-success">成功</span>
                 {% else %}
                   <span class="badge badge-failed">失败</span>
@@ -326,7 +335,7 @@
       <div class="section-head section-head-tight">
         <div>
           <p class="eyebrow">下一步</p>
-          <h2>{% if active_job %}任务仍在处理中{% elif effective_status == "failed" %}先排查失败步骤{% elif effective_status == "partial" %}先处理未完成步骤{% elif effective_status == "degraded" %}先查看报告警告{% else %}继续核对业务结果{% endif %}</h2>
+          <h2>{% if active_job %}任务仍在处理中{% elif effective_status == "failed" %}先排查失败步骤{% elif effective_status == "partial" %}先处理未完成步骤{% elif effective_status == "degraded" %}先查看报告警告{% elif effective_status == "attention" %}查看业务待处理数据{% else %}继续核对业务结果{% endif %}</h2>
         </div>
         <div class="header-actions">
           {% if effective_status == "failed" %}
@@ -337,6 +346,8 @@
           {% elif effective_status == "degraded" %}
             <a class="action-button" href="#report-warnings">查看警告</a>
             <a class="secondary-button" href="{{ request.url_for('reconcile_page') }}">查看当前对账</a>
+          {% elif effective_status == "attention" %}
+            <a class="action-button" href="{{ request.url_for('reconcile_page') }}">查看待处理数据</a>
           {% elif not active_job %}
             <a class="action-button" href="{{ request.url_for('reconcile_page') }}">查看总结对账</a>
           {% endif %}

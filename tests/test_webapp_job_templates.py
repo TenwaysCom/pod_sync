@@ -159,6 +159,50 @@ class JobTemplateTests(unittest.TestCase):
         self.assertIn("先查看报告警告", html)
         self.assertIn('href="#report-warnings">查看警告</a>', html)
 
+    def test_business_attention_is_success_with_pending_data(self):
+        report = {
+            "ok": True,
+            "status": "ok",
+            "business_status": "attention",
+            "business_attention_steps": ["odoo_push"],
+            "elapsed_seconds": 2,
+            "data_report": {
+                "odoo_push": {
+                    "status": "ok",
+                    "business_status": "attention",
+                    "business_pending": 5009,
+                    "input_total": 40968,
+                    "selected_target_count": 40162,
+                    "completed": 35153,
+                    "incomplete": 5009,
+                    "tracking_pushed": 26,
+                    "tracking_skipped_same": 35127,
+                    "tracking_not_found": 3503,
+                    "picking_not_found": 426,
+                    "failed": 0,
+                }
+            },
+            "steps": [
+                {
+                    "step": "odoo_push",
+                    "ok": True,
+                    "status": "attention",
+                    "detail": "business_status=attention",
+                }
+            ],
+        }
+        job = self._job(status="success", report=report)
+
+        detail_html = self._render_detail(job)
+        jobs_html = self._render_jobs([job])
+
+        for html in (detail_html, jobs_html):
+            self.assertIn('data-effective-status="attention"', html)
+            self.assertIn("成功，有待处理", html)
+            self.assertNotIn("任务执行失败，请查看失败步骤和技术日志", html)
+        self.assertIn("查看业务待处理数据", detail_html)
+        self.assertIn("查看待处理数据", detail_html)
+
     def test_detail_renders_warning_value_from_pipeline_report(self):
         html = self._render_detail(
             self._job(
