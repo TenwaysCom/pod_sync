@@ -89,7 +89,7 @@ from .phase1a_runs import (
 )
 from .remote_counts import load_remote_count_snapshot
 from .reporting import build_report_context
-from .scheduler import Scheduler, validate_pipeline_steps
+from .scheduler import Scheduler, normalize_start_time, validate_pipeline_steps
 from .signed_urls import (
     is_valid_file_url_secret,
     select_file_url_secret,
@@ -1665,6 +1665,7 @@ async def action_run_pipeline(
 async def action_update_scheduler(
     enabled: str = Form("0"),
     interval_hours: int = Form(24),
+    start_time: str = Form("09:00"),
     pipeline_config_path: str = Form("config.local.json"),
     pipeline_phase1a_config_path: str = Form("phase1a/examples/phase1a_from_sync.example.json"),
     pipeline_cmc_incremental: bool = Form(False),
@@ -1707,12 +1708,14 @@ async def action_update_scheduler(
     }
     try:
         validate_pipeline_steps(selected_steps)
+        normalized_start_time = normalize_start_time(start_time)
     except ValueError as exc:
         return redirect_with_error("/scheduler", str(exc))
 
     patch = {
         "enabled": enabled in ("1", "on", "true", "yes"),
         "interval_hours": max(1, min(168, interval_hours)),
+        "start_time": normalized_start_time,
         "steps": selected_steps,
         "pipeline_options": pipeline_options,
     }
@@ -1807,6 +1810,7 @@ async def api_odoo_push_preflight(
             limit=limit,
             missing_only=missing_only,
             source_filter=source_filter or None,
+            incremental_pool=True,
         )
         return JSONResponse(content=result)
     except Exception as exc:

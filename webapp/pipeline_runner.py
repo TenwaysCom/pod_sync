@@ -636,6 +636,7 @@ def run_pipeline(
                     dry_run=False,
                     limit=odoo_push_limit,
                     excluded_source_types=excluded_push_source_types or None,
+                    incremental_pool=True,
                 )
                 push_status = (
                     result.get("execution_status")
@@ -685,6 +686,39 @@ def run_pipeline(
                         "needs_review": result.get("needs_review", 0),
                         "missing_required": result.get("missing_required", 0),
                         "failed": result.get("failed", 0),
+                        "incremental_pool_enabled": result.get(
+                            "incremental_pool_enabled", False
+                        ),
+                        "pool_path": result.get("pool_path"),
+                        "pool_candidate_count": result.get(
+                            "pool_candidate_count", 0
+                        ),
+                        "pool_inserted_count": result.get(
+                            "pool_inserted_count", 0
+                        ),
+                        "pool_changed_count": result.get(
+                            "pool_changed_count", 0
+                        ),
+                        "pool_evaluated_count": result.get(
+                            "pool_evaluated_count", 0
+                        ),
+                        "pool_claimed_count": result.get(
+                            "pool_claimed_count", 0
+                        ),
+                        "pool_deferred_count": result.get(
+                            "pool_deferred_count", 0
+                        ),
+                        "pool_due_count": result.get("pool_due_count", 0),
+                        "pool_states": result.get("pool_states", {}),
+                        "pool_completed_total": result.get(
+                            "pool_completed_total", 0
+                        ),
+                        "pool_cache_generation": result.get(
+                            "pool_cache_generation", 0
+                        ),
+                        "pool_cache_refresh_kind": result.get(
+                            "pool_cache_refresh_kind"
+                        ),
                         "westerman_pool_gate_status": result.get(
                             "westerman_pool_gate_status", "not_applicable"
                         ),
@@ -705,7 +739,8 @@ def run_pipeline(
                         ),
                         "by_source": result.get("by_source", {}),
                     }
-                    detail = f"status={push_status}, business_status={push_business_status}, input_documents={result.get('input_total',result.get('total',0))}, selected_targets={result.get('selected_target_count',result.get('total',0))}, coalesced={result.get('coalesced_count',0)}, attempted={result.get('attempted',result.get('total',0))}, completed={result.get('completed',0)}, incomplete={result.get('incomplete',0)}, retryable={result.get('retryable',0)}, pushed={result.get('tracking_pushed',0)+result.get('picking_pushed',0)}, skipped={result.get('skipped_existing',0)+result.get('tracking_skipped_same',0)+result.get('picking_skipped_same',0)}, not_found={result.get('tracking_not_found',0)+result.get('picking_not_found',0)}, failed={result.get('failed',0)}"
+                    pool_states = result.get("pool_states") or {}
+                    detail = f"status={push_status}, business_status={push_business_status}, input_documents={result.get('input_total',result.get('total',0))}, selected_targets={result.get('selected_target_count',result.get('total',0))}, coalesced={result.get('coalesced_count',0)}, evaluated={result.get('pool_evaluated_count',0)}, attempted={result.get('attempted',result.get('total',0))}, completed={result.get('completed',0)}, incomplete={result.get('incomplete',0)}, retryable={result.get('retryable',0)}, pool_retry={pool_states.get('retry',0)}, pool_review={pool_states.get('review',0)}, pushed={result.get('tracking_pushed',0)+result.get('picking_pushed',0)}, skipped={result.get('skipped_existing',0)+result.get('tracking_skipped_same',0)+result.get('picking_skipped_same',0)}, not_found={result.get('tracking_not_found',0)+result.get('picking_not_found',0)}, failed={result.get('failed',0)}"
                     if push_status == "ok":
                         if push_business_status == "attention":
                             print(f"[OK] 推送执行成功，有业务待处理数据: {detail}")

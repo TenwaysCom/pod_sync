@@ -1,4 +1,5 @@
 import sys
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -38,6 +39,9 @@ class FakeModels:
                 "id": 201,
                 "tracking_number": "EMTC-001",
                 "pod_link": "https://pod.test/emtc.pdf",
+                "pod_time": "2026-07-17 08:00:00",
+                "pod_state": "pod",
+                "api_state": "completed",
                 "picking_id": [101, "EMTC/OUT/001"],
                 "write_date": "2026-07-17 09:00:00",
             },
@@ -45,6 +49,9 @@ class FakeModels:
                 "id": 202,
                 "tracking_number": "WEST-001",
                 "pod_link": "https://pod.test/westerman.pdf",
+                "pod_time": "2026-07-17 08:00:00",
+                "pod_state": "pod",
+                "api_state": "completed",
                 "picking_id": [103, "WDB2B/OUT/01391"],
                 "write_date": "2026-07-17 09:00:00",
             },
@@ -52,6 +59,9 @@ class FakeModels:
                 "id": 203,
                 "tracking_number": "CMC-001",
                 "pod_link": False,
+                "pod_time": False,
+                "pod_state": "new",
+                "api_state": "new",
                 "picking_id": [102, "CMC/OUT/001"],
                 "write_date": "2026-07-17 09:00:00",
             },
@@ -91,6 +101,17 @@ class FakeModels:
         return value
 
     def _field_value(self, model, row, field):
+        if model == "stock.tracking" and field.startswith("picking_id."):
+            picking_id = self._many2one_id(row.get("picking_id"))
+            picking = next(
+                (item for item in self.pickings if item["id"] == picking_id),
+                None,
+            )
+            if not picking:
+                return False
+            return self._field_value(
+                "stock.picking", picking, field[len("picking_id.") :]
+            )
         if field == "carrier_id.delivery_type":
             carrier_id = self._many2one_id(row.get("carrier_id"))
             carrier = next(
@@ -232,7 +253,7 @@ class OdooReconcileCacheTests(unittest.TestCase):
             self.assertEqual(full["generation"], 1)
             self.assertEqual(
                 full["row_counts"],
-                {"pickings": 3, "tracking": 2, "tracking_pickings": 2},
+                {"pickings": 3, "tracking": 3, "tracking_pickings": 3},
             )
             pickings = odoo_reconcile_cache.load_cached_picking_rows(db_path=db_path)
             self.assertEqual(
@@ -258,6 +279,20 @@ class OdooReconcileCacheTests(unittest.TestCase):
                 odoo_reconcile_cache.cached_stock_tracking_picking_ids(db_path=db_path),
                 [101, 103],
             )
+            push_state = odoo_reconcile_cache.load_cached_push_resolution_state(
+                db_path=db_path
+            )
+            self.assertTrue(push_state["available"])
+            self.assertEqual(
+                [row["id"] for row in push_state["tracking"]],
+                [201, 202, 203],
+            )
+            incomplete = next(
+                row for row in push_state["tracking"] if row["id"] == 203
+            )
+            self.assertEqual(incomplete["source_slug"], "cmc")
+            self.assertEqual(incomplete["pod_link"], "")
+            self.assertEqual(incomplete["pod_state"], "new")
             status = odoo_reconcile_cache.cache_status(db_path=db_path)
             self.assertTrue(status["available"])
             self.assertEqual(status["generation"], 1)
@@ -275,7 +310,7 @@ class OdooReconcileCacheTests(unittest.TestCase):
             self.assertEqual(incremental["generation"], 2)
             self.assertEqual(
                 incremental["row_counts"],
-                {"pickings": 2, "tracking": 1, "tracking_pickings": 2},
+                {"pickings": 2, "tracking": 2, "tracking_pickings": 2},
             )
             self.assertEqual(
                 [row["picking_name"] for row in odoo_reconcile_cache.load_cached_picking_rows(
@@ -290,6 +325,15 @@ class OdooReconcileCacheTests(unittest.TestCase):
             self.assertEqual(
                 odoo_reconcile_cache.cached_stock_tracking_picking_ids(db_path=db_path),
                 [103],
+            )
+            self.assertEqual(
+                [
+                    row["id"]
+                    for row in odoo_reconcile_cache.load_cached_push_resolution_state(
+                        db_path=db_path
+                    )["tracking"]
+                ],
+                [202, 203],
             )
             pod_state = odoo_reconcile_cache.load_cached_pod_state(db_path=db_path)
             self.assertEqual(pod_state["generation"], 2)
@@ -350,6 +394,38 @@ class OdooReconcileCacheTests(unittest.TestCase):
                 odoo_reconcile_cache.load_cached_tracking_rows(db_path=db_path),
                 before_tracking,
             )
+
+    def test_v1_cache_is_rebuilt_before_it_is_used_for_push_decisions(self):
+        fake = FakeModels()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "reconcile.sqlite3"
+            connection = sqlite3.connect(db_path)
+            connection.executescript(
+                """
+                CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO meta(key, value) VALUES('schema_version', '1');
+                INSERT INTO meta(key, value) VALUES('generation', '99');
+                CREATE TABLE pickings(id INTEGER PRIMARY KEY);
+                CREATE TABLE tracking(id INTEGER PRIMARY KEY, pod_link TEXT NOT NULL);
+                CREATE TABLE tracking_pickings(id INTEGER PRIMARY KEY);
+                """
+            )
+            connection.commit()
+            connection.close()
+
+            result = odoo_reconcile_cache.refresh_reconcile_cache(
+                full_cfg=self._config(),
+                models=fake,
+                now=datetime(2026, 7, 17, 10, 0, tzinfo=timezone.utc),
+                db_path=db_path,
+            )
+            push_state = odoo_reconcile_cache.load_cached_push_resolution_state(
+                db_path=db_path
+            )
+
+        self.assertEqual(result["refresh_kind"], "full")
+        self.assertEqual(result["generation"], 1)
+        self.assertEqual(len(push_state["tracking"]), 3)
 
     def test_changed_carrier_scope_forces_full_rebuild(self):
         fake = FakeModels()

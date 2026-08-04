@@ -144,6 +144,12 @@ def start_push_run(
         "needs_review": 0,
         "missing_required": 0,
         "failed": 0,
+        "incremental_pool_enabled": False,
+        "pool_candidate_count": 0,
+        "pool_evaluated_count": 0,
+        "pool_claimed_count": 0,
+        "pool_completed_total": 0,
+        "pool_states": {},
         "log_file": str(log_path.relative_to(PROJECT_ROOT)),
     }
     append_record(record)
@@ -211,6 +217,22 @@ def finish_push_run(
                     rec["needs_review"] = result.get("needs_review", 0)
                     rec["missing_required"] = result.get("missing_required", 0)
                     rec["failed"] = result.get("failed", 0)
+                    rec["incremental_pool_enabled"] = result.get(
+                        "incremental_pool_enabled", False
+                    )
+                    rec["pool_candidate_count"] = result.get(
+                        "pool_candidate_count", 0
+                    )
+                    rec["pool_evaluated_count"] = result.get(
+                        "pool_evaluated_count", 0
+                    )
+                    rec["pool_claimed_count"] = result.get(
+                        "pool_claimed_count", 0
+                    )
+                    rec["pool_completed_total"] = result.get(
+                        "pool_completed_total", 0
+                    )
+                    rec["pool_states"] = result.get("pool_states", {})
                     _save_history_unlocked(records)
                     return rec
             return None

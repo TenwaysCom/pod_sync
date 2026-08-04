@@ -88,5 +88,16 @@
       "cmc": "cmc",
       "westerman": "westman"
     }
+  },
+  "odoo_push": {
+    "incremental_pool_enabled": true,
+    "pool_path": "./runtime/odoo_push/push_pool.sqlite3",
+    "batch_limit": 500,
+    "lease_seconds": 21600,
+    "not_found_retry_hours": 24,
+    "review_retry_hours": 168,
+    "completed_audit_hours": 168,
+    "retry_base_seconds": 900,
+    "retry_max_seconds": 86400
   }
 }

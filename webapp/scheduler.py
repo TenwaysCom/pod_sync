@@ -8,16 +8,21 @@ has been reached.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from clients.common.sync_integrity import exclusive_file_lock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "runtime" / "scheduler.json"
 DEFAULT_LOG_PATH = PROJECT_ROOT / "runtime" / "scheduler.log"
+SCHEDULE_TIMEZONE_NAME = "Asia/Hong_Kong"
+SCHEDULE_TIMEZONE = ZoneInfo(SCHEDULE_TIMEZONE_NAME)
+DEFAULT_START_TIME = "09:00"
 
 
 def _utc_now():
@@ -32,9 +37,36 @@ def _parse_iso(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
     except ValueError:
         return None
+
+
+def normalize_start_time(value: str | None) -> str:
+    """Validate and normalize the operator-facing Hong Kong start time."""
+
+    text = str(value or "").strip()
+    match = re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)", text)
+    if not match:
+        raise ValueError("启动时间格式无效，请使用 HH:MM（香港时间）。")
+    return f"{match.group(1)}:{match.group(2)}"
+
+
+def _local_time_from_iso(value: str | None) -> str | None:
+    parsed = _parse_iso(value)
+    if parsed is None:
+        return None
+    return parsed.astimezone(SCHEDULE_TIMEZONE).strftime("%H:%M")
+
+
+def _display_local_datetime(value: str | None) -> str | None:
+    parsed = _parse_iso(value)
+    if parsed is None:
+        return None
+    return parsed.astimezone(SCHEDULE_TIMEZONE).strftime("%Y-%m-%d %H:%M")
 
 
 DEFAULT_STEPS = [
@@ -65,6 +97,8 @@ def _default_config():
     return {
         "enabled": False,
         "interval_hours": 24,
+        "start_time": DEFAULT_START_TIME,
+        "schedule_timezone": SCHEDULE_TIMEZONE_NAME,
         "next_run_at": None,
         "last_run_at": None,
         "last_run_job_id": None,
@@ -101,6 +135,15 @@ def _normalize_config(cfg: dict) -> dict:
         **defaults["pipeline_options"],
         **saved_options,
     }
+    try:
+        normalized["start_time"] = normalize_start_time(cfg.get("start_time"))
+    except ValueError:
+        # Preserve the effective clock time of legacy configs instead of
+        # moving an existing production schedule during deployment.
+        normalized["start_time"] = (
+            _local_time_from_iso(cfg.get("next_run_at")) or DEFAULT_START_TIME
+        )
+    normalized["schedule_timezone"] = SCHEDULE_TIMEZONE_NAME
     return normalized
 
 
@@ -164,27 +207,59 @@ class Scheduler:
         with self._lock:
             with exclusive_file_lock(self.claim_path):
                 cfg = self.load_config()
-                for key in ("enabled", "interval_hours"):
+                schedule_changed = False
+                for key in ("enabled", "interval_hours", "start_time"):
                     if key in patch:
-                        cfg[key] = patch[key]
+                        value = patch[key]
+                        if key == "start_time":
+                            value = normalize_start_time(value)
+                        if cfg.get(key) != value:
+                            schedule_changed = True
+                        cfg[key] = value
                 if "steps" in patch:
                     cfg["steps"] = {**cfg.get("steps", {}), **patch["steps"]}
                 if "pipeline_options" in patch:
                     cfg["pipeline_options"] = {**cfg.get("pipeline_options", {}), **patch["pipeline_options"]}
+                cfg["schedule_timezone"] = SCHEDULE_TIMEZONE_NAME
                 cfg["updated_at"] = _fmt_iso(_utc_now())
+                if schedule_changed:
+                    next_run = self.compute_next_run(cfg) if cfg.get("enabled") else None
+                    cfg["next_run_at"] = _fmt_iso(next_run) if next_run else None
                 self._save_config_raw(cfg)
                 return cfg
 
-    def compute_next_run(self, cfg: dict) -> datetime | None:
+    def compute_next_run(
+        self,
+        cfg: dict,
+        *,
+        now: datetime | None = None,
+        after: datetime | None = None,
+    ) -> datetime | None:
         interval = int(cfg.get("interval_hours", 24))
         if interval <= 0:
             return None
-        last_run_at = _parse_iso(cfg.get("last_run_at"))
-        base = last_run_at or _parse_iso(cfg.get("created_at")) or _utc_now()
-        next_run = base.replace(minute=0, second=0, microsecond=0)
-        # Advance by at least one interval from base
-        while next_run <= _utc_now():
-            next_run = datetime.fromtimestamp(next_run.timestamp() + interval * 3600, tz=timezone.utc)
+        now_utc = (now or _utc_now()).astimezone(timezone.utc).replace(microsecond=0)
+        interval_delta = timedelta(hours=interval)
+
+        if after is not None:
+            next_run = after.astimezone(timezone.utc) + interval_delta
+        else:
+            start_time = normalize_start_time(
+                cfg.get("start_time") or DEFAULT_START_TIME
+            )
+            hour, minute = (int(part) for part in start_time.split(":"))
+            local_now = now_utc.astimezone(SCHEDULE_TIMEZONE)
+            local_anchor = local_now.replace(
+                hour=hour,
+                minute=minute,
+                second=0,
+                microsecond=0,
+            )
+            next_run = local_anchor.astimezone(timezone.utc)
+
+        # Missed occurrences are skipped rather than submitted in a burst.
+        while next_run <= now_utc:
+            next_run += interval_delta
         return next_run
 
     def _run_pipeline_job(self) -> str | None:
@@ -237,8 +312,14 @@ class Scheduler:
                     return
 
                 next_run_at = _parse_iso(cfg.get("next_run_at"))
-                if next_run_at is None or next_run_at <= _utc_now():
-                    attempt_at = _fmt_iso(_utc_now())
+                now = _utc_now()
+                if next_run_at is None:
+                    next_run = self.compute_next_run(cfg, now=now)
+                    cfg["next_run_at"] = _fmt_iso(next_run) if next_run else None
+                    self._save_config_raw(cfg)
+                    return
+                if next_run_at <= now:
+                    attempt_at = _fmt_iso(now)
                     job_id = self._run_pipeline_job()
                     cfg["last_attempt_at"] = attempt_at
                     cfg["last_attempt_ok"] = bool(job_id)
@@ -246,14 +327,14 @@ class Scheduler:
                         cfg["last_run_at"] = attempt_at
                         cfg["last_run_job_id"] = job_id
                         cfg["last_run_ok"] = None  # Will be reconciled later if needed
-                        next_run = self.compute_next_run(cfg)
-                    else:
-                        # Command construction failed before a job existed. Keep
-                        # last_run_* truthful and persist a future retry so the
-                        # minute loop cannot hammer the same invalid config.
-                        retry_cfg = dict(cfg)
-                        retry_cfg["last_run_at"] = attempt_at
-                        next_run = self.compute_next_run(retry_cfg)
+                    # Advance from the claimed scheduled occurrence, not the
+                    # actual start time, so slow jobs do not move the cadence.
+                    cfg["last_scheduled_at"] = _fmt_iso(next_run_at)
+                    next_run = self.compute_next_run(
+                        cfg,
+                        now=now,
+                        after=next_run_at,
+                    )
                     cfg["next_run_at"] = _fmt_iso(next_run) if next_run else None
                     self._save_config_raw(cfg)
                     if job_id:
@@ -309,11 +390,17 @@ class Scheduler:
         return {
             "enabled": cfg.get("enabled", False),
             "interval_hours": cfg.get("interval_hours", 24),
+            "start_time": cfg.get("start_time", DEFAULT_START_TIME),
+            "schedule_timezone": SCHEDULE_TIMEZONE_NAME,
+            "schedule_timezone_label": "香港时间",
             "next_run_at": next_run_at,
+            "next_run_display": _display_local_datetime(next_run_at),
             "last_run_at": cfg.get("last_run_at"),
+            "last_run_display": _display_local_datetime(cfg.get("last_run_at")),
             "last_run_job_id": cfg.get("last_run_job_id"),
             "last_run_ok": cfg.get("last_run_ok"),
             "last_attempt_at": cfg.get("last_attempt_at"),
+            "last_attempt_display": _display_local_datetime(cfg.get("last_attempt_at")),
             "last_attempt_ok": cfg.get("last_attempt_ok"),
             "is_running": self._thread is not None and self._thread.is_alive(),
             "steps": cfg.get("steps", {}),

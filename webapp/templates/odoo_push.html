@@ -234,7 +234,11 @@
                     <span>门禁后文档 <strong>{{ eligible_total }}</strong></span>
                     <span>唯一目标 <strong>{{ selected_total }}</strong></span>
                     <span>合并文档 <strong>{{ rec.coalesced_count or 0 }}</strong></span>
-                    <span>实际处理 <strong>{{ rec.attempted or 0 }}</strong></span>
+              <span>实际处理 <strong>{{ rec.attempted or 0 }}</strong></span>
+              {% if rec.get("incremental_pool_enabled") %}
+              <span>批量校验 <strong>{{ rec.get("pool_evaluated_count", 0) }}</strong></span>
+              <span>逐条请求 <strong>{{ rec.get("pool_claimed_count", 0) }}</strong></span>
+              {% endif %}
                     <span>完成 <strong>{{ rec.completed or 0 }}</strong></span>
                     <span>未完成 <strong>{{ rec.incomplete or 0 }}</strong></span>
                     <span>可重试 <strong>{{ rec.retryable or 0 }}</strong></span>

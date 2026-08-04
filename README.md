@@ -2,6 +2,10 @@
 
 `pod_sync` 是一个独立的 POD 同步与 Phase 1A 处理仓库。
 
+## 核心文档
+
+- [POD 同步系统项目交接文档](docs/HANDOVER.md)
+
 当前仓库只保留 4 类内容：
 
 - 客户端入口与共享同步逻辑
@@ -110,8 +114,8 @@ QueryDeluxe 64/65 可以按阶段替换为普通 Odoo XML-RPC。唯一的模式�
 - `shadow`：QueryDeluxe 仍是权威数据，同时刷新并对比 XML-RPC 缓存。
 - `xmlrpc`：完全从 XML-RPC 缓存生成 POD 索引和对账数据，不访问 Query 64/65。
 
-XML-RPC 缓存只保留 `delivery_type=spare/cmc/westman` 的出库单，以及
-`stock.tracking` 中已有 POD 的记录。首次是全量构建，之后按 `write_date`
+XML-RPC 缓存只保留 `delivery_type=spare/cmc/westman` 的出库单，以及这些
+出库单关联的 `stock.tracking`（包含尚未写入 POD 的记录）。首次是全量构建，之后按 `write_date`
 增量刷新，每 7 天自动全量校准一次。缓存路径默认为
 `runtime/odoo_reconcile/odoo_reconcile.sqlite3`。
 
@@ -120,6 +124,29 @@ delivery type 按本次业务范围排除，不再为了这个状态加载全部
 
 生产切换建议先运行 `shadow` 并检查任务日志中的 `shadow_status`，确认稳定后再改为
 `xmlrpc`。需要回滚时只需改回 `querydeluxe`，无需删除缓存。
+
+### Odoo 增量推送池
+
+完整流水线默认把 Phase 1A 的全量结果刷新到
+`runtime/odoo_push/push_pool.sqlite3`，但不会再把全部历史记录逐条请求 Odoo：
+
+- 首次部署先用上面的 XML-RPC 对账缓存批量校验历史目标；
+- 只有新增文件、目标 URL 变化、状态不完整或到期复核项才进入逐条写入；
+- 未找到项默认 24 小时后批量复核，歧义项默认 7 天后复核；
+- 已完成项每 7 天通过一次全量缓存重新审计，防止 Odoo 外部修改长期漂移；
+- 写入前仍执行原有的承运商范围、唯一性和当前值检查，任务中断后可安全重试。
+
+不需要手工初始化：升级后的第一次完整流水线会自动创建池并完成首次校验。任务详情页会分别显示“本轮批量校验”和“本轮逐条请求”。紧急回退到旧推送方式时，可以在 `config.local.json` 设置：
+
+网页“Odoo 推送”的预览也使用同一批量缓存，确认写入后使用同一增量池，因此不会再先预检 4 万条、随后又逐条重放 4 万条。
+
+```json
+{
+  "odoo_push": {
+    "incremental_pool_enabled": false
+  }
+}
+```
 
 再看 Phase 1A：
 

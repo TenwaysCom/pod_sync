@@ -2933,6 +2933,12 @@ class OdooPushTests(unittest.TestCase):
                         "needs_review": 1,
                         "missing_required": 1,
                         "failed": 0,
+                        "incremental_pool_enabled": True,
+                        "pool_candidate_count": 5,
+                        "pool_evaluated_count": 4,
+                        "pool_claimed_count": 2,
+                        "pool_completed_total": 2,
+                        "pool_states": {"completed": 2, "review": 2, "failed": 1},
                     },
                 )
 
@@ -2953,6 +2959,10 @@ class OdooPushTests(unittest.TestCase):
         self.assertEqual(saved["ambiguous"], 1)
         self.assertEqual(saved["needs_review"], 1)
         self.assertEqual(saved["missing_required"], 1)
+        self.assertTrue(saved["incremental_pool_enabled"])
+        self.assertEqual(saved["pool_evaluated_count"], 4)
+        self.assertEqual(saved["pool_claimed_count"], 2)
+        self.assertEqual(saved["pool_states"]["review"], 2)
 
     def test_push_history_templates_render_partial_separately_from_running(self):
         for relative_path in (
@@ -2964,6 +2974,8 @@ class OdooPushTests(unittest.TestCase):
             self.assertIn("部分完成", template)
             self.assertIn("badge-warn", template)
             self.assertIn("coalesced_count", template)
+            self.assertIn("pool_evaluated_count", template)
+            self.assertIn("pool_claimed_count", template)
 
     def test_reconcile_direct_push_endpoint_is_fail_closed(self):
         from webapp import app as app_module
@@ -3069,6 +3081,27 @@ class OdooPushTests(unittest.TestCase):
         self.assertFalse(build_command.call_args_list[1].kwargs["dry_run"])
         self.assertEqual(start_job.call_count, 2)
 
+    def test_preflight_api_uses_incremental_pool(self):
+        from webapp import app as app_module
+
+        with mock.patch.object(
+            odoo_push,
+            "preflight_payload",
+            return_value={"ok": True, "ready_to_push_count": 0},
+        ) as preflight:
+            response = asyncio.run(
+                app_module.api_odoo_push_preflight(
+                    config_path="config.local.json",
+                    payload_path="payload.json",
+                    limit=0,
+                    missing_only=True,
+                    source_filter="",
+                )
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(preflight.call_args.kwargs["incremental_pool"])
+
     def test_push_template_defaults_to_preview_and_requires_write_confirmation(self):
         template = (PROJECT_ROOT / "webapp/templates/odoo_push.html").read_text(
             encoding="utf-8"
@@ -3121,6 +3154,427 @@ class OdooPushTests(unittest.TestCase):
             self.assertFalse(log_file.exists())
             remaining = json.loads(history_file.read_text(encoding="utf-8"))
             self.assertEqual([rec["push_id"] for rec in remaining], ["push-b"])
+
+    def test_incremental_pool_bootstrap_batches_history_and_rerun_makes_no_live_calls(self):
+        class IncrementalModels:
+            def __init__(self):
+                self.search_count = 0
+                self.writes = []
+
+            def execute_kw(self, _db, _uid, _password, model, method, args, options=None):
+                if model == "stock.tracking" and method == "web_search_read":
+                    self.search_count += 1
+                    domain = (options or {}).get("domain", [])
+                    tracking_number = next(
+                        (
+                            term[2]
+                            for term in domain
+                            if isinstance(term, tuple)
+                            and term[0] == "tracking_number"
+                        ),
+                        None,
+                    )
+                    if tracking_number == "TRACK-1":
+                        return {
+                            "records": [
+                                {
+                                    "id": 201,
+                                    "tracking_number": "TRACK-1",
+                                    "picking_id": [101, "CMC/OUT/001"],
+                                    **complete_tracking_pod(
+                                        "https://files.test/one.pdf"
+                                    ),
+                                }
+                            ]
+                        }
+                    return {
+                        "records": [
+                            {
+                                "id": 202,
+                                "tracking_number": "TRACK-2",
+                                "picking_id": [102, "CMC/OUT/002"],
+                                "pod_link": False,
+                                "pod_time": False,
+                                "pod_state": "new",
+                                "api_state": "new",
+                            }
+                        ]
+                    }
+                if model == "stock.tracking" and method == "write":
+                    self.writes.append(args)
+                    return True
+                raise AssertionError((model, method, args, options))
+
+        payload = {
+            "job_id": "phase-generation-1",
+            "generated_at": "2026-08-04T01:00:00Z",
+            "items": [
+                {
+                    "identifier_status": "ready",
+                    "payload_item_id": "item-1",
+                    "document_uid": "doc-1",
+                    "preferred_key_type": "tracking_number",
+                    "preferred_key": "TRACK-1",
+                    "source_name": "CMC",
+                    "source_type": "onedrive",
+                    "local_path": "/srv/pod/one.pdf",
+                },
+                {
+                    "identifier_status": "ready",
+                    "payload_item_id": "item-2",
+                    "document_uid": "doc-2",
+                    "preferred_key_type": "tracking_number",
+                    "preferred_key": "TRACK-2",
+                    "source_name": "CMC",
+                    "source_type": "onedrive",
+                    "local_path": "/srv/pod/two.pdf",
+                },
+            ],
+        }
+        snapshot = {
+            "available": True,
+            "generation": 1,
+            "pickings": [
+                {"id": 101, "name": "CMC/OUT/001", "tracking_number": "TRACK-1", "source_slug": "cmc"},
+                {"id": 102, "name": "CMC/OUT/002", "tracking_number": "TRACK-2", "source_slug": "cmc"},
+            ],
+            "tracking": [
+                {
+                    "id": 201,
+                    "tracking_number": "TRACK-1",
+                    "picking_id": 101,
+                    "source_slug": "cmc",
+                    **complete_tracking_pod("https://files.test/one.pdf"),
+                },
+                {
+                    "id": 202,
+                    "tracking_number": "TRACK-2",
+                    "picking_id": 102,
+                    "source_slug": "cmc",
+                    "pod_link": "",
+                    "pod_time": "",
+                    "pod_state": "new",
+                    "api_state": "new",
+                },
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            payload_path = Path(tmpdir) / "payload.json"
+            payload_path.write_text(json.dumps(payload), encoding="utf-8")
+            cfg = self._config()
+            cfg["odoo_push"] = {
+                "pool_path": str(Path(tmpdir) / "push.sqlite3"),
+                "completed_audit_hours": 168,
+            }
+            models = IncrementalModels()
+            target_urls = {
+                "one.pdf": "https://files.test/one.pdf",
+                "two.pdf": "https://files.test/two.pdf",
+            }
+
+            def target_url(_cfg, *, local_path, source_file_url):
+                return target_urls[Path(local_path).name], None, "local"
+
+            with mock.patch.object(
+                odoo_push, "load_config", return_value=cfg
+            ), mock.patch.object(
+                odoo_push, "resolve_push_file_url", side_effect=target_url
+            ), mock.patch(
+                "webapp.odoo_reconcile_cache.refresh_reconcile_cache",
+                return_value={"generation": 1, "refresh_kind": "full"},
+            ) as refresh_cache, mock.patch(
+                "webapp.odoo_reconcile_cache.load_cached_push_resolution_state",
+                return_value=snapshot,
+            ), mock.patch.object(
+                odoo_push,
+                "connect_odoo",
+                return_value=(FakeCommon(), models),
+            ) as connect:
+                first = odoo_push.push_payload(
+                    config_path="config.local.json",
+                    payload_path=str(payload_path),
+                    incremental_pool=True,
+                )
+                payload["job_id"] = "phase-generation-2"
+                payload["generated_at"] = "2026-08-04T13:00:00Z"
+                payload_path.write_text(json.dumps(payload), encoding="utf-8")
+                second = odoo_push.push_payload(
+                    config_path="config.local.json",
+                    payload_path=str(payload_path),
+                    incremental_pool=True,
+                )
+                target_urls["one.pdf"] = "https://files.test/one-v2.pdf"
+                payload["job_id"] = "phase-generation-3"
+                payload["generated_at"] = "2026-08-05T01:00:00Z"
+                payload_path.write_text(json.dumps(payload), encoding="utf-8")
+                third = odoo_push.push_payload(
+                    config_path="config.local.json",
+                    payload_path=str(payload_path),
+                    incremental_pool=True,
+                )
+
+        self.assertEqual(first["pool_candidate_count"], 2)
+        self.assertEqual(first["pool_evaluated_count"], 2)
+        self.assertEqual(first["pool_claimed_count"], 1)
+        self.assertEqual(first["attempted"], 1)
+        self.assertEqual(first["completed"], 2)
+        self.assertEqual(first["pool_states"], {"completed": 2})
+        self.assertEqual(len(models.writes), 2)
+        self.assertEqual(models.search_count, 2)
+        self.assertEqual(second["pool_evaluated_count"], 0)
+        self.assertEqual(second["pool_claimed_count"], 0)
+        self.assertEqual(second["attempted"], 0)
+        self.assertEqual(third["pool_changed_count"], 1)
+        self.assertEqual(third["pool_claimed_count"], 1)
+        self.assertEqual(third["attempted"], 1)
+        self.assertEqual(refresh_cache.call_count, 2)
+        self.assertEqual(connect.call_count, 2)
+
+    def test_incremental_pool_defers_not_found_and_ambiguous_without_item_rpc(self):
+        payload = {
+            "job_id": "phase-generation",
+            "generated_at": "2026-08-04T01:00:00Z",
+            "items": [
+                {
+                    "identifier_status": "ready",
+                    "payload_item_id": "missing",
+                    "document_uid": "missing-doc",
+                    "preferred_key_type": "tracking_number",
+                    "preferred_key": "MISSING",
+                    "source_name": "CMC",
+                    "source_type": "onedrive",
+                    "local_path": "/srv/pod/missing.pdf",
+                },
+                {
+                    "identifier_status": "ready",
+                    "payload_item_id": "duplicate",
+                    "document_uid": "duplicate-doc",
+                    "preferred_key_type": "tracking_number",
+                    "preferred_key": "DUPLICATE",
+                    "source_name": "CMC",
+                    "source_type": "onedrive",
+                    "local_path": "/srv/pod/duplicate.pdf",
+                },
+            ],
+        }
+        snapshot = {
+            "available": True,
+            "generation": 1,
+            "pickings": [],
+            "tracking": [
+                {
+                    "id": 1,
+                    "tracking_number": "DUPLICATE",
+                    "picking_id": 101,
+                    "source_slug": "cmc",
+                    "pod_link": "",
+                    "pod_time": "",
+                    "pod_state": "new",
+                    "api_state": "new",
+                },
+                {
+                    "id": 2,
+                    "tracking_number": "DUPLICATE",
+                    "picking_id": 102,
+                    "source_slug": "cmc",
+                    "pod_link": "",
+                    "pod_time": "",
+                    "pod_state": "new",
+                    "api_state": "new",
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            payload_path = Path(tmpdir) / "payload.json"
+            payload_path.write_text(json.dumps(payload), encoding="utf-8")
+            cfg = self._config()
+            cfg["odoo_push"] = {"pool_path": str(Path(tmpdir) / "push.sqlite3")}
+            with mock.patch.object(
+                odoo_push, "load_config", return_value=cfg
+            ), mock.patch.object(
+                odoo_push,
+                "resolve_push_file_url",
+                side_effect=lambda _cfg, *, local_path, source_file_url: (
+                    f"https://files.test/{Path(local_path).name}",
+                    None,
+                    "local",
+                ),
+            ), mock.patch(
+                "webapp.odoo_reconcile_cache.refresh_reconcile_cache",
+                return_value={"generation": 1, "refresh_kind": "full"},
+            ), mock.patch(
+                "webapp.odoo_reconcile_cache.load_cached_push_resolution_state",
+                return_value=snapshot,
+            ), mock.patch.object(odoo_push, "connect_odoo") as connect:
+                result = odoo_push.push_payload(
+                    config_path="config.local.json",
+                    payload_path=str(payload_path),
+                    incremental_pool=True,
+                )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["business_status"], "attention")
+        self.assertEqual(result["pool_evaluated_count"], 2)
+        self.assertEqual(result["pool_claimed_count"], 0)
+        self.assertEqual(result["pool_states"], {"retry": 1, "review": 1})
+        self.assertEqual(result["business_pending"], 2)
+        self.assertEqual(result["retryable"], 1)
+        self.assertEqual(result["manual_review"], 1)
+        connect.assert_not_called()
+
+    def test_incremental_cache_exact_hit_requires_full_snapshot_or_live_confirmation(self):
+        item = {
+            "identifier_status": "ready",
+            "payload_item_id": "item-1",
+            "document_uid": "doc-1",
+            "preferred_key_type": "tracking_number",
+            "preferred_key": "TRACK-1",
+            "source_name": "CMC",
+            "source_type": "onedrive",
+            "local_path": "/srv/pod/one.pdf",
+        }
+        candidate = {
+            "candidate_key": "candidate-1",
+            "provider_identity": "cmc",
+            "key_type": "tracking_number",
+            "key_value": "TRACK-1",
+            "item": item,
+        }
+        maps = odoo_push._push_resolution_maps(
+            {
+                "pickings": [],
+                "tracking": [
+                    {
+                        "id": 201,
+                        "tracking_number": "TRACK-1",
+                        "picking_id": 101,
+                        "source_slug": "cmc",
+                        **complete_tracking_pod("https://files.test/one.pdf"),
+                    }
+                ],
+            }
+        )
+        settings = {
+            "completed_audit_seconds": 3600,
+            "not_found_retry_seconds": 7200,
+            "review_retry_seconds": 10800,
+        }
+        with mock.patch.object(
+            odoo_push,
+            "resolve_push_file_url",
+            return_value=("https://files.test/one.pdf", None, "local"),
+        ):
+            full = odoo_push._evaluate_push_pool_candidate(
+                candidate,
+                full_cfg={},
+                maps=maps,
+                settings=settings,
+                cache_refresh_kind="full",
+            )
+            incremental = odoo_push._evaluate_push_pool_candidate(
+                candidate,
+                full_cfg={},
+                maps=maps,
+                settings=settings,
+                cache_refresh_kind="incremental",
+            )
+
+        self.assertEqual(full["state"], "completed")
+        self.assertEqual(incremental["state"], "pending")
+        self.assertEqual(
+            incremental["status"], "live_exact_confirmation_required"
+        )
+
+    def test_incremental_preflight_uses_batch_snapshot_without_item_rpc(self):
+        payload = {
+            "job_id": "phase-generation",
+            "generated_at": "2026-08-04T01:00:00Z",
+            "items": [
+                {
+                    "identifier_status": "ready",
+                    "payload_item_id": "done",
+                    "document_uid": "done-doc",
+                    "preferred_key_type": "tracking_number",
+                    "preferred_key": "DONE",
+                    "source_name": "CMC",
+                    "source_type": "onedrive",
+                    "local_path": "/srv/pod/done.pdf",
+                },
+                {
+                    "identifier_status": "ready",
+                    "payload_item_id": "write",
+                    "document_uid": "write-doc",
+                    "preferred_key_type": "tracking_number",
+                    "preferred_key": "WRITE",
+                    "source_name": "CMC",
+                    "source_type": "onedrive",
+                    "local_path": "/srv/pod/write.pdf",
+                },
+            ],
+        }
+        snapshot = {
+            "available": True,
+            "generation": 1,
+            "pickings": [],
+            "tracking": [
+                {
+                    "id": 1,
+                    "tracking_number": "DONE",
+                    "picking_id": 101,
+                    "source_slug": "cmc",
+                    **complete_tracking_pod("https://files.test/done.pdf"),
+                },
+                {
+                    "id": 2,
+                    "tracking_number": "WRITE",
+                    "picking_id": 102,
+                    "source_slug": "cmc",
+                    "pod_link": "",
+                    "pod_time": "",
+                    "pod_state": "new",
+                    "api_state": "new",
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            payload_path = Path(tmpdir) / "payload.json"
+            payload_path.write_text(json.dumps(payload), encoding="utf-8")
+            cfg = self._config()
+            cfg["odoo_push"] = {"pool_path": str(Path(tmpdir) / "push.sqlite3")}
+            with mock.patch.object(
+                odoo_push, "load_config", return_value=cfg
+            ), mock.patch.object(
+                odoo_push,
+                "resolve_push_file_url",
+                side_effect=lambda _cfg, *, local_path, source_file_url: (
+                    f"https://files.test/{Path(local_path).name}",
+                    None,
+                    "local",
+                ),
+            ), mock.patch(
+                "webapp.odoo_reconcile_cache.refresh_reconcile_cache",
+                return_value={"generation": 1, "refresh_kind": "full"},
+            ) as refresh_cache, mock.patch(
+                "webapp.odoo_reconcile_cache.load_cached_push_resolution_state",
+                return_value=snapshot,
+            ), mock.patch.object(odoo_push, "connect_odoo") as connect:
+                result = odoo_push.preflight_payload(
+                    config_path="config.local.json",
+                    payload_path=str(payload_path),
+                    missing_only=True,
+                    incremental_pool=True,
+                )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["server_version"], "batch-cache")
+        self.assertEqual(result["ready_to_push_count"], 1)
+        self.assertEqual(result["already_has_pod_count"], 1)
+        self.assertEqual(result["selected_for_run_count"], 1)
+        self.assertEqual(result["pool_states"], {"completed": 1, "pending": 1})
+        self.assertTrue(result["details_omitted"])
+        refresh_cache.assert_called_once()
+        connect.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CACHE_PATH = PROJECT_ROOT / "runtime" / "odoo_reconcile" / "odoo_reconcile.sqlite3"
 READ_BACKENDS = frozenset({"querydeluxe", "shadow", "xmlrpc"})
 TRANSIENT_HTTP_CODES = frozenset({502, 503, 504})
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_SOURCE_DELIVERY_TYPES = {
     "emtc": "spare",
     "cmc": "cmc",
@@ -37,7 +37,16 @@ PICKING_FIELDS = [
     "create_date",
     "write_date",
 ]
-TRACKING_FIELDS = ["id", "tracking_number", "pod_link", "picking_id", "write_date"]
+TRACKING_FIELDS = [
+    "id",
+    "tracking_number",
+    "pod_link",
+    "pod_time",
+    "pod_state",
+    "api_state",
+    "picking_id",
+    "write_date",
+]
 TRACKING_PICKING_FIELDS = ["id", "name", "carrier_tracking_ref", "carrier_id", "write_date"]
 
 
@@ -187,6 +196,26 @@ def _connect(path: Path) -> sqlite3.Connection:
 
 
 def _ensure_schema(connection: sqlite3.Connection) -> None:
+    existing_meta = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
+    ).fetchone()
+    if existing_meta:
+        row = connection.execute(
+            "SELECT value FROM meta WHERE key='schema_version'"
+        ).fetchone()
+        existing_version = str(row[0]) if row else ""
+        if existing_version != str(SCHEMA_VERSION):
+            # This cache is fully derived from Odoo. Rebuilding is safer than
+            # retaining v1 rows which omitted incomplete tracking state and
+            # therefore cannot prove POD write idempotency.
+            connection.executescript(
+                """
+                DROP TABLE IF EXISTS pickings;
+                DROP TABLE IF EXISTS tracking;
+                DROP TABLE IF EXISTS tracking_pickings;
+                DROP TABLE IF EXISTS meta;
+                """
+            )
     connection.executescript(
         """
         CREATE TABLE IF NOT EXISTS meta (
@@ -216,7 +245,10 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY,
             tracking_number TEXT,
             picking_id INTEGER,
-            pod_link TEXT NOT NULL,
+            pod_link TEXT,
+            pod_time TEXT,
+            pod_state TEXT,
+            api_state TEXT,
             write_date TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_tracking_picking ON tracking(picking_id);
@@ -363,15 +395,17 @@ def _canonical_picking(
 
 def _canonical_tracking(row: dict) -> dict | None:
     record_id = _as_int(row.get("id"))
-    pod_link = _text(row.get("pod_link"))
     picking_id = _as_int(row.get("picking_id"))
-    if not record_id or not pod_link or not picking_id:
+    if not record_id or not picking_id:
         return None
     return {
         "id": record_id,
         "tracking_number": _text(row.get("tracking_number")),
         "picking_id": picking_id,
-        "pod_link": pod_link,
+        "pod_link": _text(row.get("pod_link")),
+        "pod_time": _text(row.get("pod_time")),
+        "pod_state": _text(row.get("pod_state")),
+        "api_state": _text(row.get("api_state")),
         "write_date": _text(row.get("write_date")),
     }
 
@@ -415,11 +449,19 @@ def _insert_pickings(connection: sqlite3.Connection, rows: Iterable[dict]) -> No
 def _insert_tracking(connection: sqlite3.Connection, rows: Iterable[dict]) -> None:
     connection.executemany(
         """
-        INSERT INTO tracking(id, tracking_number, picking_id, pod_link, write_date)
-        VALUES(:id, :tracking_number, :picking_id, :pod_link, :write_date)
+        INSERT INTO tracking(
+            id, tracking_number, picking_id, pod_link, pod_time,
+            pod_state, api_state, write_date
+        )
+        VALUES(
+            :id, :tracking_number, :picking_id, :pod_link, :pod_time,
+            :pod_state, :api_state, :write_date
+        )
         ON CONFLICT(id) DO UPDATE SET
             tracking_number=excluded.tracking_number, picking_id=excluded.picking_id,
-            pod_link=excluded.pod_link, write_date=excluded.write_date
+            pod_link=excluded.pod_link, pod_time=excluded.pod_time,
+            pod_state=excluded.pod_state, api_state=excluded.api_state,
+            write_date=excluded.write_date
         """,
         list(rows),
     )
@@ -563,7 +605,15 @@ def refresh_reconcile_cache(
                     ("picking_type_id.code", "=", "outgoing"),
                     ("carrier_id.delivery_type", "in", list(source_types.values())),
                 ]
-                tracking_domain = [("pod_link", "!=", False), ("picking_id", "!=", False)]
+                tracking_domain = [
+                    ("picking_id", "!=", False),
+                    (
+                        "picking_id.carrier_id.delivery_type",
+                        "in",
+                        list(source_types.values()),
+                    ),
+                    ("picking_id.picking_type_id.code", "=", "outgoing"),
+                ]
             else:
                 lower = last_success - timedelta(seconds=settings["overlap_seconds"])
                 window = [
@@ -598,8 +648,26 @@ def refresh_reconcile_cache(
                 models, odoo_cfg, model="stock.tracking", domain=tracking_domain,
                 fields=TRACKING_FIELDS, page_size=page_size,
             )
+            cached_target_picking_ids = {
+                int(row[0]) for row in connection.execute("SELECT id FROM pickings")
+            }
+            changed_picking_ids = {
+                int(record_id)
+                for row in raw_pickings
+                if (record_id := _as_int(row.get("id"))) is not None
+            }
+            current_target_picking_ids = (
+                cached_target_picking_ids - changed_picking_ids
+            ) | {int(row["id"]) for row in canonical_pickings}
+            if refresh_kind == "full":
+                current_target_picking_ids = {
+                    int(row["id"]) for row in canonical_pickings
+                }
             canonical_tracking = [
-                item for row in raw_tracking if (item := _canonical_tracking(row)) is not None
+                item
+                for row in raw_tracking
+                if (item := _canonical_tracking(row)) is not None
+                and int(item["picking_id"]) in current_target_picking_ids
             ]
 
             new_tracking_picking_ids = {row["picking_id"] for row in canonical_tracking}
@@ -645,6 +713,7 @@ def refresh_reconcile_cache(
                 item
                 for row in tracking_picking_rows
                 if (item := _canonical_tracking_picking(row)) is not None
+                and int(item["id"]) in current_target_picking_ids
             ]
 
             connection.execute("BEGIN IMMEDIATE")
@@ -665,6 +734,10 @@ def refresh_reconcile_cache(
                 ]
                 connection.executemany("DELETE FROM pickings WHERE id=?", [(value,) for value in changed_picking_ids])
                 connection.executemany("DELETE FROM tracking WHERE id=?", [(value,) for value in changed_tracking_ids])
+                connection.executemany(
+                    "DELETE FROM tracking_pickings WHERE id=?",
+                    [(value,) for value in changed_picking_ids],
+                )
 
             _insert_pickings(connection, canonical_pickings)
             _insert_tracking(connection, canonical_tracking)
@@ -831,11 +904,16 @@ def load_cached_pod_state(
                    p.name AS picking_name, p.carrier_tracking_ref
             FROM tracking AS t
             LEFT JOIN tracking_pickings AS p ON p.id=t.picking_id
+            WHERE COALESCE(t.pod_link, '') != ''
             ORDER BY t.id ASC
             """
         )]
         picking_ids = [int(row[0]) for row in connection.execute(
-            "SELECT DISTINCT picking_id FROM tracking WHERE picking_id IS NOT NULL ORDER BY picking_id"
+            """
+            SELECT DISTINCT picking_id FROM tracking
+            WHERE picking_id IS NOT NULL AND COALESCE(pod_link, '') != ''
+            ORDER BY picking_id
+            """
         )]
         connection.commit()
         generation = int(metadata.get("generation") or 0)
@@ -873,3 +951,65 @@ def cached_stock_tracking_picking_ids(
     return load_cached_pod_state(
         config_path, full_cfg=full_cfg, db_path=db_path
     )["picking_ids"]
+
+
+def load_cached_push_resolution_state(
+    config_path: str = "config.local.json",
+    *,
+    full_cfg: dict | None = None,
+    db_path: str | Path | None = None,
+) -> dict:
+    """Load the complete carrier-scoped state used by the push work pool.
+
+    Unlike ``load_cached_pod_state``, this includes tracking rows without a POD.
+    Those rows are required to distinguish a safe update from a create and to
+    prove that one Odoo target is unique before skipping a historical item.
+    """
+
+    full_cfg = full_cfg or (load_config(config_path) if db_path is None else {})
+    path = resolve_cache_path(full_cfg, config_path=config_path, db_path=db_path)
+    if not path.exists():
+        return {
+            "available": False,
+            "generation": 0,
+            "last_success_at": None,
+            "pickings": [],
+            "tracking": [],
+        }
+    connection = _connect(path)
+    try:
+        _ensure_schema(connection)
+        connection.execute("BEGIN")
+        metadata = _meta(connection)
+        pickings = [dict(row) for row in connection.execute(
+            """
+            SELECT id, name, tracking_number, source_slug,
+                   carrier_delivery_type, write_date
+            FROM pickings ORDER BY id ASC
+            """
+        )]
+        tracking = [dict(row) for row in connection.execute(
+            """
+            SELECT t.id, t.tracking_number, t.picking_id, t.pod_link,
+                   t.pod_time, t.pod_state, t.api_state, t.write_date,
+                   p.name AS picking_name, p.source_slug,
+                   p.carrier_delivery_type
+            FROM tracking AS t
+            JOIN pickings AS p ON p.id=t.picking_id
+            ORDER BY t.id ASC
+            """
+        )]
+        connection.commit()
+        generation = int(metadata.get("generation") or 0)
+        return {
+            "available": bool(generation),
+            "generation": generation,
+            "last_success_at": metadata.get("last_success_at"),
+            "pickings": pickings,
+            "tracking": tracking,
+        }
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()

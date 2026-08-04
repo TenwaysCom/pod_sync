@@ -14,6 +14,34 @@ from webapp import pipeline_runner
 
 
 class WebAppActionTests(unittest.TestCase):
+    def test_odoo_push_ui_uses_batch_preflight_and_incremental_write_pool(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.local.json"
+            payload_path = Path(tmpdir) / "payload.json"
+            config_path.write_text("{}", encoding="utf-8")
+            payload_path.write_text('{"items": []}', encoding="utf-8")
+
+            _, preview_command, preview_metadata = actions.build_odoo_push_command(
+                config_path=str(config_path),
+                payload_path=str(payload_path),
+                dry_run=True,
+                missing_only=True,
+            )
+            _, write_command, write_metadata = actions.build_odoo_push_command(
+                config_path=str(config_path),
+                payload_path=str(payload_path),
+                dry_run=False,
+                missing_only=True,
+            )
+
+        self.assertIn("--incremental-preflight", preview_command)
+        self.assertIn("--dry-run", preview_command)
+        self.assertNotIn("--incremental-pool", preview_command)
+        self.assertIn("--incremental-pool", write_command)
+        self.assertNotIn("--missing-only", write_command)
+        self.assertTrue(preview_metadata["incremental_preflight"])
+        self.assertTrue(write_metadata["incremental_pool"])
+
     def test_load_westerman_pool_snapshot_reports_durable_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -1040,6 +1068,7 @@ class WebAppActionTests(unittest.TestCase):
         self.assertEqual(
             push_payload.call_args.kwargs["payload_path"], str(payload_path)
         )
+        self.assertTrue(push_payload.call_args.kwargs["incremental_pool"])
 
     def test_partial_push_refreshes_reports_before_pipeline_returns_partial(self):
         with tempfile.TemporaryDirectory() as tmpdir:

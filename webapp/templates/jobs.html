@@ -176,6 +176,10 @@
               <span>唯一目标 {{ selected_total }}</span>
               <span>合并 {{ rec.coalesced_count or 0 }}</span>
               <span>实际处理 {{ rec.attempted or 0 }}</span>
+              {% if rec.get("incremental_pool_enabled") %}
+                <span>批量校验 {{ rec.get("pool_evaluated_count", 0) }}</span>
+                <span>逐条请求 {{ rec.get("pool_claimed_count", 0) }}</span>
+              {% endif %}
               <span>完成 {{ rec.completed or 0 }}</span>
               <span>未完成 {{ rec.incomplete or 0 }}</span>
               <span>可重试 {{ rec.retryable or 0 }}</span>

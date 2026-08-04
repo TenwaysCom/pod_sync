@@ -10,6 +10,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -26,6 +27,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from webapp.actions import resolve_project_path
 from webapp.odoo_reconcile_cache import resolve_source_delivery_types
+from webapp.odoo_push_pool import (
+    OdooPushPool,
+    build_candidate_fingerprint,
+    build_candidate_key,
+    resolve_push_pool_settings,
+)
 from clients.common.sync_integrity import ODOO_MUTATION_LOCK_PATH, exclusive_file_lock
 from phase1a.phase1a_pod.westerman_gate import (
     DEFAULT_CANDIDATE_REFRESH_MAX_AGE_HOURS,
@@ -983,6 +990,395 @@ def _tracking_has_complete_target_pod(
     )
 
 
+def _push_pool_generation(
+    payload: dict,
+    payload_path: str,
+    *,
+    candidate_keys: list[str] | None = None,
+) -> str:
+    """Return a stable identifier for one complete Phase payload generation."""
+
+    job_id = str(payload.get("job_id") or "").strip()
+    generated_at = str(payload.get("generated_at") or "").strip()
+    if job_id or generated_at:
+        raw = f"{job_id}\x1f{generated_at}"
+    else:
+        path = Path(payload_path)
+        stat = path.stat()
+        raw = f"{path.resolve()}\x1f{stat.st_mtime_ns}\x1f{stat.st_size}"
+    scope_hash = hashlib.sha256()
+    for candidate_key in sorted(candidate_keys or []):
+        scope_hash.update(candidate_key.encode("ascii"))
+        scope_hash.update(b"\n")
+    return hashlib.sha256(
+        f"{raw}\x1f{scope_hash.hexdigest()}".encode("utf-8")
+    ).hexdigest()
+
+
+def _prepare_push_pool_candidates(items: list[dict], full_cfg: dict) -> list[dict]:
+    candidates = []
+    odoo_cfg = get_odoo_cfg(full_cfg)
+    for index, item in enumerate(items):
+        provider = _payload_provider_identity(item)
+        key_type, key_value = _payload_lookup_key(item)
+        pool_key_value = str(key_value or "").strip()
+        if key_type not in {"tracking_number", "picking_name"} or not pool_key_value:
+            # Invalid payload rows must remain individually reviewable rather
+            # than collapsing into one empty-key pool record.
+            pool_key_value = (
+                _payload_document_uid(item)
+                or str(item.get("payload_item_id") or "")
+                or f"unresolved-{index}"
+            )
+        target_url, _, _ = resolve_push_file_url(
+            full_cfg,
+            local_path=item.get("local_path"),
+            source_file_url=item.get("file_url"),
+        )
+        candidate_key = build_candidate_key(
+            provider, str(key_type or "invalid"), pool_key_value
+        )
+        candidates.append(
+            {
+                "candidate_key": candidate_key,
+                "provider_identity": provider,
+                "key_type": str(key_type or ""),
+                "key_value": str(key_value or ""),
+                "fingerprint": build_candidate_fingerprint(
+                    provider=provider,
+                    key_type=str(key_type or ""),
+                    key_value=str(key_value or ""),
+                    item=item,
+                    target_url=target_url,
+                    scope_identity=json.dumps(
+                        {
+                            "url": str(odoo_cfg.get("url") or "").rstrip("/"),
+                            "db": str(odoo_cfg.get("db") or ""),
+                            "expected_delivery_type": (
+                                _payload_expected_delivery_type(full_cfg, item)
+                            ),
+                            "picking_name_field": str(
+                                odoo_cfg.get("picking_name_field") or "name"
+                            ),
+                            "tracking_number_field": str(
+                                odoo_cfg.get("tracking_number_field")
+                                or "carrier_tracking_ref"
+                            ),
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                ),
+                "item": item,
+                "initial_state": (
+                    "review" if _is_cross_source_conflict(item) else "pending"
+                ),
+            }
+        )
+    return candidates
+
+
+def _push_resolution_maps(snapshot: dict) -> dict:
+    pickings_by_name = defaultdict(list)
+    pickings_by_tracking = defaultdict(list)
+    tracking_by_number = defaultdict(list)
+    tracking_by_picking = defaultdict(list)
+    for picking in snapshot.get("pickings", []):
+        provider = str(picking.get("source_slug") or "")
+        name = str(picking.get("name") or "")
+        tracking_number = str(picking.get("tracking_number") or "")
+        if provider and name:
+            pickings_by_name[(provider, name)].append(picking)
+        if provider and tracking_number:
+            pickings_by_tracking[(provider, tracking_number)].append(picking)
+    for tracking in snapshot.get("tracking", []):
+        provider = str(tracking.get("source_slug") or "")
+        tracking_number = str(tracking.get("tracking_number") or "")
+        picking_id = tracking.get("picking_id")
+        if provider and tracking_number:
+            tracking_by_number[(provider, tracking_number)].append(tracking)
+        if picking_id:
+            tracking_by_picking[int(picking_id)].append(tracking)
+    return {
+        "pickings_by_name": pickings_by_name,
+        "pickings_by_tracking": pickings_by_tracking,
+        "tracking_by_number": tracking_by_number,
+        "tracking_by_picking": tracking_by_picking,
+    }
+
+
+def _evaluate_push_pool_candidate(
+    candidate: dict,
+    *,
+    full_cfg: dict,
+    maps: dict,
+    settings: dict,
+    cache_refresh_kind: str | None = None,
+) -> dict:
+    item = candidate["item"]
+    provider = str(candidate.get("provider_identity") or "")
+    key_type = str(candidate.get("key_type") or "")
+    key_value = str(candidate.get("key_value") or "")
+    result = {"candidate_key": candidate["candidate_key"]}
+
+    def outcome(state: str, status: str, delay_seconds: int) -> dict:
+        return dict(
+            result,
+            state=state,
+            status=status,
+            delay_seconds=delay_seconds,
+        )
+
+    if _is_cross_source_conflict(item):
+        return outcome(
+            "review", "cross_source_conflict", settings["review_retry_seconds"]
+        )
+    if key_type not in {"tracking_number", "picking_name"} or not key_value:
+        return outcome(
+            "review", "missing_required", settings["review_retry_seconds"]
+        )
+    target_url, _, _ = resolve_push_file_url(
+        full_cfg,
+        local_path=item.get("local_path"),
+        source_file_url=item.get("file_url"),
+    )
+    if not target_url:
+        return outcome(
+            "retry", "missing_local_file", settings["not_found_retry_seconds"]
+        )
+
+    # Only the three provider scopes in the reconcile cache are safe to decide
+    # locally. Unknown legacy sources retain the live mutation path.
+    if provider not in {"cmc", "emtc", "westerman"}:
+        return outcome("pending", "live_check_required", 0)
+
+    if key_type == "tracking_number":
+        direct_tracking = maps["tracking_by_number"].get(
+            (provider, key_value), []
+        )
+        if len(direct_tracking) > 1:
+            return outcome(
+                "review",
+                "multiple_tracking_matches",
+                settings["review_retry_seconds"],
+            )
+        if len(direct_tracking) == 1:
+            if _tracking_has_complete_target_pod(direct_tracking[0], target_url):
+                if cache_refresh_kind != "full":
+                    return outcome(
+                        "pending", "live_exact_confirmation_required", 0
+                    )
+                return outcome(
+                    "completed",
+                    "cache_exact_complete",
+                    settings["completed_audit_seconds"],
+                )
+            return outcome("pending", "tracking_write_required", 0)
+        pickings = maps["pickings_by_tracking"].get((provider, key_value), [])
+    else:
+        display_value = _display_picking_name_for_search(key_value) or key_value
+        pickings = maps["pickings_by_name"].get((provider, display_value), [])
+
+    if not pickings:
+        return outcome(
+            "retry", "not_found", settings["not_found_retry_seconds"]
+        )
+    if len(pickings) > 1:
+        return outcome(
+            "review",
+            "multiple_picking_matches",
+            settings["review_retry_seconds"],
+        )
+
+    picking_id = int(pickings[0]["id"])
+    picking_tracking = maps["tracking_by_picking"].get(picking_id, [])
+    if len(picking_tracking) > 1:
+        return outcome(
+            "review",
+            "multiple_tracking_records",
+            settings["review_retry_seconds"],
+        )
+    if len(picking_tracking) == 1:
+        if _tracking_has_complete_target_pod(picking_tracking[0], target_url):
+            if cache_refresh_kind != "full":
+                return outcome(
+                    "pending", "live_exact_confirmation_required", 0
+                )
+            return outcome(
+                "completed",
+                "cache_exact_complete",
+                settings["completed_audit_seconds"],
+            )
+        return outcome("pending", "tracking_write_required", 0)
+
+    tracking_number_for_create = (
+        key_value if key_type == "tracking_number" else ""
+    )
+    if not tracking_number_for_create and _is_westerman_payload_item(item):
+        tracking_number_for_create = str(item.get("tracking_number") or "").strip()
+    if tracking_number_for_create:
+        return outcome("pending", "tracking_create_required", 0)
+    return outcome(
+        "review", "tracking_number_required", settings["review_retry_seconds"]
+    )
+
+
+def _merge_push_pool_summary(
+    results: dict,
+    *,
+    pool: OdooPushPool,
+    generation: str,
+    refresh_stats: dict,
+    cache_stats: dict,
+    evaluated_count: int,
+    claimed_count: int,
+    recovered_lease_count: int,
+) -> dict:
+    summary = pool.summary(generation=generation)
+    states = summary["states"]
+    retryable = sum(
+        int(states.get(state, 0) or 0)
+        for state in ("pending", "leased", "retry", "failed")
+    )
+    manual_review = int(states.get("review", 0) or 0)
+    business_pending = retryable + manual_review
+    run_completed = int(results.get("completed", 0) or 0)
+    results.update(
+        {
+            "incremental_pool_enabled": True,
+            "pool_path": summary["pool_path"],
+            "pool_generation": generation,
+            "pool_candidate_count": summary["total"],
+            "pool_inserted_count": refresh_stats.get("inserted_count", 0),
+            "pool_changed_count": refresh_stats.get("changed_count", 0),
+            "pool_unchanged_count": refresh_stats.get("unchanged_count", 0),
+            "pool_evaluated_count": evaluated_count,
+            "pool_claimed_count": claimed_count,
+            "pool_deferred_count": max(0, summary["total"] - claimed_count),
+            "pool_recovered_lease_count": recovered_lease_count,
+            "pool_due_count": summary["due_count"],
+            "pool_states": states,
+            "pool_completed_total": int(states.get("completed", 0) or 0),
+            "pool_cache_generation": cache_stats.get("generation", 0),
+            "pool_cache_refresh_kind": cache_stats.get("refresh_kind"),
+            "run_completed": run_completed,
+            "completed": int(states.get("completed", 0) or 0),
+            "incomplete": business_pending,
+            "retryable": retryable,
+            "manual_review": manual_review,
+            "business_pending": business_pending,
+            "business_status": "attention" if business_pending else "complete",
+        }
+    )
+    return results
+
+
+def _refresh_incremental_push_plan(
+    *,
+    config_path: str,
+    payload_path: str,
+    payload: dict,
+    items: list[dict],
+    full_cfg: dict,
+    limit: int = 0,
+    claim: bool = False,
+) -> dict | None:
+    """Refresh the local work plan and optionally lease its writable rows."""
+
+    settings = resolve_push_pool_settings(full_cfg, config_path=config_path)
+    if not settings["enabled"]:
+        return None
+    candidates = _prepare_push_pool_candidates(items, full_cfg)
+    generation = _push_pool_generation(
+        payload,
+        payload_path,
+        candidate_keys=[candidate["candidate_key"] for candidate in candidates],
+    )
+    pool = OdooPushPool(settings["pool_path"])
+    refresh_stats = pool.refresh_candidates(
+        candidates,
+        generation=generation,
+    )
+    recovered_lease_count = pool.recover_expired_leases()
+    due_candidates = pool.due_candidates(generation=generation)
+    cache_stats = {}
+    needs_cache = any(
+        candidate.get("provider_identity") in {"cmc", "emtc", "westerman"}
+        and not _is_cross_source_conflict(candidate["item"])
+        for candidate in due_candidates
+    )
+    snapshot = {
+        "available": True,
+        "generation": 0,
+        "pickings": [],
+        "tracking": [],
+    }
+    if needs_cache:
+        from webapp.odoo_reconcile_cache import (
+            load_cached_push_resolution_state,
+            refresh_reconcile_cache,
+        )
+
+        force_full_cache = (
+            refresh_stats.get("inserted_count", 0)
+            == refresh_stats.get("candidate_count", 0)
+            and refresh_stats.get("candidate_count", 0) > 0
+        ) or any(
+            candidate.get("state") == "completed"
+            for candidate in due_candidates
+        )
+        cache_stats = refresh_reconcile_cache(
+            config_path=config_path,
+            full_cfg=full_cfg,
+            force_full=force_full_cache,
+        )
+        snapshot = load_cached_push_resolution_state(
+            config_path=config_path,
+            full_cfg=full_cfg,
+        )
+        if not snapshot.get("available"):
+            raise RuntimeError(
+                "Odoo reconcile cache refresh produced no usable generation"
+            )
+    maps = _push_resolution_maps(snapshot)
+    evaluations = [
+        _evaluate_push_pool_candidate(
+            candidate,
+            full_cfg=full_cfg,
+            maps=maps,
+            settings=settings,
+            cache_refresh_kind=cache_stats.get("refresh_kind"),
+        )
+        for candidate in due_candidates
+    ]
+    pool.set_evaluations(evaluations)
+
+    lease_owner = None
+    claimed = []
+    if claim:
+        claim_limit = settings["batch_limit"]
+        if limit > 0:
+            claim_limit = min(claim_limit, limit)
+        lease_owner, claimed = pool.claim_pending(
+            generation=generation,
+            limit=claim_limit,
+            lease_seconds=settings["lease_seconds"],
+        )
+    return {
+        "pool": pool,
+        "settings": settings,
+        "generation": generation,
+        "refresh_stats": refresh_stats,
+        "cache_stats": cache_stats,
+        "evaluated_count": len(evaluations),
+        "claimed_count": len(claimed),
+        "recovered_lease_count": recovered_lease_count,
+        "lease_owner": lease_owner,
+        "claimed": claimed,
+        "summary": pool.summary(generation=generation),
+    }
+
+
 def _live_unique_target_has_exact_pod_url(
     models,
     odoo_cfg: dict,
@@ -1295,6 +1691,7 @@ def _push_payload_unlocked(
     excluded_source_types: set[str] | None = None,
     skip_existing: bool = True,
     missing_only: bool = False,
+    incremental_pool: bool = False,
 ):
     full_cfg = load_config(config_path)
     odoo_cfg = get_odoo_cfg(full_cfg)
@@ -1365,6 +1762,47 @@ def _push_payload_unlocked(
     if not items:
         return _finalize_push_results(results)
 
+    pool_context = None
+    if incremental_pool:
+        if dry_run:
+            return _failed_push_result(
+                "incremental Odoo push pool cannot be used with dry_run"
+            )
+        if missing_only:
+            return _failed_push_result(
+                "incremental Odoo push pool cannot be combined with missing_only"
+            )
+        plan = _refresh_incremental_push_plan(
+            config_path=config_path,
+            payload_path=payload_path,
+            payload=payload,
+            items=items,
+            full_cfg=full_cfg,
+            limit=limit,
+            claim=True,
+        )
+        if plan is not None:
+            items = []
+            for candidate in plan["claimed"]:
+                item = dict(candidate["item"])
+                item["_odoo_push_pool_key"] = candidate["candidate_key"]
+                items.append(item)
+            pool_context = {
+                key: value
+                for key, value in plan.items()
+                if key not in {"claimed", "summary"}
+            }
+            results["total"] = len(items)
+            if not items:
+                return _merge_push_pool_summary(
+                    _finalize_push_results(results),
+                    **{
+                        key: value
+                        for key, value in pool_context.items()
+                        if key != "settings" and key != "lease_owner"
+                    },
+                )
+
     models = None
     if any(not _is_cross_source_conflict(item) for item in items):
         try:
@@ -1386,7 +1824,27 @@ def _push_payload_unlocked(
                 results["by_source"][source]["retryable"] += 1
                 results["failed"] += 1
             results["error"] = f"Odoo connection failed: {exc}"
-            return _finalize_push_results(results)
+            finalized = _finalize_push_results(results)
+            if pool_context:
+                for item in failed_items:
+                    candidate_key = item.get("_odoo_push_pool_key")
+                    if candidate_key:
+                        pool_context["pool"].finish_claim(
+                            candidate_key,
+                            lease_owner=pool_context["lease_owner"],
+                            status="failed",
+                            retryable=True,
+                            settings=pool_context["settings"],
+                        )
+                return _merge_push_pool_summary(
+                    finalized,
+                    **{
+                        key: value
+                        for key, value in pool_context.items()
+                        if key != "settings" and key != "lease_owner"
+                    },
+                )
+            return finalized
 
     if missing_only and models is not None and existing_index is not None:
         filtered_items = []
@@ -1408,7 +1866,7 @@ def _push_payload_unlocked(
             f"{len(items)} records require write or review"
         )
 
-    if limit > 0:
+    if limit > 0 and pool_context is None:
         items = items[:limit]
     results["total"] = len(items)
     results["skipped_existing"] = missing_only_skipped
@@ -1452,6 +1910,8 @@ def _push_payload_unlocked(
             "error": None,
             "retryable": False,
         }
+        if item.get("_odoo_push_pool_key"):
+            detail["pool_candidate_key"] = item["_odoo_push_pool_key"]
 
         if key_type not in {"tracking_number", "picking_name"} or not key_value or not file_url:
             detail["status"] = "missing_required"
@@ -1688,7 +2148,37 @@ def _push_payload_unlocked(
 
         results["details"].append(detail)
 
-    return _finalize_push_results(results)
+    finalized = _finalize_push_results(results)
+    if pool_context:
+        details_by_key = {
+            detail.get("pool_candidate_key"): detail
+            for detail in results.get("details", [])
+            if detail.get("pool_candidate_key")
+        }
+        for item in items:
+            candidate_key = item.get("_odoo_push_pool_key")
+            if not candidate_key:
+                continue
+            detail = details_by_key.get(candidate_key) or {
+                "status": "failed",
+                "retryable": True,
+            }
+            pool_context["pool"].finish_claim(
+                candidate_key,
+                lease_owner=pool_context["lease_owner"],
+                status=str(detail.get("status") or "failed"),
+                retryable=detail.get("retryable") is True,
+                settings=pool_context["settings"],
+            )
+        return _merge_push_pool_summary(
+            finalized,
+            **{
+                key: value
+                for key, value in pool_context.items()
+                if key != "settings" and key != "lease_owner"
+            },
+        )
+    return finalized
 
 
 def push_payload(
@@ -1701,6 +2191,7 @@ def push_payload(
     excluded_source_types: set[str] | None = None,
     skip_existing: bool = True,
     missing_only: bool = False,
+    incremental_pool: bool = False,
 ):
     """Serialize payload pushes so concurrent jobs cannot create duplicates."""
 
@@ -1715,6 +2206,7 @@ def push_payload(
                 excluded_source_types=excluded_source_types,
                 skip_existing=skip_existing,
                 missing_only=missing_only,
+                incremental_pool=incremental_pool,
             )
         except Exception as exc:
             result = _failed_push_result(
@@ -2002,6 +2494,103 @@ def _push_single_item_unlocked(
     return finish()
 
 
+def _incremental_preflight_result(
+    *,
+    config_path: str,
+    payload_path: str,
+    payload: dict,
+    items: list[dict],
+    full_cfg: dict,
+    limit: int,
+    metrics: dict,
+    westerman_pool_filtered: int,
+    westerman_gate: dict,
+) -> dict | None:
+    plan = _refresh_incremental_push_plan(
+        config_path=config_path,
+        payload_path=payload_path,
+        payload=payload,
+        items=items,
+        full_cfg=full_cfg,
+        limit=limit,
+        claim=False,
+    )
+    if plan is None:
+        return None
+    summary = plan["summary"]
+    states = summary["states"]
+    statuses = summary["statuses"]
+    completed = int(states.get("completed", 0) or 0)
+    pending = int(states.get("pending", 0) or 0)
+    retry = int(states.get("retry", 0) or 0)
+    review = int(states.get("review", 0) or 0)
+    failed = int(states.get("failed", 0) or 0)
+    leased = int(states.get("leased", 0) or 0)
+    invalid = int(statuses.get("missing_required", 0) or 0) + int(
+        statuses.get("missing_local_file", 0) or 0
+    )
+    manual_review = max(
+        0,
+        review - int(statuses.get("missing_required", 0) or 0),
+    )
+    selected_for_run = min(pending, plan["settings"]["batch_limit"])
+    if limit > 0:
+        selected_for_run = min(selected_for_run, limit)
+    result = {
+        "ok": True,
+        "status": "ok",
+        "execution_status": "ok",
+        "business_status": (
+            "attention" if pending + retry + review + failed + leased else "complete"
+        ),
+        "business_pending": pending + retry + review + failed + leased,
+        "attempted": 0,
+        "completed": completed,
+        "incomplete": pending + retry + review + failed + leased,
+        "retryable": pending + retry + failed + leased,
+        "manual_review": manual_review,
+        "technical_failure_count": failed + leased,
+        "server_version": "batch-cache",
+        "total": selected_for_run,
+        **metrics,
+        "exact_url_count": completed,
+        "pending_write_count": pending + retry + review + failed + leased,
+        "selected_for_run_count": selected_for_run,
+        "westerman_pool_gate_status": westerman_gate.get("status", "unknown"),
+        "westerman_pool_filtered": westerman_pool_filtered,
+        "ready_to_push_count": pending,
+        "already_has_pod_count": completed,
+        "not_found_count": int(statuses.get("not_found", 0) or 0),
+        "invalid_count": invalid,
+        "manual_review_count": manual_review,
+        "preflight_error_count": failed + leased,
+        "ready_to_push": [],
+        "already_has_pod": [],
+        "not_found": [],
+        "invalid": [],
+        "manual_review": [],
+        "preflight_errors": [],
+        "incremental_pool_enabled": True,
+        "pool_path": summary["pool_path"],
+        "pool_candidate_count": summary["total"],
+        "pool_evaluated_count": plan["evaluated_count"],
+        "pool_states": states,
+        "pool_statuses": statuses,
+        "pool_cache_generation": plan["cache_stats"].get("generation", 0),
+        "pool_cache_refresh_kind": plan["cache_stats"].get("refresh_kind"),
+        "details_omitted": True,
+    }
+    for key in (
+        "candidate_refresh_status",
+        "candidate_refresh_updated_at",
+        "candidate_refresh_age_seconds",
+        "candidate_refresh_max_age_hours",
+    ):
+        if key in westerman_gate:
+            result[f"westerman_{key}"] = westerman_gate[key]
+    return result
+
+
 def _preflight_payload_unredacted(
     *,
     config_path: str,
@@ -2009,6 +2598,7 @@ def _preflight_payload_unredacted(
     limit: int = 0,
     source_filter: str | None = None,
     missing_only: bool = False,
+    incremental_pool: bool = False,
 ):
     """Check which payload items are actually findable in Odoo before pushing.
 
@@ -2083,6 +2673,21 @@ def _preflight_payload_unredacted(
             "manual_review": [],
             "preflight_errors": [],
         }
+
+    if incremental_pool:
+        incremental_result = _incremental_preflight_result(
+            config_path=config_path,
+            payload_path=payload_path,
+            payload=payload,
+            items=items,
+            full_cfg=full_cfg,
+            limit=limit,
+            metrics=metrics,
+            westerman_pool_filtered=westerman_pool_filtered,
+            westerman_gate=westerman_gate,
+        )
+        if incremental_result is not None:
+            return incremental_result
 
     # Load the POD index only as an exact-URL hint. A live cardinality check is
     # mandatory before an index hit can be removed by missing-only.
@@ -2369,18 +2974,26 @@ def preflight_payload(
     limit: int = 0,
     source_filter: str | None = None,
     missing_only: bool = False,
+    incremental_pool: bool = False,
 ):
     """Return preflight data with all signed credentials removed."""
 
-    return redact_sensitive_data(
-        _preflight_payload_unredacted(
+    def run_preflight():
+        return _preflight_payload_unredacted(
             config_path=config_path,
             payload_path=payload_path,
             limit=limit,
             source_filter=source_filter,
             missing_only=missing_only,
+            incremental_pool=incremental_pool,
         )
-    )
+
+    if incremental_pool:
+        with exclusive_file_lock(ODOO_PUSH_LOCK_PATH):
+            result = run_preflight()
+    else:
+        result = run_preflight()
+    return redact_sensitive_data(result)
 
 
 def main():
@@ -2390,6 +3003,19 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Preview without writing")
     parser.add_argument("--limit", type=int, default=0, help="Max items to process (0=unlimited)")
     parser.add_argument("--missing-only", action="store_true", help="Only push records not already in Odoo")
+    parser.add_argument(
+        "--incremental-pool",
+        action="store_true",
+        help=(
+            "Use the durable incremental pool (scheduled Pipeline mode); "
+            "cannot be combined with --dry-run or --missing-only"
+        ),
+    )
+    parser.add_argument(
+        "--incremental-preflight",
+        action="store_true",
+        help="Use the batch cache/pool preflight without item-by-item XML-RPC",
+    )
     parser.add_argument(
         "--source",
         default=None,
@@ -2420,14 +3046,25 @@ def main():
         print(f"Source filter: {args.source}")
         print("-" * 60)
 
-    result = push_payload(
-        config_path=args.config,
-        payload_path=args.payload,
-        dry_run=args.dry_run,
-        limit=args.limit,
-        missing_only=args.missing_only,
-        source_filter=args.source,
-    )
+    if args.incremental_preflight:
+        result = preflight_payload(
+            config_path=args.config,
+            payload_path=args.payload,
+            limit=args.limit,
+            missing_only=args.missing_only,
+            source_filter=args.source,
+            incremental_pool=True,
+        )
+    else:
+        result = push_payload(
+            config_path=args.config,
+            payload_path=args.payload,
+            dry_run=args.dry_run,
+            limit=args.limit,
+            missing_only=args.missing_only,
+            source_filter=args.source,
+            incremental_pool=args.incremental_pool,
+        )
     print(
         json.dumps(
             redact_sensitive_data(result),
@@ -2454,7 +3091,12 @@ def main():
         if hasattr(sys.stdout, "stdout"):
             sys.stdout = sys.stdout.stdout
 
-    sys.exit(0 if result.get("status") == "ok" else 1)
+    sys.exit(
+        0
+        if result.get("status") == "ok"
+        or (not result.get("status") and result.get("ok") is True)
+        else 1
+    )
 
 
 if __name__ == "__main__":

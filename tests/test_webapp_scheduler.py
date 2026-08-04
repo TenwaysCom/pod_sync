@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote_plus
 from unittest import mock
@@ -56,11 +57,12 @@ def _run_concurrent_scheduler_tick(
 
 
 class SchedulerWestermanTests(unittest.TestCase):
-    def _call_update_scheduler(self, app_module, *, steps):
+    def _call_update_scheduler(self, app_module, *, steps, start_time="09:00"):
         return asyncio.run(
             app_module.action_update_scheduler(
                 enabled="1",
                 interval_hours=24,
+                start_time=start_time,
                 pipeline_config_path="config.local.json",
                 pipeline_phase1a_config_path="phase1a/config.json",
                 pipeline_cmc_incremental=True,
@@ -162,6 +164,8 @@ class SchedulerWestermanTests(unittest.TestCase):
         config = scheduler_module._default_config()
 
         self.assertFalse(config["enabled"])
+        self.assertEqual(config["start_time"], "09:00")
+        self.assertEqual(config["schedule_timezone"], "Asia/Hong_Kong")
         self.assertTrue(config["steps"]["westerman_sync"])
         self.assertEqual(config["pipeline_options"]["westerman_limit"], 0)
         self.assertEqual(config["pipeline_options"]["westerman_workers"], 3)
@@ -192,6 +196,102 @@ class SchedulerWestermanTests(unittest.TestCase):
             self.assertTrue(config["steps"]["westerman_sync"])
             self.assertEqual(config["pipeline_options"]["cmc_workers"], 7)
             self.assertEqual(config["pipeline_options"]["westerman_workers"], 3)
+
+    def test_load_config_migrates_legacy_schedule_without_moving_clock_time(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "scheduler.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "enabled": True,
+                        "interval_hours": 12,
+                        "next_run_at": "2026-08-04T09:00:00Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            instance = scheduler_module.Scheduler(
+                _FakeJobStore(),
+                config_path=config_path,
+                log_path=tmp / "scheduler.log",
+            )
+
+            config = instance.load_config()
+
+            self.assertEqual(config["start_time"], "17:00")
+            self.assertEqual(config["next_run_at"], "2026-08-04T09:00:00Z")
+
+    def test_compute_next_run_uses_hong_kong_start_time_and_interval(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            instance = scheduler_module.Scheduler(
+                _FakeJobStore(),
+                config_path=tmp / "scheduler.json",
+                log_path=tmp / "scheduler.log",
+            )
+            config = scheduler_module._default_config()
+            config["start_time"] = "09:30"
+            config["interval_hours"] = 12
+
+            before_first = instance.compute_next_run(
+                config,
+                now=datetime(2026, 8, 4, 0, 0, tzinfo=timezone.utc),
+            )
+            after_first = instance.compute_next_run(
+                config,
+                now=datetime(2026, 8, 4, 2, 0, tzinfo=timezone.utc),
+            )
+
+            self.assertEqual(
+                before_first,
+                datetime(2026, 8, 4, 1, 30, tzinfo=timezone.utc),
+            )
+            self.assertEqual(
+                after_first,
+                datetime(2026, 8, 4, 13, 30, tzinfo=timezone.utc),
+            )
+
+    def test_update_config_recomputes_next_run_only_when_schedule_changes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            instance = scheduler_module.Scheduler(
+                _FakeJobStore(),
+                config_path=tmp / "scheduler.json",
+                log_path=tmp / "scheduler.log",
+            )
+            config = scheduler_module._default_config()
+            config["enabled"] = True
+            config["start_time"] = "09:00"
+            config["next_run_at"] = "2099-01-01T01:00:00Z"
+            instance.save_config(config)
+
+            unchanged = instance.update_config(
+                {"enabled": True, "interval_hours": 24, "start_time": "09:00"}
+            )
+            with mock.patch(
+                "webapp.scheduler._utc_now",
+                return_value=datetime(2026, 8, 4, 0, 0, tzinfo=timezone.utc),
+            ):
+                changed = instance.update_config({"start_time": "09:30"})
+
+            self.assertEqual(unchanged["next_run_at"], "2099-01-01T01:00:00Z")
+            self.assertEqual(changed["next_run_at"], "2026-08-04T01:30:00Z")
+
+    def test_scheduler_config_save_rejects_invalid_start_time(self):
+        from webapp import app as app_module
+
+        steps = scheduler_module._default_config()["steps"]
+        with mock.patch.object(app_module.scheduler, "update_config") as update_config:
+            response = self._call_update_scheduler(
+                app_module,
+                steps=steps,
+                start_time="25:00",
+            )
+
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("启动时间格式无效", unquote_plus(response.headers["location"]))
+        update_config.assert_not_called()
 
     def test_load_config_preserves_explicit_westerman_opt_out_without_rewriting_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -427,6 +527,37 @@ class SchedulerWestermanTests(unittest.TestCase):
                 scheduler_module._parse_iso(first["next_run_at"]),
                 scheduler_module._utc_now(),
             )
+
+    def test_delayed_tick_advances_from_scheduled_time_without_cadence_drift(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            instance = scheduler_module.Scheduler(
+                _FakeJobStore(),
+                config_path=tmp / "scheduler.json",
+                log_path=tmp / "scheduler.log",
+            )
+            config = scheduler_module._default_config()
+            config["enabled"] = True
+            config["interval_hours"] = 12
+            config["start_time"] = "09:30"
+            config["next_run_at"] = "2026-08-04T01:30:00Z"
+            instance.save_config(config)
+
+            delayed_now = datetime(2026, 8, 4, 2, 5, tzinfo=timezone.utc)
+            with mock.patch(
+                "webapp.scheduler._utc_now",
+                return_value=delayed_now,
+            ), mock.patch.object(
+                instance,
+                "_run_pipeline_job",
+                return_value="job-delayed",
+            ):
+                instance.tick()
+
+            saved = instance.load_config()
+            self.assertEqual(saved["last_run_at"], "2026-08-04T02:05:00Z")
+            self.assertEqual(saved["last_scheduled_at"], "2026-08-04T01:30:00Z")
+            self.assertEqual(saved["next_run_at"], "2026-08-04T13:30:00Z")
 
     def test_concurrent_worker_ticks_claim_one_scheduled_occurrence(self):
         with tempfile.TemporaryDirectory() as tmpdir:

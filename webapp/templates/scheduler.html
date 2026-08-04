@@ -21,13 +21,13 @@
     <div class="scheduler-overview">
       <article class="scheduler-next-card">
         <span class="scheduler-card-label">下次执行</span>
-        <strong>{{ scheduler_status.next_run_at or "未计划" }}</strong>
-        <p>{{ scheduler_status.interval_hours }} 小时执行一次{% if not scheduler_status.enabled %}，当前不会自动触发{% endif %}。</p>
+        <strong>{{ scheduler_status.next_run_display or "未计划" }}</strong>
+        <p>香港时间 {{ scheduler_status.start_time }} 开始，每 {{ scheduler_status.interval_hours }} 小时执行一次{% if not scheduler_status.enabled %}，当前不会自动触发{% endif %}。</p>
       </article>
 
       <article class="scheduler-mini-card">
         <span>上次执行</span>
-        <strong>{{ scheduler_status.last_run_at or "-" }}</strong>
+        <strong>{{ scheduler_status.last_run_display or "-" }}</strong>
       </article>
 
       <article class="scheduler-mini-card">
@@ -42,7 +42,7 @@
 
     {% if scheduler_status.last_attempt_ok is sameas false %}
       <div class="flash flash-error scheduler-attempt-warning" role="alert">
-        <span>最近一次调度尝试（{{ scheduler_status.last_attempt_at or "-" }}）未能创建任务；不会按分钟重复触发，将在 {{ scheduler_status.next_run_at or "修复配置后" }} 再试。</span>
+        <span>最近一次调度尝试（{{ scheduler_status.last_attempt_display or "-" }}，香港时间）未能创建任务；不会按分钟重复触发，将在 {{ scheduler_status.next_run_display or "修复配置后" }} 再试。</span>
       </div>
     {% endif %}
 
@@ -86,6 +86,10 @@
               <label>执行间隔（小时）
                 <input type="number" name="interval_hours" value="{{ scheduler_status.interval_hours }}" min="1" max="168">
                 <span class="field-hint">允许 1 到 168 小时。</span>
+              </label>
+              <label>启动时间（香港时间）
+                <input type="time" name="start_time" value="{{ scheduler_status.start_time }}" step="60" required>
+                <span class="field-hint">保存后从这个时刻开始按间隔执行，精确到分钟。</span>
               </label>
             </div>
           </div>
@@ -173,6 +177,10 @@
             <div>
               <span>Westerman 每批</span>
               <strong>{{ scheduler_status.pipeline_options.westerman_limit or '配置默认（100）' }}</strong>
+            </div>
+            <div>
+              <span>自动执行</span>
+              <strong>香港时间 {{ scheduler_status.start_time }} · 每 {{ scheduler_status.interval_hours }} 小时</strong>
             </div>
           </div>
         </article>

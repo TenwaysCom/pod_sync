@@ -75,9 +75,10 @@ python3 clients/westerman_api/sync.py \
 
 池位于 `runtime/westerman/pod_pull_pool.sqlite3`。正常的无附件响应会显示为
 `waiting_pod`，不是失败；下载结果会写入上面的正式 storage 和 integrity manifest，
-随后可直接进入 Phase 1A。Westerman 是显式 opt-in 来源：新旧 Scheduler 配置均
-默认关闭该步骤，并且 `westerman_api.enabled` 必须明确设为 `true` 才会运行；
-缺失该配置段不会自动启用。
+随后可直接进入 Phase 1A。Westerman 是显式 opt-in 来源：当前 Scheduler 的步骤
+默认选中 Westerman，但 `westerman_api.enabled` 仍必须明确设为 `true` 才会运行；
+缺失该配置段或设为 `false` 时，流水线会安全跳过 Westerman。Scheduler 默认关闭的
+真实写入步骤是 Odoo 推送。
 候选扫描触及安全上限时按降级处理，不清理旧池状态，也不允许本轮 Westerman
 写入 Odoo；扫描顺序优先最新出库单，避免新单长期饥饿。
 候选刷新结果会持久化在池中，只有最近状态为 `complete` 且更新时间不超过

@@ -171,6 +171,13 @@ class JobTemplateTests(unittest.TestCase):
                     "status": "ok",
                     "business_status": "attention",
                     "business_pending": 5009,
+                    "incremental_pool_enabled": True,
+                    "pool_evaluated_count": 40162,
+                    "pool_claimed_count": 26,
+                    "pool_completed_total": 35153,
+                    "pool_states": {"completed": 35153, "retry": 3929, "review": 1080},
+                    "pool_cache_generation": 7,
+                    "pool_cache_refresh_kind": "incremental",
                     "input_total": 40968,
                     "selected_target_count": 40162,
                     "completed": 35153,
@@ -202,6 +209,10 @@ class JobTemplateTests(unittest.TestCase):
             self.assertNotIn("任务执行失败，请查看失败步骤和技术日志", html)
         self.assertIn("查看业务待处理数据", detail_html)
         self.assertIn("查看待处理数据", detail_html)
+        self.assertIn("本轮批量校验", detail_html)
+        self.assertIn("本轮逐条请求", detail_html)
+        self.assertIn("池内已完成", detail_html)
+        self.assertIn("对账缓存第 7 代", detail_html)
 
     def test_detail_renders_warning_value_from_pipeline_report(self):
         html = self._render_detail(

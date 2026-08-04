@@ -79,6 +79,11 @@ class WorkflowTemplateTests(unittest.TestCase):
         self.assertNotIn('name="cmc_limit"', self.scheduler)
         self.assertNotIn('name="emtc_limit"', self.scheduler)
 
+    def test_scheduler_exposes_operator_selected_hong_kong_start_time(self):
+        self.assertIn('type="time" name="start_time"', self.scheduler)
+        self.assertIn("启动时间（香港时间）", self.scheduler)
+        self.assertIn("scheduler_status.next_run_display", self.scheduler)
+
     def test_detailed_report_is_a_tool_and_uses_stock_tracking_wording(self):
         self.assertIn("工具 · 数据诊断", self.report)
         self.assertIn("返回总结对账", self.report)

@@ -248,6 +248,24 @@
               <p class="label">实际处理</p>
               <h2>{{ push_result.get("attempted", push_result.get("total", 0)) }}</h2>
             </article>
+            {% if push_result.get("incremental_pool_enabled") %}
+            <article class="card stat-card stat-card-inline">
+              <p class="label">本轮批量校验</p>
+              <h2>{{ push_result.get("pool_evaluated_count", 0) }}</h2>
+            </article>
+            <article class="card stat-card stat-card-inline">
+              <p class="label">本轮逐条请求</p>
+              <h2>{{ push_result.get("pool_claimed_count", 0) }}</h2>
+            </article>
+            <article class="card stat-card stat-card-inline">
+              <p class="label">池内已完成</p>
+              <h2 style="color: var(--success)">{{ push_result.get("pool_completed_total", 0) }}</h2>
+            </article>
+            <article class="card stat-card stat-card-inline">
+              <p class="label">池内待处理</p>
+              <h2 style="color: var(--warn)">{{ push_result.get("business_pending", 0) }}</h2>
+            </article>
+            {% endif %}
             <article class="card stat-card stat-card-inline">
               <p class="label">成功推送</p>
               <h2 style="color: var(--success)">{{ (push_result.get("tracking_pushed", 0) or 0) + (push_result.get("picking_pushed", 0) or 0) }}</h2>
@@ -265,6 +283,12 @@
               <h2>{{ push_result.get("failed", 0) or 0 }}</h2>
             </article>
           </div>
+          {% if push_result.get("incremental_pool_enabled") %}
+          <p class="muted" style="margin-top: 10px;">
+            增量池：{{ push_result.get("pool_states", {}) }} ·
+            对账缓存第 {{ push_result.get("pool_cache_generation", 0) }} 代（{{ push_result.get("pool_cache_refresh_kind") or "未刷新" }}）
+          </p>
+          {% endif %}
           {% if job.report.data_report.odoo_push.by_source %}
           <p style="font-weight: 600; margin: 12px 0 6px;">按来源分布</p>
           <div class="files-table-wrap">

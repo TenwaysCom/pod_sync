@@ -477,9 +477,15 @@ def build_odoo_push_command(*, config_path: str, payload_path: str | None = None
         command.extend(["--payload", str(payload_path)])
     if dry_run:
         command.append("--dry-run")
+        command.append("--incremental-preflight")
+    else:
+        command.append("--incremental-pool")
     if limit > 0:
         command.extend(["--limit", str(limit)])
-    if missing_only:
+    # The durable write pool already implements exact-state skipping. Keep the
+    # operator choice as metadata, but do not invoke the legacy per-item
+    # missing-only scan for real writes.
+    if missing_only and dry_run:
         command.append("--missing-only")
     if source_filter:
         command.extend(["--source", source_filter])
@@ -492,6 +498,8 @@ def build_odoo_push_command(*, config_path: str, payload_path: str | None = None
         "dry_run": dry_run,
         "limit": limit,
         "missing_only": missing_only,
+        "incremental_pool": not dry_run,
+        "incremental_preflight": dry_run,
         "source_filter": source_filter,
     }
     return label, command, metadata
