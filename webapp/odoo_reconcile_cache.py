@@ -4,6 +4,7 @@ import fcntl
 import json
 import sqlite3
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -266,6 +267,17 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
         (str(SCHEMA_VERSION),),
+    )
+    # Generation numbers are only monotonic within one physical cache
+    # incarnation.  Schema rebuilds and replacement database files restart the
+    # counter, so persist an ordered cache identity alongside the generation.
+    # The timestamp prefix lets concurrent writers reject a late result from an
+    # older cache incarnation without treating generation 40 as newer than a
+    # freshly rebuilt generation 1.
+    cache_epoch = f"{_utc_now().strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex}"
+    connection.execute(
+        "INSERT OR IGNORE INTO meta(key, value) VALUES('cache_epoch', ?)",
+        (cache_epoch,),
     )
     connection.commit()
 
@@ -764,6 +776,7 @@ def refresh_reconcile_cache(
                 "backend": "xmlrpc",
                 "refresh_kind": refresh_kind,
                 "generation": generation,
+                "cache_epoch": current_meta.get("cache_epoch") or "",
                 "cache_path": str(cache_path),
                 "source_delivery_types": source_types,
                 "target_carrier_ids": sorted(carrier_by_id),
@@ -795,6 +808,7 @@ def cache_status(
         return {
             "available": bool(int(metadata.get("generation") or 0)),
             "generation": int(metadata.get("generation") or 0),
+            "cache_epoch": metadata.get("cache_epoch") or "",
             "cache_path": str(path),
             "last_success_at": metadata.get("last_success_at"),
             "last_full_at": metadata.get("last_full_at"),
@@ -857,6 +871,7 @@ def load_cached_picking_state(
         return {
             "available": bool(generation),
             "generation": generation,
+            "cache_epoch": metadata.get("cache_epoch") or "",
             "last_success_at": metadata.get("last_success_at"),
             "target_carrier_ids": json.loads(metadata.get("target_carrier_ids") or "[]"),
             "rows": result,
@@ -920,6 +935,7 @@ def load_cached_pod_state(
         return {
             "available": bool(generation),
             "generation": generation,
+            "cache_epoch": metadata.get("cache_epoch") or "",
             "last_success_at": metadata.get("last_success_at"),
             "rows": rows,
             "picking_ids": picking_ids,
@@ -1004,6 +1020,7 @@ def load_cached_push_resolution_state(
         return {
             "available": bool(generation),
             "generation": generation,
+            "cache_epoch": metadata.get("cache_epoch") or "",
             "last_success_at": metadata.get("last_success_at"),
             "pickings": pickings,
             "tracking": tracking,

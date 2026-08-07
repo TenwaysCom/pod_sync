@@ -446,6 +446,7 @@ def refresh_odoo_missing_snapshot(
             **(cache_result or {}),
             "available": bool(picking_cache_state.get("available")),
             "generation": int(picking_cache_state.get("generation") or 0),
+            "cache_epoch": str(picking_cache_state.get("cache_epoch") or ""),
             "last_success_at": picking_cache_state.get("last_success_at"),
             "target_carrier_ids": picking_cache_state.get("target_carrier_ids") or [],
         }

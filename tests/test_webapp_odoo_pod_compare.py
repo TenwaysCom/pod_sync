@@ -172,6 +172,95 @@ class OdooPodCompareTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "不是同一 XML-RPC"):
                     odoo_pod_compare.build_pod_odoo_compare_snapshot()
 
+    def test_build_rejects_same_generation_from_different_cache_epochs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            index_path = root / "runtime" / "odoo_push" / "odoo_pod_index.json"
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            index_path.write_text(
+                json.dumps(
+                    {
+                        "requested_backend": "xmlrpc",
+                        "cache_epoch": "20260806T010000000000Z-old",
+                        "cache_generation": 3,
+                        "generation_id": "index-3",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(odoo_pod_compare, "PROJECT_ROOT", root),
+                mock.patch.object(
+                    odoo_pod_compare,
+                    "_load_latest_phase1a_ready_rows",
+                    return_value={"run": {}, "rows": []},
+                ),
+                mock.patch.object(
+                    odoo_pod_compare,
+                    "load_odoo_missing_snapshot",
+                    return_value={
+                        "read_backend": "xmlrpc",
+                        "xmlrpc_cache": {
+                            "cache_epoch": "20260807T010000000000Z-new",
+                            "generation": 3,
+                        },
+                        "total_detail_rows": [],
+                    },
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "不是同一 XML-RPC"):
+                    odoo_pod_compare.build_pod_odoo_compare_snapshot()
+
+    def test_build_accepts_same_cache_epoch_and_generation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            index_path = root / "runtime" / "odoo_push" / "odoo_pod_index.json"
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            index_path.write_text(
+                json.dumps(
+                    {
+                        "requested_backend": "xmlrpc",
+                        "cache_epoch": "20260807T010000000000Z-current",
+                        "cache_generation": 3,
+                        "generation_id": "index-3",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(odoo_pod_compare, "PROJECT_ROOT", root),
+                mock.patch.object(
+                    odoo_pod_compare,
+                    "_load_latest_phase1a_ready_rows",
+                    return_value={
+                        "run": {"run_name": "test", "summary": {}},
+                        "rows": [],
+                    },
+                ),
+                mock.patch.object(
+                    odoo_pod_compare,
+                    "load_odoo_missing_snapshot",
+                    return_value={
+                        "read_backend": "xmlrpc",
+                        "xmlrpc_cache": {
+                            "cache_epoch": "20260807T010000000000Z-current",
+                            "generation": 3,
+                        },
+                        "total_detail_rows": [],
+                        "totals": {},
+                    },
+                ),
+                mock.patch.object(
+                    odoo_pod_compare,
+                    "_load_stock_tracking_pod_picking_ids",
+                    return_value=set(),
+                ),
+            ):
+                snapshot = odoo_pod_compare.build_pod_odoo_compare_snapshot()
+
+        self.assertEqual(snapshot["phase1a"]["run_name"], "test")
+        self.assertEqual(snapshot["totals"]["unique_identifier_count"], 0)
+
     def test_build_snapshot_compares_latest_pod_identifiers_against_odoo(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)

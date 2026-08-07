@@ -29,12 +29,16 @@ class OdooMissingReportTests(unittest.TestCase):
         full_cfg = {"odoo": {"read_backend": "xmlrpc"}}
         with (
             mock.patch("webapp.odoo_reconcile_cache.load_config", return_value=full_cfg),
-            mock.patch("webapp.odoo_reconcile_cache.refresh_reconcile_cache", return_value={"generation": 3}),
+            mock.patch(
+                "webapp.odoo_reconcile_cache.refresh_reconcile_cache",
+                return_value={"generation": 3, "cache_epoch": "epoch-3"},
+            ),
             mock.patch(
                 "webapp.odoo_reconcile_cache.load_cached_picking_state",
                 return_value={
                     "available": True,
                     "generation": 3,
+                    "cache_epoch": "epoch-3",
                     "last_success_at": "2026-07-17T09:00:00Z",
                     "target_carrier_ids": [91],
                     "rows": rows,
@@ -48,6 +52,7 @@ class OdooMissingReportTests(unittest.TestCase):
         query_fetch.assert_not_called()
         self.assertEqual(snapshot["read_backend"], "xmlrpc")
         self.assertEqual(snapshot["authoritative_source"], "xmlrpc_cache")
+        self.assertEqual(snapshot["xmlrpc_cache"]["cache_epoch"], "epoch-3")
         self.assertEqual(snapshot["totals"]["total_done_outgoing"], 1)
         self.assertEqual(snapshot["total_detail_rows"][0]["picking_name"], "WDB2B/OUT/01391")
 

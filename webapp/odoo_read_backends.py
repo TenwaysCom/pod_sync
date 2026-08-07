@@ -202,6 +202,7 @@ def fetch_pod_read_state(
         "shadow_status": "",
         "shadow_difference_counts": {},
         "cache_generation": int((cache_state or {}).get("generation") or 0),
+        "cache_epoch": str((cache_state or {}).get("cache_epoch") or ""),
     }
 
     if backend == "shadow":
@@ -218,6 +219,7 @@ def fetch_pod_read_state(
             result["coverage_ids"] = cache_state["picking_ids"]
             result["coverage_status"] = "complete"
             result["cache_generation"] = int(cache_state["generation"])
+            result["cache_epoch"] = str(cache_state.get("cache_epoch") or "")
         except Exception as exc:
             result["shadow_status"] = "unavailable"
             result["shadow_difference_counts"] = {"error_type": type(exc).__name__}

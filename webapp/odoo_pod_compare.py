@@ -505,8 +505,18 @@ def build_pod_odoo_compare_snapshot():
         snapshot_cache_generation = int(
             (odoo_snapshot.get("xmlrpc_cache") or {}).get("generation") or 0
         )
+        index_cache_epoch = str(pod_index.get("cache_epoch") or "")
+        snapshot_cache_epoch = str(
+            (odoo_snapshot.get("xmlrpc_cache") or {}).get("cache_epoch") or ""
+        )
+        cache_epoch_matches = (
+            index_cache_epoch == snapshot_cache_epoch
+            if index_cache_epoch or snapshot_cache_epoch
+            else True
+        )
         cache_generation_matches = (
-            index_cache_generation == snapshot_cache_generation
+            cache_epoch_matches
+            and index_cache_generation == snapshot_cache_generation
             and (snapshot_backend == "shadow" or index_cache_generation > 0)
         )
         if not cache_generation_matches:

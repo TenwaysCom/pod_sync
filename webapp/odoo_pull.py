@@ -45,6 +45,7 @@ class ExistingPodIndex:
         self.shadow_status: str = ""
         self.shadow_difference_counts: dict = {}
         self.cache_generation: int = 0
+        self.cache_epoch: str = ""
         self.local_coverage_picking_ids: list[int] = []
 
     @staticmethod
@@ -199,6 +200,7 @@ class ExistingPodIndex:
             "shadow_status": self.shadow_status,
             "shadow_difference_counts": self.shadow_difference_counts,
             "cache_generation": self.cache_generation,
+            "cache_epoch": self.cache_epoch,
             "local_coverage_picking_ids": self.local_coverage_picking_ids,
         }
 
@@ -216,6 +218,7 @@ class ExistingPodIndex:
             "shadow_status": self.shadow_status,
             "shadow_difference_counts": self.shadow_difference_counts,
             "cache_generation": self.cache_generation,
+            "cache_epoch": self.cache_epoch,
             "local_coverage_picking_ids": self.local_coverage_picking_ids,
         }
 
@@ -234,6 +237,7 @@ class ExistingPodIndex:
         idx.shadow_status = data.get("shadow_status", "")
         idx.shadow_difference_counts = dict(data.get("shadow_difference_counts") or {})
         idx.cache_generation = int(data.get("cache_generation") or 0)
+        idx.cache_epoch = str(data.get("cache_epoch") or "")
         idx.local_coverage_picking_ids = sorted(
             {
                 int(value)
@@ -378,6 +382,7 @@ def update_saved_index(
                             "count": len(coverage_ids),
                             "generation_id": index.generation_id,
                             "cache_generation": index.cache_generation,
+                            "cache_epoch": index.cache_epoch,
                         },
                         ensure_ascii=False,
                     ) + "\n",
@@ -463,12 +468,22 @@ def _commit_index_generation(
     COVERAGE_FILE.parent.mkdir(parents=True, exist_ok=True)
     with _index_file_lock():
         current = load_saved_index()
-        if (
-            current
-            and current.requested_backend == index.requested_backend
-            and index.cache_generation
-            and current.cache_generation > index.cache_generation
-        ):
+        incoming_epoch = str(index.cache_epoch or "")
+        current_epoch = str(current.cache_epoch or "") if current else ""
+        incoming_is_older = False
+        if current and current.requested_backend == index.requested_backend:
+            if current_epoch and not incoming_epoch:
+                # Never let an old process without epoch metadata replace an
+                # index already committed by the epoch-aware code.
+                incoming_is_older = True
+            elif current_epoch and incoming_epoch and current_epoch != incoming_epoch:
+                incoming_is_older = incoming_epoch < current_epoch
+            elif current_epoch == incoming_epoch:
+                incoming_is_older = bool(
+                    index.cache_generation
+                    and current.cache_generation > index.cache_generation
+                )
+        if incoming_is_older:
             return current
         current_url_markers = _local_push_markers(current)
         current_coverage_markers = _local_coverage_markers(current)
@@ -498,6 +513,7 @@ def _commit_index_generation(
                             "count": len(picking_ids),
                             "generation_id": index.generation_id,
                             "cache_generation": index.cache_generation,
+                            "cache_epoch": index.cache_epoch,
                         },
                         ensure_ascii=False,
                     ) + "\n",
@@ -538,6 +554,7 @@ def fetch_and_save_index(
     index.shadow_status = state["shadow_status"]
     index.shadow_difference_counts = state["shadow_difference_counts"]
     index.cache_generation = int(state.get("cache_generation") or 0)
+    index.cache_epoch = str(state.get("cache_epoch") or "")
 
     for record in state["rows"]:
         index.add_row(
@@ -585,12 +602,13 @@ def get_index(config_path: str = "config.local.json") -> ExistingPodIndex:
     full_cfg = load_config(config_path)
     backend = resolve_read_backend(full_cfg)
     saved = load_saved_index()
-    if backend == "xmlrpc":
+    if backend in {"shadow", "xmlrpc"}:
         status = cache_status(config_path, full_cfg=full_cfg)
         if (
             saved
             and saved.requested_backend == backend
             and saved.cache_generation == int(status.get("generation") or 0)
+            and saved.cache_epoch == str(status.get("cache_epoch") or "")
         ):
             return saved
         if status.get("available"):

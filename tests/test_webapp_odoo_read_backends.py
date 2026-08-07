@@ -329,6 +329,7 @@ class QueryDeluxeReadTests(unittest.TestCase):
             return_value={
                 "available": True,
                 "generation": 3,
+                "cache_epoch": "epoch-3",
                 "rows": cached_rows,
                 "picking_ids": [811, 812],
             },
@@ -345,6 +346,7 @@ class QueryDeluxeReadTests(unittest.TestCase):
         self.assertEqual(state["coverage_ids"], [811, 812])
         self.assertEqual(state["coverage_status"], "complete")
         self.assertEqual(state["cache_generation"], 3)
+        self.assertEqual(state["cache_epoch"], "epoch-3")
         refresh.assert_called_once()
         load_cache.assert_called_once()
         query.assert_not_called()
@@ -525,6 +527,38 @@ class OdooPullModeTests(unittest.TestCase):
             mock.patch(
                 "webapp.odoo_reconcile_cache.cache_status",
                 return_value={"available": True, "generation": 3},
+            ),
+            mock.patch(
+                "webapp.odoo_pull.fetch_and_save_index", return_value=rebuilt
+            ) as fetch,
+        ):
+            result = odoo_pull.get_index("config.test.json")
+
+        self.assertIs(result, rebuilt)
+        fetch.assert_called_once_with(
+            "config.test.json", refresh_xmlrpc_cache=False
+        )
+
+    def test_get_index_rebuilds_when_cache_epoch_changes_at_same_generation(self):
+        saved = self._saved_index("xmlrpc")
+        saved.cache_generation = 3
+        saved.cache_epoch = "20260806T010000000000Z-old"
+        rebuilt = self._saved_index("xmlrpc")
+        rebuilt.cache_generation = 3
+        rebuilt.cache_epoch = "20260807T010000000000Z-new"
+        with (
+            mock.patch(
+                "webapp.odoo_pull.load_config",
+                return_value={"odoo": {"read_backend": "xmlrpc"}},
+            ),
+            mock.patch("webapp.odoo_pull.load_saved_index", return_value=saved),
+            mock.patch(
+                "webapp.odoo_reconcile_cache.cache_status",
+                return_value={
+                    "available": True,
+                    "generation": 3,
+                    "cache_epoch": rebuilt.cache_epoch,
+                },
             ),
             mock.patch(
                 "webapp.odoo_pull.fetch_and_save_index", return_value=rebuilt

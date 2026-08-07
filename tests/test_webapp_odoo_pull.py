@@ -101,6 +101,73 @@ class IndexGenerationTests(unittest.TestCase):
         self.assertNotIn("TN-OLD", saved.by_tracking_number)
         self.assertEqual(saved_coverage["generation_id"], "newer")
 
+    def test_rebuilt_cache_epoch_can_replace_higher_legacy_generation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            index_path, coverage_path, lock_path = self._paths(root)
+            with (
+                mock.patch.object(odoo_pull, "INDEX_FILE", index_path),
+                mock.patch.object(odoo_pull, "COVERAGE_FILE", coverage_path),
+                mock.patch.object(odoo_pull, "INDEX_LOCK_FILE", lock_path),
+            ):
+                legacy = ExistingPodIndex()
+                legacy.requested_backend = "xmlrpc"
+                legacy.cache_generation = 40
+                legacy.generation_id = "legacy-40"
+                legacy.coverage_status = "complete"
+                legacy.add_row("TN-OLD", "OUT/OLD", "https://pod.test/old.pdf")
+                odoo_pull.save_index(legacy)
+
+                rebuilt = ExistingPodIndex()
+                rebuilt.requested_backend = "xmlrpc"
+                rebuilt.cache_epoch = "20260807T010000000000Z-new"
+                rebuilt.cache_generation = 1
+                rebuilt.generation_id = "rebuilt-1"
+                rebuilt.coverage_status = "complete"
+                rebuilt.add_row("TN-NEW", "OUT/NEW", "https://pod.test/new.pdf")
+                winner = odoo_pull._commit_index_generation(
+                    rebuilt,
+                    {"coverage_status": "complete", "coverage_ids": [1]},
+                )
+                saved = odoo_pull.load_saved_index()
+
+        self.assertEqual(winner.generation_id, "rebuilt-1")
+        self.assertEqual(saved.cache_epoch, rebuilt.cache_epoch)
+        self.assertIn("TN-NEW", saved.by_tracking_number)
+        self.assertNotIn("TN-OLD", saved.by_tracking_number)
+
+    def test_late_older_cache_epoch_cannot_replace_newer_epoch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            index_path, coverage_path, lock_path = self._paths(root)
+            with (
+                mock.patch.object(odoo_pull, "INDEX_FILE", index_path),
+                mock.patch.object(odoo_pull, "COVERAGE_FILE", coverage_path),
+                mock.patch.object(odoo_pull, "INDEX_LOCK_FILE", lock_path),
+            ):
+                newer = ExistingPodIndex()
+                newer.requested_backend = "xmlrpc"
+                newer.cache_epoch = "20260807T020000000000Z-newer"
+                newer.cache_generation = 1
+                newer.generation_id = "newer-1"
+                newer.coverage_status = "complete"
+                odoo_pull.save_index(newer)
+
+                older = ExistingPodIndex()
+                older.requested_backend = "xmlrpc"
+                older.cache_epoch = "20260807T010000000000Z-older"
+                older.cache_generation = 99
+                older.generation_id = "older-99"
+                older.coverage_status = "complete"
+                winner = odoo_pull._commit_index_generation(
+                    older,
+                    {"coverage_status": "complete", "coverage_ids": [99]},
+                )
+                saved = odoo_pull.load_saved_index()
+
+        self.assertEqual(winner.generation_id, "newer-1")
+        self.assertEqual(saved.cache_epoch, newer.cache_epoch)
+
     def test_local_marker_clears_after_authority_confirms_exact_url(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

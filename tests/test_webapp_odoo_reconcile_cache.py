@@ -251,6 +251,7 @@ class OdooReconcileCacheTests(unittest.TestCase):
 
             self.assertEqual(full["refresh_kind"], "full")
             self.assertEqual(full["generation"], 1)
+            self.assertTrue(full["cache_epoch"])
             self.assertEqual(
                 full["row_counts"],
                 {"pickings": 3, "tracking": 3, "tracking_pickings": 3},
@@ -308,6 +309,7 @@ class OdooReconcileCacheTests(unittest.TestCase):
 
             self.assertEqual(incremental["refresh_kind"], "incremental")
             self.assertEqual(incremental["generation"], 2)
+            self.assertEqual(incremental["cache_epoch"], full["cache_epoch"])
             self.assertEqual(
                 incremental["row_counts"],
                 {"pickings": 2, "tracking": 2, "tracking_pickings": 2},
@@ -425,6 +427,7 @@ class OdooReconcileCacheTests(unittest.TestCase):
 
         self.assertEqual(result["refresh_kind"], "full")
         self.assertEqual(result["generation"], 1)
+        self.assertTrue(result["cache_epoch"])
         self.assertEqual(len(push_state["tracking"]), 3)
 
     def test_changed_carrier_scope_forces_full_rebuild(self):
