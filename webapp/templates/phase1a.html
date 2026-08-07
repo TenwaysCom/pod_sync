@@ -57,7 +57,7 @@
                   </div>
                   <span class="badge badge-{{ job.status }}">{{ job_status_labels.get(job.status, job.status) }}</span>
                 </a>
-                <form method="post" action="{{ request.url_for('delete_job', job_id=job.job_id) }}" class="inline-action-form" onsubmit="return confirm('确认删除任务 {{ job.job_id }} 吗？')">
+                <form method="post" action="{{ request.url_for('delete_job', job_id=job.job_id) }}" class="inline-action-form">
                   <input type="hidden" name="redirect_to" value="{{ request.url.path }}">
                   <button type="submit" class="danger-button" {% if job.status in ['queued', 'running'] %}disabled{% endif %}>删除</button>
                 </form>

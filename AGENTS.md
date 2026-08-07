@@ -79,3 +79,4 @@ python3 -m unittest discover -s phase1a/tests
 - **多 worker**：`./start` 脚本通过 `runtime/webapp_secret` 设置 `POD_SYNC_SECRET_KEY` 保证多 worker 密钥一致。直接 `uvicorn --workers N` 时文件持久化在 `runtime/.session_secret`
 - **文件上传限制**：默认单文件 200MB，可用 `POD_SYNC_MAX_DOWNLOAD_BYTES` 调整（0=不限制）
 - **任务并发**：默认最多 2 个、单任务最长 6 小时，可用 `POD_SYNC_MAX_CONCURRENT_JOBS` 和 `POD_SYNC_JOB_TIMEOUT_SECONDS` 调整
+- **任务日志保留**：默认保留最近 30 天；每个任务结束后自动清理更早的已结束任务，也可在“任务与历史”页手动选择保留天数。可用 `POD_SYNC_JOB_RETENTION_DAYS` 调整，设为 `0` 关闭自动清理

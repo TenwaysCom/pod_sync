@@ -2502,6 +2502,21 @@ code,
   white-space: nowrap;
 }
 
+.job-cleanup-form {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.job-cleanup-summary {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: 0.84rem;
+  text-align: right;
+}
+
 .jobs-list .list-item-main p {
   max-width: 860px;
 }
@@ -3196,8 +3211,13 @@ a.jobs-history-row:hover {
   }
 
   .jobs-row-actions,
-  .jobs-history-metrics {
+  .jobs-history-metrics,
+  .job-cleanup-form {
     justify-content: flex-start;
+  }
+
+  .job-cleanup-summary {
+    text-align: left;
   }
 
   .filter-meta,

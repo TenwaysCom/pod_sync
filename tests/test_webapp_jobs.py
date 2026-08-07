@@ -175,12 +175,115 @@ class WebAppJobTests(unittest.TestCase):
             else:
                 self.fail("Job did not finish in time.")
 
+            owner_lock = store._owner_lock_path(job["job_id"])
+            owner_lock.touch(exist_ok=True)
+
             ok, error = store.delete_job(job["job_id"])
 
             self.assertTrue(ok)
             self.assertIsNone(error)
             self.assertIsNone(store.get_job(job["job_id"]))
             self.assertFalse((store.root_dir / f"{job['job_id']}.log").exists())
+            self.assertFalse(owner_lock.exists())
+
+    def test_cleanup_finished_jobs_deletes_only_expired_terminal_jobs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = JobStore(Path(tmpdir) / "jobs")
+
+            def write_job(job_id, *, status, created_at, finished_at=None):
+                payload = {
+                    "job_id": job_id,
+                    "action": "test",
+                    "label": job_id,
+                    "status": status,
+                    "created_at": created_at,
+                    "started_at": created_at,
+                    "finished_at": finished_at,
+                    "exit_code": None if status in {"queued", "running"} else 0,
+                    "pid": os.getpid() if status == "running" else None,
+                    "metadata": {},
+                }
+                store._write_job(payload)
+                store._log_path(job_id).write_text(f"log for {job_id}", encoding="utf-8")
+                store._owner_lock_path(job_id).touch()
+
+            write_job(
+                "job-expired",
+                status="success",
+                created_at="2000-01-01T00:00:00Z",
+                finished_at="2000-01-01T00:01:00Z",
+            )
+            write_job(
+                "job-recent",
+                status="success",
+                created_at="2999-01-01T00:00:00Z",
+                finished_at="2999-01-01T00:01:00Z",
+            )
+            write_job(
+                "job-running-old",
+                status="running",
+                created_at="2000-01-01T00:00:00Z",
+            )
+
+            summary = store.get_storage_summary(retention_days=30)
+            result = store.cleanup_finished_jobs(retention_days=30)
+
+            self.assertEqual(summary["total_count"], 3)
+            self.assertEqual(summary["cleanup_count"], 1)
+            self.assertGreater(summary["cleanup_bytes"], 0)
+            self.assertEqual(result["deleted_count"], 1)
+            self.assertEqual(result["deleted_bytes"], summary["cleanup_bytes"])
+            for path in store._job_files("job-expired"):
+                self.assertFalse(path.exists())
+            self.assertIsNotNone(store.get_job("job-recent"))
+            self.assertIsNotNone(store.get_job("job-running-old"))
+
+    def test_cleanup_is_disabled_when_retention_is_zero(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = JobStore(Path(tmpdir) / "jobs")
+            job_id = "job-old"
+            store._write_job(
+                {
+                    "job_id": job_id,
+                    "status": "success",
+                    "created_at": "2000-01-01T00:00:00Z",
+                    "finished_at": "2000-01-01T00:01:00Z",
+                }
+            )
+
+            result = store.cleanup_finished_jobs(retention_days=0)
+
+            self.assertEqual(result["deleted_count"], 0)
+            self.assertTrue(store._job_path(job_id).exists())
+
+    def test_finished_job_triggers_automatic_retention_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = JobStore(Path(tmpdir) / "jobs")
+            store._job_retention_days = 30
+            old_job_id = "job-expired-before-next-run"
+            store._write_job(
+                {
+                    "job_id": old_job_id,
+                    "status": "success",
+                    "created_at": "2000-01-01T00:00:00Z",
+                    "finished_at": "2000-01-01T00:01:00Z",
+                }
+            )
+            store._log_path(old_job_id).write_text("old log", encoding="utf-8")
+
+            current_job = store.start_job(
+                action="test",
+                label="Trigger cleanup",
+                command=[sys.executable, "-c", "print('done')"],
+            )
+            self._wait_for_finished(store, current_job["job_id"])
+            for _ in range(50):
+                if not store._job_path(old_job_id).exists():
+                    break
+                time.sleep(0.02)
+
+            self.assertFalse(store._job_path(old_job_id).exists())
+            self.assertFalse(store._log_path(old_job_id).exists())
 
     def test_delete_job_rejects_running_job(self):
         with tempfile.TemporaryDirectory() as tmpdir:

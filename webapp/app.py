@@ -35,7 +35,7 @@ from .actions import (
     resolve_project_path,
     resolve_storage_dir,
 )
-from .file_browser import build_storage_listing, resolve_storage_file
+from .file_browser import build_storage_listing, format_file_size, resolve_storage_file
 from .jobs import JobStore
 from .odoo_missing_report import (
     build_odoo_missing_listing,
@@ -1126,6 +1126,12 @@ async def api_reconcile_push_to_odoo(
 @app.get("/jobs", response_class=HTMLResponse)
 async def jobs_page(request: Request):
     jobs = job_store.list_jobs(limit=10)
+    automatic_retention_days = job_store.retention_days
+    retention_days = automatic_retention_days or 30
+    job_storage = job_store.get_storage_summary(retention_days)
+    job_storage["automatic_retention_days"] = automatic_retention_days
+    job_storage["total_size_label"] = format_file_size(job_storage["total_bytes"])
+    job_storage["cleanup_size_label"] = format_file_size(job_storage["cleanup_bytes"])
     recent_runs = discover_phase1a_runs(limit=30)
     push_runs = list_push_runs(limit=30)
     running_jobs = [job for job in jobs if job.get("status") in {"queued", "running"}]
@@ -1137,6 +1143,8 @@ async def jobs_page(request: Request):
         recent_runs=recent_runs,
         push_runs=push_runs,
         running_job_count=len(running_jobs),
+        job_storage=job_storage,
+        job_retention_options=(7, 14, 30, 60, 90),
     )
 
 
@@ -1174,6 +1182,23 @@ async def delete_job(job_id: str, redirect_to: str = Form("/jobs")):
     if not ok:
         return redirect_with_error(target, error or "删除任务失败。")
     return redirect_with_notice(target, f"已删除任务 {job_id}")
+
+
+@app.post("/jobs/cleanup")
+async def cleanup_jobs(
+    retention_days: int = Form(30),
+    redirect_to: str = Form("/jobs"),
+):
+    target = normalize_redirect_target(redirect_to, "/jobs")
+    if retention_days not in {7, 14, 30, 60, 90}:
+        return redirect_with_error(target, "请选择有效的日志保留天数。")
+    result = job_store.cleanup_finished_jobs(retention_days)
+    deleted_count = int(result.get("deleted_count") or 0)
+    deleted_size = format_file_size(int(result.get("deleted_bytes") or 0))
+    return redirect_with_notice(
+        target,
+        f"已清理 {deleted_count} 个 {retention_days} 天前的已结束任务，释放 {deleted_size}。",
+    )
 
 
 @app.post("/odoo-push/history/{push_id}/delete")

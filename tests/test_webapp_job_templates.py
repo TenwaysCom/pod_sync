@@ -64,8 +64,34 @@ class JobTemplateTests(unittest.TestCase):
 
     def _render_jobs(self, jobs):
         context = self._base_context("/jobs")
-        context.update(jobs=jobs, recent_runs=[], push_runs=[])
+        context.update(
+            jobs=jobs,
+            recent_runs=[],
+            push_runs=[],
+            job_storage={
+                "retention_days": 30,
+                "automatic_retention_days": 30,
+                "total_count": 180,
+                "total_size_label": "3.10 GB",
+                "cleanup_count": 116,
+                "cleanup_size_label": "2.16 GB",
+            },
+            job_retention_options=(7, 14, 30, 60, 90),
+        )
         return self.environment.get_template("jobs.html").render(**context)
+
+    def test_job_deletion_is_one_click_and_bulk_cleanup_is_explicit(self):
+        job = self._job(status="success")
+
+        detail_html = self._render_detail(job)
+        jobs_html = self._render_jobs([job])
+
+        self.assertNotIn("确认删除任务", detail_html)
+        self.assertNotIn("确认删除任务", jobs_html)
+        self.assertIn("清理旧日志", jobs_html)
+        self.assertIn("当前可清理 116 条 / 2.16 GB", jobs_html)
+        self.assertIn('name="retention_days"', jobs_html)
+        self.assertIn("运行中任务不会删除", jobs_html)
 
     def test_active_detail_auto_refreshes_but_completed_detail_does_not(self):
         for status in ("queued", "running"):

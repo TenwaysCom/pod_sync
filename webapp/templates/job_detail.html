@@ -48,7 +48,7 @@
             {% elif effective_status == "attention" %}成功，有待处理
             {% else %}{{ job_status_labels.get(effective_status, effective_status) }}{% endif %}
           </span>
-          <form method="post" action="{{ request.url_for('delete_job', job_id=job.job_id) }}" class="inline-action-form" onsubmit="return confirm('确认删除任务 {{ job.job_id }} 吗？')">
+          <form method="post" action="{{ request.url_for('delete_job', job_id=job.job_id) }}" class="inline-action-form">
             <input type="hidden" name="redirect_to" value="{{ request.url_for('jobs_page') }}">
             <button type="submit" class="danger-button" {% if active_job %}disabled{% endif %}>删除任务</button>
           </form>

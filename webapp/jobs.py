@@ -9,7 +9,7 @@ import subprocess
 import threading
 import traceback
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .actions import PROJECT_ROOT
@@ -24,6 +24,7 @@ except ImportError:  # pragma: no cover - Windows fallback keeps legacy behavior
 DEFAULT_MAX_CONCURRENT_JOBS = int(os.environ.get("POD_SYNC_MAX_CONCURRENT_JOBS", "2"))
 DEFAULT_JOB_TIMEOUT_SECONDS = int(os.environ.get("POD_SYNC_JOB_TIMEOUT_SECONDS", str(6 * 60 * 60)))
 DEFAULT_MAX_LOG_READ_CHARS = int(os.environ.get("POD_SYNC_MAX_LOG_READ_CHARS", "200000"))
+DEFAULT_JOB_RETENTION_DAYS = int(os.environ.get("POD_SYNC_JOB_RETENTION_DAYS", "30"))
 
 MICROSOFT_TEMP_URL_RE = re.compile(
     r"https?://[^\s\"'<>]*(?:my\.microsoftpersonalcontent\.com|onedrive\.live\.com|1drv\.ms)"
@@ -113,6 +114,7 @@ class JobStore:
         self._lock = threading.RLock()
         self._job_timeout_seconds = max(0, DEFAULT_JOB_TIMEOUT_SECONDS)
         self._max_log_read_chars = max(0, DEFAULT_MAX_LOG_READ_CHARS)
+        self._job_retention_days = max(0, DEFAULT_JOB_RETENTION_DAYS)
         self._semaphore = threading.Semaphore(max(1, DEFAULT_MAX_CONCURRENT_JOBS))
         # Jobs owned by worker threads in this process must not be reclaimed in
         # the short interval between subprocess exit and final report persist.
@@ -182,6 +184,111 @@ class JobStore:
         jobs.sort(key=lambda item: (item.get("created_at") or "", item["job_id"]), reverse=True)
         return jobs[:limit]
 
+    @property
+    def retention_days(self):
+        return self._job_retention_days
+
+    @staticmethod
+    def _retention_reference_time(payload):
+        return parse_utc(payload.get("finished_at") or payload.get("created_at"))
+
+    def _job_files(self, job_id: str):
+        return (
+            self._job_path(job_id),
+            self._log_path(job_id),
+            self._owner_lock_path(job_id),
+        )
+
+    @staticmethod
+    def _files_size(paths):
+        total = 0
+        for path in paths:
+            try:
+                total += path.stat().st_size
+            except FileNotFoundError:
+                continue
+        return total
+
+    def get_storage_summary(self, retention_days: int | None = None):
+        retention_days = self._job_retention_days if retention_days is None else int(retention_days)
+        retention_days = max(0, retention_days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        total_count = 0
+        total_bytes = 0
+        cleanup_count = 0
+        cleanup_bytes = 0
+
+        for path in self.root_dir.glob("*.json"):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            job_id = path.stem
+            paths = self._job_files(job_id)
+            size = self._files_size(paths)
+            total_count += 1
+            total_bytes += size
+            reference_time = self._retention_reference_time(payload)
+            if (
+                retention_days > 0
+                and payload.get("status") not in {"queued", "running"}
+                and reference_time
+                and reference_time < cutoff
+            ):
+                cleanup_count += 1
+                cleanup_bytes += size
+
+        return {
+            "retention_days": retention_days,
+            "total_count": total_count,
+            "total_bytes": total_bytes,
+            "cleanup_count": cleanup_count,
+            "cleanup_bytes": cleanup_bytes,
+        }
+
+    def cleanup_finished_jobs(self, retention_days: int | None = None):
+        retention_days = self._job_retention_days if retention_days is None else int(retention_days)
+        if retention_days <= 0:
+            return {
+                "retention_days": retention_days,
+                "deleted_count": 0,
+                "deleted_bytes": 0,
+            }
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        deleted_count = 0
+        deleted_bytes = 0
+        with self._lock:
+            for path in list(self.root_dir.glob("*.json")):
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if payload.get("status") in {"queued", "running"}:
+                    continue
+                reference_time = self._retention_reference_time(payload)
+                if not reference_time or reference_time >= cutoff:
+                    continue
+
+                job_id = path.stem
+                paths = self._job_files(job_id)
+                deleted_bytes += self._files_size(paths)
+                removed = False
+                for related_path in paths:
+                    try:
+                        related_path.unlink()
+                        removed = True
+                    except FileNotFoundError:
+                        continue
+                if removed:
+                    deleted_count += 1
+
+        return {
+            "retention_days": retention_days,
+            "deleted_count": deleted_count,
+            "deleted_bytes": deleted_bytes,
+        }
+
     def read_log(self, job_id: str, max_chars: int | None = None):
         path = self._log_path(job_id)
         if not path.exists():
@@ -199,7 +306,7 @@ class JobStore:
                 return False, "运行中的任务不能删除。"
 
             removed = False
-            for path in (self._job_path(job_id), self._log_path(job_id)):
+            for path in self._job_files(job_id):
                 if path.exists():
                     path.unlink()
                     removed = True
@@ -435,6 +542,13 @@ class JobStore:
             self._run_job_as_owner(job_id)
         finally:
             self._release_owner_lock(owner_lock)
+        if self._job_retention_days:
+            try:
+                self.cleanup_finished_jobs(self._job_retention_days)
+            except OSError:
+                # Retention is best-effort maintenance and must not change the
+                # completed task result when a file is temporarily busy.
+                pass
 
     def _run_job_as_owner(self, job_id: str):
         payload = self._read_job_raw(job_id)

@@ -15,8 +15,8 @@
     <div class="jobs-summary-grid">
       <article class="jobs-summary-card">
         <span>后台 Job</span>
-        <strong>{{ visible_jobs|length }}</strong>
-        <p>本页只显示最新 10 条 Job。</p>
+        <strong>{{ job_storage.total_count }}</strong>
+        <p>日志占用 {{ job_storage.total_size_label }}，本页显示最新 10 条。</p>
       </article>
       <article class="jobs-summary-card">
         <span>识别运行</span>
@@ -36,7 +36,25 @@
       <div>
         <p class="eyebrow">后台任务</p>
         <h2>最新 10 条 Job</h2>
+        {% if job_storage.automatic_retention_days %}
+          <p>任务结束后自动清理 {{ job_storage.automatic_retention_days }} 天前的记录；运行中任务不会删除。</p>
+        {% else %}
+          <p>自动清理已关闭；手动清理仍会跳过运行中任务。</p>
+        {% endif %}
       </div>
+      <form method="post" action="{{ request.url_for('cleanup_jobs') }}" class="job-cleanup-form">
+        <input type="hidden" name="redirect_to" value="{{ request.url.path }}">
+        <label class="page-size-label">
+          保留
+          <select name="retention_days" aria-label="日志保留天数">
+            {% for days in job_retention_options %}
+              <option value="{{ days }}" {% if days == job_storage.retention_days %}selected{% endif %}>{{ days }} 天</option>
+            {% endfor %}
+          </select>
+        </label>
+        <button type="submit" class="danger-button">清理旧日志</button>
+        <span class="job-cleanup-summary">当前可清理 {{ job_storage.cleanup_count }} 条 / {{ job_storage.cleanup_size_label }}</span>
+      </form>
     </div>
     {% if visible_jobs %}
       <div class="list-stack jobs-list">
@@ -88,7 +106,7 @@
               <a class="action-button" href="{{ request.url_for('job_detail', job_id=job.job_id) }}">
                 {% if active_job %}查看运行进度{% else %}查看任务结果{% endif %}
               </a>
-              <form method="post" action="{{ request.url_for('delete_job', job_id=job.job_id) }}" class="inline-action-form" onsubmit="return confirm('确认删除任务 {{ job.job_id }} 吗？')">
+              <form method="post" action="{{ request.url_for('delete_job', job_id=job.job_id) }}" class="inline-action-form">
                 <input type="hidden" name="redirect_to" value="{{ request.url.path }}">
                 <button type="submit" class="ghost-button" {% if active_job %}disabled{% endif %}>删除记录</button>
               </form>
