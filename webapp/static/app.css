@@ -1845,12 +1845,12 @@ code,
   text-align: left;
 }
 
-.files-table th:nth-child(1) { width: 24%; }
-.files-table th:nth-child(2) { width: 16%; }
-.files-table th:nth-child(3) { width: 26%; }
+.files-table th:nth-child(1) { width: 20%; }
+.files-table th:nth-child(2) { width: 12%; }
+.files-table th:nth-child(3) { width: 22%; }
 .files-table th:nth-child(4) { width: 10%; }
-.files-table th:nth-child(5) { width: 16%; }
-.files-table th:nth-child(6) { width: 8%; }
+.files-table th:nth-child(5) { width: 14%; }
+.files-table th:nth-child(6) { width: 22%; }
 
 .phase-doc-table th:nth-child(1) { width: 28%; }
 .phase-doc-table th:nth-child(2) { width: 24%; }
@@ -2728,6 +2728,44 @@ a.jobs-history-row:hover {
   align-items: center;
   font-weight: 600;
   white-space: nowrap;
+}
+
+button.table-link {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+}
+
+button.table-link:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.file-actions-cell {
+  vertical-align: top;
+}
+
+.file-actions-cell .table-link,
+.file-actions-cell .file-push-status {
+  display: block;
+}
+
+.file-actions-cell .table-link + .table-link,
+.file-actions-cell .file-push-status {
+  margin-top: 6px;
+}
+
+.file-push-status {
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: normal;
+}
+
+.file-push-status.is-error {
+  color: var(--danger);
 }
 
 .pagination-bar {

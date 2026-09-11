@@ -39,7 +39,7 @@
       <div>
         <p class="eyebrow">文件列表</p>
         <h2>下载文件</h2>
-        <p>按来源和关键字筛选，列表会自动刷新，方便你实时确认同步结果。</p>
+        <p>按来源和关键字筛选，列表会自动刷新，方便你实时确认同步结果。操作列可打开文件，或把单个 CMC / EMTC 文件推送到 Odoo。</p>
       </div>
     </div>
     <div class="card">
@@ -110,11 +110,13 @@
 
   <script>
     const filesApiUrl = "{{ request.url_for('api_files') }}";
+    const filesPushOdooUrl = "{{ request.url_for('api_files_push_odoo') }}";
     const storageFileUrlTemplate = "{{ request.url_for('storage_file', relative_path='__PATH__') }}";
     const autoRefreshMs = 10000;
     let refreshTimer = null;
     let searchDebounceTimer = null;
     let currentPage = 1;
+    const pushStateByPath = new Map();
 
     function encodeStoragePath(relativePath) {
       return relativePath.split('/').map((part) => encodeURIComponent(part)).join('/');
@@ -185,6 +187,29 @@
       document.getElementById('nextPageButton').disabled = !payload.has_next;
     }
 
+    function fileActionsHtml(item) {
+      const openLink = `<a class="table-link" href="${storageFileUrl(item.relative_path)}" target="_blank" rel="noreferrer">打开文件</a>`;
+      const blockedReason = item.odoo_push_blocked_reason || '该文件不能单独推送到 Odoo';
+      const pushButton = item.odoo_push_allowed
+        ? `<button type="button" class="table-link file-push-odoo" data-relative-path="${escapeHtml(item.relative_path)}" data-file-name="${escapeHtml(item.file_name)}">推送到 Odoo</button>`
+        : `<button type="button" class="table-link file-push-odoo" disabled title="${escapeHtml(blockedReason)}">推送到 Odoo</button>`;
+      return `${openLink}${pushButton}<span class="file-push-status muted" data-relative-path="${escapeHtml(item.relative_path)}"></span>`;
+    }
+
+    function applyPushStates() {
+      document.querySelectorAll('.file-push-odoo[data-relative-path]').forEach((button) => {
+        const state = pushStateByPath.get(button.dataset.relativePath);
+        if (!state) return;
+        button.disabled = state.status === 'pushing';
+        button.textContent = state.status === 'pushing' ? '推送中...' : '推送到 Odoo';
+      });
+      document.querySelectorAll('.file-push-status[data-relative-path]').forEach((status) => {
+        const state = pushStateByPath.get(status.dataset.relativePath);
+        status.textContent = state?.message || '';
+        status.classList.toggle('is-error', state?.status === 'error');
+      });
+    }
+
     function renderTable(payload) {
       const body = document.getElementById('fileTableBody');
       if (!payload.exists) {
@@ -207,13 +232,17 @@
           <td class="mono file-path-cell" title="${escapeHtml(item.relative_path)}">${escapeHtml(item.relative_path)}</td>
           <td>${escapeHtml(item.size_label)}</td>
           <td>${escapeHtml(item.stored_at || item.modified_at)}</td>
-          <td><a class="table-link" href="${storageFileUrl(item.relative_path)}" target="_blank" rel="noreferrer">打开文件</a></td>
+          <td class="file-actions-cell">${fileActionsHtml(item)}</td>
         </tr>
       `;
       }).join('');
+      applyPushStates();
     }
 
     async function refreshFiles() {
+      if ([...pushStateByPath.values()].some((state) => state.status === 'pushing')) {
+        return;
+      }
       const status = document.getElementById('filesRefreshStatus');
       status.textContent = '正在刷新…';
       try {
@@ -287,6 +316,35 @@
     document.getElementById('nextPageButton').addEventListener('click', () => {
       currentPage += 1;
       refreshFiles();
+    });
+    document.getElementById('fileTableBody').addEventListener('click', async (event) => {
+      const button = event.target.closest('.file-push-odoo');
+      if (!button || button.disabled) return;
+      const relativePath = button.dataset.relativePath;
+      const fileName = button.dataset.fileName || relativePath;
+      if (!relativePath) return;
+      if (!window.confirm(`确定把「${fileName}」推送到 Odoo 吗？`)) return;
+
+      pushStateByPath.set(relativePath, { status: 'pushing', message: '正在推送…' });
+      applyPushStates();
+      try {
+        const form = new FormData();
+        form.append('relative_path', relativePath);
+        const response = await fetch(filesPushOdooUrl, { method: 'POST', body: form, cache: 'no-store' });
+        const payload = await response.json();
+        const message = payload.message || payload.error || (payload.ok ? '已推送到 Odoo' : '推送失败');
+        pushStateByPath.set(relativePath, {
+          status: payload.ok ? 'done' : 'error',
+          message,
+        });
+        applyPushStates();
+      } catch (error) {
+        pushStateByPath.set(relativePath, {
+          status: 'error',
+          message: `推送失败：${error.message}`,
+        });
+        applyPushStates();
+      }
     });
 
     refreshFiles();

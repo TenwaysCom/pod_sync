@@ -3,12 +3,16 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+import asyncio
+import json
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from webapp.file_browser import build_storage_listing, resolve_storage_file
+from webapp.file_odoo_push import plan_storage_file_odoo_push, push_storage_file_to_odoo
 
 
 class WebAppFileBrowserTests(unittest.TestCase):
@@ -107,6 +111,127 @@ class WebAppFileBrowserTests(unittest.TestCase):
 
             self.assertEqual(safe, (root / "safe.txt").resolve())
             self.assertIsNone(blocked)
+
+
+class WebAppFileOdooPushTests(unittest.TestCase):
+    def _write_pod(self, root: Path, relative_path: str) -> Path:
+        path = root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"%PDF-1.4")
+        return path
+
+    def test_listing_marks_direct_push_eligibility(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "storage" / "pod"
+            self._write_pod(root, "CMC/EU34564.pdf")
+            self._write_pod(root, "Westerman/WDB2BOUT01391.pdf")
+            payload = build_storage_listing(root, page_size=50)
+            by_path = {item["relative_path"]: item for item in payload["items"]}
+
+            self.assertTrue(by_path["CMC/EU34564.pdf"]["odoo_push_allowed"])
+            self.assertEqual(by_path["CMC/EU34564.pdf"]["odoo_push_blocked_reason"], "")
+            self.assertFalse(by_path["Westerman/WDB2BOUT01391.pdf"]["odoo_push_allowed"])
+            self.assertIn("待拉取池", by_path["Westerman/WDB2BOUT01391.pdf"]["odoo_push_blocked_reason"])
+
+    def test_plan_cmc_shorthand_file_uses_picking_name(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "storage" / "pod"
+            self._write_pod(root, "CMC/2026 POD/EU34564.pdf")
+            plan = plan_storage_file_odoo_push("CMC/2026 POD/EU34564.pdf", storage_root=root)
+
+        self.assertTrue(plan["ok"])
+        self.assertEqual(
+            plan["targets"],
+            [{"match_key_type": "picking_name", "match_key": "WCB2BOUT34564"}],
+        )
+
+    def test_plan_emtc_tracking_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "storage" / "pod"
+            self._write_pod(root, "EMTC/2026-03-19_3SYZXG8293874.png")
+            plan = plan_storage_file_odoo_push(
+                "EMTC/2026-03-19_3SYZXG8293874.png", storage_root=root
+            )
+
+        self.assertTrue(plan["ok"])
+        self.assertEqual(plan["targets"][0]["match_key_type"], "tracking_number")
+        self.assertEqual(plan["targets"][0]["match_key"], "3SYZXG8293874")
+
+    def test_plan_rejects_westerman_and_unparsed_names(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "storage" / "pod"
+            self._write_pod(root, "Westerman/proof.pdf")
+            self._write_pod(root, "CMC/readme.txt")
+
+            blocked = plan_storage_file_odoo_push("Westerman/proof.pdf", storage_root=root)
+            unparsed = plan_storage_file_odoo_push("CMC/readme.txt", storage_root=root)
+            missing = plan_storage_file_odoo_push("CMC/missing.pdf", storage_root=root)
+
+        self.assertEqual(blocked["error_code"], "WESTERMAN_SINGLE_PUSH_REQUIRES_POOL_PAYLOAD")
+        self.assertEqual(unparsed["error_code"], "NO_IDENTIFIER_FOUND")
+        self.assertEqual(missing["error_code"], "FILE_NOT_FOUND")
+
+    def test_push_storage_file_calls_single_item_push(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "storage" / "pod"
+            local = self._write_pod(root, "CMC/EU34564.pdf")
+            with mock.patch(
+                "webapp.file_odoo_push.push_single_item",
+                return_value={
+                    "ok": True,
+                    "status": "pushed_tracking",
+                    "match_key": "WCB2BOUT34564",
+                    "match_key_type": "picking_name",
+                },
+            ) as push_mock:
+                result = push_storage_file_to_odoo(
+                    "CMC/EU34564.pdf",
+                    config_path="config.local.json",
+                    storage_root=root,
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "pushed_tracking")
+        push_mock.assert_called_once_with(
+            config_path="config.local.json",
+            match_key="WCB2BOUT34564",
+            match_key_type="picking_name",
+            file_url="",
+            local_path=str(local.resolve()),
+            source_name="CMC",
+            dry_run=False,
+        )
+
+    def test_files_page_exposes_direct_odoo_push_control(self):
+        template = (PROJECT_ROOT / "webapp" / "templates" / "files.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("api_files_push_odoo", template)
+        self.assertIn("推送到 Odoo", template)
+        self.assertIn("file-push-odoo", template)
+
+    def test_files_push_endpoint_writes_through_helper(self):
+        from webapp import app as app_module
+
+        payload = {
+            "ok": True,
+            "status": "pushed_tracking",
+            "message": "已写入 Odoo stock.tracking",
+        }
+        with mock.patch.object(
+            app_module,
+            "push_storage_file_to_odoo",
+            return_value=payload,
+        ) as push_mock:
+            response = asyncio.run(
+                app_module.api_files_push_odoo(relative_path="CMC/EU34564.pdf")
+            )
+
+        body = json.loads(response.body)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(body["ok"])
+        push_mock.assert_called_once()
+        self.assertEqual(push_mock.call_args.args[0], "CMC/EU34564.pdf")
 
 
 if __name__ == "__main__":

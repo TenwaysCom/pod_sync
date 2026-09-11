@@ -36,6 +36,7 @@ from .actions import (
     resolve_storage_dir,
 )
 from .file_browser import build_storage_listing, format_file_size, resolve_storage_file
+from .file_odoo_push import push_storage_file_to_odoo
 from .jobs import JobStore
 from .odoo_missing_report import (
     build_odoo_missing_listing,
@@ -991,6 +992,23 @@ async def api_files(
         page_size=page_size,
     )
     return JSONResponse(payload, headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"})
+
+
+@app.post("/api/files/push-odoo")
+async def api_files_push_odoo(
+    relative_path: str = Form(""),
+    config_path: str = Form(DEFAULT_SYNC_CONFIG_REL),
+):
+    result = push_storage_file_to_odoo(
+        relative_path,
+        config_path=config_path or DEFAULT_SYNC_CONFIG_REL,
+    )
+    status_code = 200 if result.get("ok") else int(result.get("http_status") or 400)
+    return JSONResponse(
+        result,
+        status_code=status_code,
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
 
 
 @app.get("/api/odoo-missing/details")
