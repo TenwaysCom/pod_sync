@@ -979,6 +979,8 @@ async def reconcile_metric_export(
 async def api_files(
     source: str = "",
     q: str = "",
+    date_from: str = "",
+    date_to: str = "",
     include_internal: bool = False,
     page: int = 1,
     page_size: int = 25,
@@ -987,6 +989,8 @@ async def api_files(
         resolve_storage_dir(),
         source=source.strip(),
         query=q,
+        date_from=date_from,
+        date_to=date_to,
         include_internal=include_internal,
         page=page,
         page_size=page_size,

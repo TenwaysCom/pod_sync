@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -63,11 +63,32 @@ def resolve_storage_file(storage_root: Path | str, relative_path: str) -> Path |
     return candidate
 
 
+def parse_stored_date_bounds(date_from: str = "", date_to: str = "") -> tuple[float | None, float | None]:
+    """Parse YYYY-MM-DD bounds as a local [start, end) timestamp range."""
+    start = _parse_local_date(date_from)
+    end_day = _parse_local_date(date_to)
+    start_ts = None if start is None else start.timestamp()
+    end_ts = None if end_day is None else (end_day + timedelta(days=1)).timestamp()
+    return start_ts, end_ts
+
+
+def _parse_local_date(value: str) -> datetime | None:
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d")
+    except ValueError:
+        return None
+
+
 def build_storage_listing(
     storage_root: Path | str,
     *,
     source: str = "",
     query: str = "",
+    date_from: str = "",
+    date_to: str = "",
     include_internal: bool = False,
     page: int = 1,
     page_size: int = 25,
@@ -76,6 +97,7 @@ def build_storage_listing(
     rows = []
     source_counts: Counter[str] = Counter()
     query_text = query.strip().lower()
+    start_ts, end_ts = parse_stored_date_bounds(date_from, date_to)
     latest_mtime = None
     total_size = 0
 
@@ -95,12 +117,18 @@ def build_storage_listing(
             if query_text and query_text not in relative_path.lower():
                 continue
 
+            stat = path.stat()
+            stored_ts = stat.st_mtime
+            if start_ts is not None and stored_ts < start_ts:
+                continue
+            if end_ts is not None and stored_ts >= end_ts:
+                continue
+
             source_counts[source_key] += 1
             if source and source_key != source:
                 continue
 
-            stat = path.stat()
-            stored_at = datetime.fromtimestamp(stat.st_mtime).astimezone()
+            stored_at = datetime.fromtimestamp(stored_ts).astimezone()
             stored_at_label = stored_at.strftime("%Y-%m-%d %H:%M:%S")
             rows.append(
                 {
@@ -111,16 +139,16 @@ def build_storage_listing(
                     "size_bytes": stat.st_size,
                     "size_label": format_file_size(stat.st_size),
                     "stored_at": stored_at_label,
-                    "stored_ts": stat.st_mtime,
+                    "stored_ts": stored_ts,
                     "modified_at": stored_at_label,
-                    "modified_ts": stat.st_mtime,
+                    "modified_ts": stored_ts,
                     "extension": path.suffix.lower(),
                     **odoo_push_eligibility(source_key),
                 }
             )
             total_size += stat.st_size
-            if latest_mtime is None or stat.st_mtime > latest_mtime:
-                latest_mtime = stat.st_mtime
+            if latest_mtime is None or stored_ts > latest_mtime:
+                latest_mtime = stored_ts
 
     rows.sort(key=lambda row: (row["stored_ts"], row["relative_path"]), reverse=True)
     filtered_total = len(rows)
@@ -155,6 +183,8 @@ def build_storage_listing(
         "latest_stored_at": latest_modified_at,
         "latest_modified_at": latest_modified_at,
         "default_sort": "stored_at_desc",
+        "date_from": date_from.strip() if start_ts is not None else "",
+        "date_to": date_to.strip() if end_ts is not None else "",
         "source_count": len(source_options),
         "source_options": source_options,
         "page": page,

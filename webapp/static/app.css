@@ -1774,8 +1774,32 @@ code,
   align-items: end;
 }
 
+.files-filter-toolbar {
+  grid-template-columns: minmax(0, 1.5fr) minmax(150px, 190px) minmax(250px, 320px) minmax(110px, 140px) auto;
+}
+
 .search-field {
   min-width: 0;
+}
+
+.date-range-field {
+  min-width: 0;
+}
+
+.date-range-inputs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+
+.date-range-inputs input[type="date"] {
+  min-width: 0;
+}
+
+.date-range-sep {
+  color: var(--muted);
+  font-weight: 600;
 }
 
 .search-input-wrap {
@@ -3185,6 +3209,14 @@ button.table-link:disabled {
 
   .phase-sidebar {
     position: static;
+  }
+
+  .files-filter-toolbar {
+    grid-template-columns: minmax(0, 1fr) minmax(150px, 190px) minmax(110px, 140px) auto;
+  }
+
+  .files-filter-toolbar .date-range-field {
+    grid-column: 1 / -1;
   }
 }
 

@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 import asyncio
@@ -97,6 +98,74 @@ class WebAppFileBrowserTests(unittest.TestCase):
             )
             self.assertEqual(payload["items"][0]["stored_at"], payload["items"][0]["modified_at"])
             self.assertEqual(payload["items"][0]["stored_ts"], payload["items"][0]["modified_ts"])
+
+    def test_build_storage_listing_filters_by_stored_date_range(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "storage" / "pod"
+            (root / "CMC").mkdir(parents=True)
+            (root / "EMTC").mkdir(parents=True)
+            files = [
+                (root / "CMC" / "aug.pdf", datetime(2026, 8, 31, 23, 0, 0)),
+                (root / "CMC" / "sep-start.pdf", datetime(2026, 9, 1, 0, 30, 0)),
+                (root / "CMC" / "sep-mid.pdf", datetime(2026, 9, 10, 12, 0, 0)),
+                (root / "EMTC" / "sep-end.png", datetime(2026, 9, 15, 23, 59, 0)),
+                (root / "CMC" / "oct.pdf", datetime(2026, 10, 1, 0, 0, 0)),
+            ]
+            for path, stored_at in files:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(path.name, encoding="utf-8")
+                ts = stored_at.timestamp()
+                os.utime(path, (ts, ts))
+
+            payload = build_storage_listing(
+                root, date_from="2026-09-01", date_to="2026-09-15"
+            )
+
+            self.assertEqual(payload["date_from"], "2026-09-01")
+            self.assertEqual(payload["date_to"], "2026-09-15")
+            self.assertEqual(
+                [item["relative_path"] for item in payload["items"]],
+                ["EMTC/sep-end.png", "CMC/sep-mid.pdf", "CMC/sep-start.pdf"],
+            )
+            self.assertEqual(
+                [item["key"] for item in payload["source_options"]],
+                ["CMC", "EMTC"],
+            )
+            self.assertEqual(
+                {item["key"]: item["count"] for item in payload["source_options"]},
+                {"CMC": 2, "EMTC": 1},
+            )
+
+            from_only = build_storage_listing(root, date_from="2026-10-01")
+            self.assertEqual(
+                [item["relative_path"] for item in from_only["items"]],
+                ["CMC/oct.pdf"],
+            )
+
+            to_only = build_storage_listing(root, date_to="2026-08-31")
+            self.assertEqual(
+                [item["relative_path"] for item in to_only["items"]],
+                ["CMC/aug.pdf"],
+            )
+
+            ignored = build_storage_listing(
+                root, date_from="not-a-date", date_to="2026-13-40"
+            )
+            self.assertEqual(ignored["total_files"], 5)
+            self.assertEqual(ignored["date_from"], "")
+            self.assertEqual(ignored["date_to"], "")
+
+            source_filtered = build_storage_listing(
+                root, source="CMC", date_from="2026-09-01", date_to="2026-09-15"
+            )
+            self.assertEqual(
+                [item["relative_path"] for item in source_filtered["items"]],
+                ["CMC/sep-mid.pdf", "CMC/sep-start.pdf"],
+            )
+            self.assertEqual(
+                {item["key"]: item["count"] for item in source_filtered["source_options"]},
+                {"CMC": 2, "EMTC": 1},
+            )
 
     def test_resolve_storage_file_blocks_path_traversal(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -209,6 +278,10 @@ class WebAppFileOdooPushTests(unittest.TestCase):
         self.assertIn("api_files_push_odoo", template)
         self.assertIn("推送到 Odoo", template)
         self.assertIn("file-push-odoo", template)
+        self.assertIn("fileDateFrom", template)
+        self.assertIn("fileDateTo", template)
+        self.assertIn("date_from", template)
+        self.assertIn("date_to", template)
 
     def test_files_push_endpoint_writes_through_helper(self):
         from webapp import app as app_module

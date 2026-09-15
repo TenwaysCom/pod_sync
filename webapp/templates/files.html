@@ -39,11 +39,11 @@
       <div>
         <p class="eyebrow">文件列表</p>
         <h2>下载文件</h2>
-        <p>按来源和关键字筛选，列表会自动刷新，方便你实时确认同步结果。操作列可打开文件，或把单个 CMC / EMTC 文件推送到 Odoo。</p>
+        <p>按来源、入库日期和关键字筛选，列表会自动刷新，方便你实时确认同步结果。操作列可打开文件，或把单个 CMC / EMTC 文件推送到 Odoo。</p>
       </div>
     </div>
     <div class="card">
-      <div class="toolbar filter-toolbar">
+      <div class="toolbar filter-toolbar files-filter-toolbar">
         <label class="search-field">
           搜索
           <div class="search-input-wrap">
@@ -56,6 +56,14 @@
           <select id="fileSourceFilter">
             <option value="">全部来源</option>
           </select>
+        </label>
+        <label class="date-range-field">
+          入库日期
+          <div class="date-range-inputs">
+            <input id="fileDateFrom" type="date" aria-label="入库开始日期">
+            <span class="date-range-sep">至</span>
+            <input id="fileDateTo" type="date" aria-label="入库结束日期">
+          </div>
         </label>
         <label>
           每页条数
@@ -139,14 +147,34 @@
       const params = new URLSearchParams();
       const source = document.getElementById('fileSourceFilter').value;
       const query = document.getElementById('fileSearchInput').value.trim();
+      const dateFrom = document.getElementById('fileDateFrom').value;
+      const dateTo = document.getElementById('fileDateTo').value;
       const includeInternal = document.getElementById('includeInternal').checked;
       const pageSize = document.getElementById('filePageSize').value;
       if (source) params.set('source', source);
       if (query) params.set('q', query);
+      if (dateFrom) params.set('date_from', dateFrom);
+      if (dateTo) params.set('date_to', dateTo);
       if (includeInternal) params.set('include_internal', 'true');
       params.set('page', String(currentPage));
       params.set('page_size', pageSize);
       return params;
+    }
+
+    function syncDateBounds() {
+      const dateFrom = document.getElementById('fileDateFrom');
+      const dateTo = document.getElementById('fileDateTo');
+      dateTo.min = dateFrom.value || '';
+      dateFrom.max = dateTo.value || '';
+    }
+
+    function dateRangeSummary() {
+      const dateFrom = document.getElementById('fileDateFrom').value;
+      const dateTo = document.getElementById('fileDateTo').value;
+      if (dateFrom && dateTo) return `，入库日期 ${dateFrom} 至 ${dateTo}`;
+      if (dateFrom) return `，入库日期自 ${dateFrom} 起`;
+      if (dateTo) return `，入库日期截至 ${dateTo}`;
+      return '';
     }
 
     function renderSourceSummary(payload) {
@@ -180,7 +208,7 @@
       document.getElementById('filesTotalCount').textContent = String(payload.total_files);
       document.getElementById('filesTotalSize').textContent = payload.total_size_label;
       document.getElementById('filesLatestModified').textContent = payload.latest_stored_at || payload.latest_modified_at || '无';
-      document.getElementById('fileFilterSummary').textContent = `当前筛选命中 ${payload.total_files} 个文件，默认按入库时间倒序，正在显示第 ${payload.page_from} - ${payload.page_to} 条`;
+      document.getElementById('fileFilterSummary').textContent = `当前筛选命中 ${payload.total_files} 个文件${dateRangeSummary()}，默认按入库时间倒序，正在显示第 ${payload.page_from} - ${payload.page_to} 条`;
       document.getElementById('paginationSummary').textContent = `第 ${payload.page_from} - ${payload.page_to} 条，共 ${payload.total_files} 条`;
       document.getElementById('paginationCurrent').textContent = `第 ${payload.page} / ${payload.total_pages} 页`;
       document.getElementById('prevPageButton').disabled = !payload.has_prev;
@@ -293,6 +321,14 @@
     document.getElementById('fileSourceFilter').addEventListener('change', resetToFirstPageAndRefresh);
     document.getElementById('includeInternal').addEventListener('change', resetToFirstPageAndRefresh);
     document.getElementById('filePageSize').addEventListener('change', resetToFirstPageAndRefresh);
+    document.getElementById('fileDateFrom').addEventListener('change', () => {
+      syncDateBounds();
+      resetToFirstPageAndRefresh();
+    });
+    document.getElementById('fileDateTo').addEventListener('change', () => {
+      syncDateBounds();
+      resetToFirstPageAndRefresh();
+    });
     document.getElementById('fileSearchInput').addEventListener('input', scheduleSearchRefresh);
     document.getElementById('fileSearchInput').addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
