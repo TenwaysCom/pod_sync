@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 
 config.local.json
+config.local.json.*
 config.json
 
 # Runtime/generated artifacts
