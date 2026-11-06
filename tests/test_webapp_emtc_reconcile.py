@@ -22,9 +22,13 @@ class EmtcReconcileTests(unittest.TestCase):
     def test_reconcile_sources_include_westerman_with_picking_name_matching(self):
         sources = {item["slug"]: item for item in emtc_reconcile.list_reconcile_sources()}
 
-        self.assertEqual(set(sources), {"emtc", "cmc", "westerman"})
+        self.assertEqual(set(sources), {"emtc", "cmc", "westerman", "burger"})
         self.assertEqual(sources["westerman"]["carrier_delivery_type"], "westman")
         self.assertEqual(sources["westerman"]["match_key_type"], "picking_name")
+        self.assertEqual(sources["burger"]["carrier_delivery_type"], "Burger")
+        self.assertEqual(sources["burger"]["match_key_type"], "picking_name")
+        self.assertEqual(sources["burger"]["source_name"], "Burger")
+        self.assertIsNone(sources["burger"]["carrier_id"])
         self.assertTrue(
             emtc_reconcile._odoo_row_matches_source(
                 {"source_slug": "westerman", "carrier_id": 999},
@@ -37,6 +41,58 @@ class EmtcReconcileTests(unittest.TestCase):
                 sources["westerman"],
             )
         )
+
+    def test_burger_reconcile_uses_received_manifest_without_odoo_index(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            image = root / "Burger" / "WCB2B_OUT_12345" / "pod.png"
+            image.parent.mkdir(parents=True)
+            image.write_bytes(b"png")
+            manifest = root / "_integrity" / "Burger" / "burger_api.jsonl"
+            manifest.parent.mkdir(parents=True)
+            rows = [
+                {
+                    "source_file_id": "WCB2B/OUT/12345:abc",
+                    "file_name": "pod.png",
+                    "source_path": "Burger/WCB2B_OUT_12345/pod.png",
+                    "local_path": str(image),
+                    "source_url": "http://127.0.0.1/storage/files/pod.png",
+                    "downloaded_at": "2026-11-06T02:00:00Z",
+                    "shipment_reference": "WCB2B/OUT/12345",
+                },
+                {
+                    "source_file_id": "WCB2B/OUT/12345:def",
+                    "file_name": "pod-2.png",
+                    "source_path": "Burger/WCB2B_OUT_12345/pod-2.png",
+                    "local_path": str(image),
+                    "source_url": "http://127.0.0.1/storage/files/pod-2.png",
+                    "downloaded_at": "2026-11-06T03:00:00Z",
+                    "shipment_reference": "WCB2B/OUT/12345",
+                },
+            ]
+            manifest.write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps({"burger_api": {"warehouse": "Burger"}}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(emtc_reconcile, "CONFIG_PATH", config_path), mock.patch.object(
+                emtc_reconcile, "resolve_storage_dir", return_value=root
+            ):
+                dataset = emtc_reconcile.load_reconcile_dataset("burger")
+
+        self.assertEqual(dataset["phase1a_run_name"], "burger_api")
+        self.assertEqual(dataset["odoo_summary"]["total_count"], 1)
+        self.assertEqual(dataset["odoo_summary"]["matched_pod_count"], 1)
+        self.assertEqual(dataset["odoo_summary"]["without_pod_count"], 0)
+        self.assertEqual(dataset["pod_summary"]["total_count"], 2)
+        self.assertEqual(dataset["pod_summary"]["found_in_odoo_count"], 2)
+        self.assertEqual(dataset["odoo_to_pod_rows"][0]["picking_name"], "WCB2B/OUT/12345")
+        self.assertEqual(dataset["odoo_to_pod_rows"][0]["compare_status"], "matched_pod")
+        self.assertEqual(dataset["odoo_to_pod_rows"][0]["pod_file_count"], 2)
 
     def test_pod_index_xmlrpc_uses_the_explicit_config_and_available_cache(self):
         config = emtc_reconcile.RECONCILE_SOURCE_CONFIGS["cmc"]

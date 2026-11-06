@@ -106,12 +106,20 @@
     <article class="card stat-card">
       <p class="label">最新刷新</p>
       <h2>{% if dataset %}{{ dataset.generated_at }}{% else %}还没有快照{% endif %}</h2>
+      {% if selected_source.slug == "burger" %}
+      <p class="muted">按最近一次收到的 Burger 图片时间</p>
+      {% else %}
       <p class="muted">基于最新 Odoo 总明细快照和最新 POD 识别结果</p>
+      {% endif %}
     </article>
     <article class="card stat-card">
       <p class="label">识别批次</p>
       <h2>{% if dataset %}{{ dataset.phase1a_run_name }}{% else %}-{% endif %}</h2>
+      {% if selected_source.slug == "burger" %}
+      <p class="muted">Burger 对账直接读取接口写入的清单，不走 Odoo 索引刷新</p>
+      {% else %}
       <p class="muted">当前页面固定看最新一批全量 POD 识别结果中的 {{ selected_source.label }} 文件</p>
+      {% endif %}
     </article>
   </section>
 
@@ -131,7 +139,11 @@
           </div>
           <h2>{{ dataset.odoo_summary.total_count }}</h2>
           <p class="stat-card-share">{{ dataset.odoo_summary.total_share_text }}</p>
+          {% if selected_source.slug == "burger" %}
+          <p class="muted">接口收到出库单和图片时写入的 Burger 对账池</p>
+          {% else %}
           <p class="muted">Odoo 中 `delivery_type = {{ selected_source.carrier_delivery_type }}` 的目标出库单</p>
+          {% endif %}
         </article>
         <article class="card stat-card stat-card-inline stat-card-alert">
           <div class="stat-card-topline">
@@ -255,7 +267,11 @@
           </div>
           <h2>{{ dataset.pod_summary.total_count }}</h2>
           <p class="stat-card-share">{{ dataset.pod_summary.total_share_text }}</p>
+          {% if selected_source.slug == "burger" %}
+          <p class="muted">接口已保存的全部 Burger 图片</p>
+          {% else %}
           <p class="muted">来自最新 POD 识别结果中的全部 {{ selected_source.label }} 文件</p>
+          {% endif %}
         </article>
         <article class="card stat-card stat-card-inline stat-card-alert">
           <div class="stat-card-topline">

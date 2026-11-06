@@ -1316,6 +1316,81 @@ class Phase1APipelineTests(unittest.TestCase):
             self.assertEqual(sources[0]["source_type"], "westerman_api")
             self.assertEqual(sources[0]["candidate_refresh_max_age_hours"], 48)
 
+    def test_sync_config_includes_enabled_burger_source(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "sync.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "download": {"base_dir": str(tmp / "pod")},
+                        "burger_api": {"enabled": False, "warehouse": "Burger"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(pipeline._build_sources_from_sync_config(config_path), [])
+
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "download": {"base_dir": str(tmp / "pod")},
+                        "burger_api": {
+                            "enabled": True,
+                            "warehouse": "Burger",
+                            "app_id": "burger-app",
+                            "app_key": "burger-key",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            sources = pipeline._build_sources_from_sync_config(config_path)
+
+            self.assertEqual(len(sources), 1)
+            self.assertEqual(sources[0]["source_name"], "Burger")
+            self.assertEqual(sources[0]["source_type"], "burger_api")
+            self.assertTrue(
+                sources[0]["manifest_path"].endswith(f"{Path('Burger') / 'burger_api.jsonl'}")
+            )
+
+    def test_burger_manifest_uses_shipment_reference_as_picking_name(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            manifest_path = tmp / "burger_api.jsonl"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "source": "burger_api",
+                        "warehouse": "Burger",
+                        "source_file_id": "WCB2B/OUT/12345:abc",
+                        "shipment_reference": "WCB2B/OUT/12345",
+                        "source_path": "Burger/WCB2B_OUT_12345/proof.png",
+                        "file_name": "proof.png",
+                        "mime_type": "image/png",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            documents, statuses = pipeline.load_documents(
+                {
+                    "sources": [
+                        {
+                            "manifest_path": str(manifest_path),
+                            "source_name": "Burger",
+                            "source_type": "burger_api",
+                        }
+                    ]
+                }
+            )
+
+            self.assertEqual(statuses[0]["unique_record_count"], 1)
+            self.assertEqual(documents[0]["source_name"], "Burger")
+            self.assertEqual(documents[0]["inferred_picking_names"], ["WCB2BOUT12345"])
+            self.assertEqual(documents[0]["shipment_reference"], "WCB2B/OUT/12345")
+
     def test_auto_run_dir_generates_daily_sequence(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)

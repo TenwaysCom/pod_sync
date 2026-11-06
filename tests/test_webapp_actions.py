@@ -800,6 +800,12 @@ class WebAppActionTests(unittest.TestCase):
                             "warehouse": "Westerman",
                             "api_key": "secret",
                         },
+                        "burger_api": {
+                            "enabled": True,
+                            "warehouse": "Burger",
+                            "app_id": "burger-app",
+                            "app_key": "burger-secret",
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -812,7 +818,30 @@ class WebAppActionTests(unittest.TestCase):
             self.assertEqual(snapshot["sources"][0]["has_secret"], True)
             self.assertEqual(snapshot["sources"][1]["has_folder_id"], True)
             self.assertEqual(snapshot["sources"][2]["has_secret"], True)
+            self.assertEqual(snapshot["sources"][3]["key"], "burger_api")
+            self.assertEqual(snapshot["sources"][3]["label"], "Burger")
+            self.assertTrue(snapshot["sources"][3]["enabled"])
+            self.assertTrue(snapshot["sources"][3]["has_app_id"])
+            self.assertTrue(snapshot["sources"][3]["has_secret"])
+            self.assertNotIn("burger-secret", json.dumps(snapshot))
             self.assertEqual(snapshot["storage_dir"], str((tmp / "storage" / "pod").resolve()))
+
+    def test_burger_source_stays_enabled_unless_explicitly_disabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.local.json"
+            config_path.write_text(json.dumps({"download": {"base_dir": "./storage/pod"}}), encoding="utf-8")
+            missing = actions.load_runtime_config_snapshot(str(config_path))
+            burger = next(source for source in missing["sources"] if source["key"] == "burger_api")
+            self.assertTrue(burger["enabled"])
+            self.assertEqual(burger["warehouse"], "Burger")
+
+            config_path.write_text(
+                json.dumps({"burger_api": {"enabled": False, "warehouse": "Burger"}}),
+                encoding="utf-8",
+            )
+            disabled = actions.load_runtime_config_snapshot(str(config_path))
+            burger = next(source for source in disabled["sources"] if source["key"] == "burger_api")
+            self.assertFalse(burger["enabled"])
 
     def test_resolve_storage_dir_uses_config_relative_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:

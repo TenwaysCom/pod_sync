@@ -102,6 +102,31 @@ RECONCILE_SOURCE_CONFIGS["westerman"].update(
     }
 )
 
+# Burger uses the same picking-name reconciliation contract as CMC. The rows
+# come from the ingest API, which already carries the Odoo picking name, so
+# this tab does not read the Odoo carrier index.
+RECONCILE_SOURCE_CONFIGS["burger"] = {
+    key: value.replace("CMC", "Burger") if isinstance(value, str) else value
+    for key, value in RECONCILE_SOURCE_CONFIGS["cmc"].items()
+}
+RECONCILE_SOURCE_CONFIGS["burger"].update(
+    {
+        "slug": "burger",
+        "label": "Burger",
+        "carrier_id": None,
+        "carrier_delivery_type": "Burger",
+        "source_name": "Burger",
+        "odoo_with_key_hint": "这些出库单号随图片一起传入，可以直接和 POD 比对",
+        "odoo_match_hint": "这份出库单已由 Odoo 随 POD 图片传入",
+        "odoo_missing_hint": "已接收的出库单里还没有对应图片",
+        "pod_parseable_hint": "出库单号由接口随图片一起传入",
+        "pod_found_hint": "这份 POD 随出库单号一起从 Odoo 传入",
+        "pod_missing_hint": "图片已保存，但清单里没有出库单号",
+        "odoo_heading": "Burger 出库单，能不能在已接收的 POD 里找到",
+        "pod_heading": "Burger POD 文件，能不能对应到传入的出库单号",
+    }
+)
+
 DEFAULT_RECONCILE_KIND = "emtc"
 
 ODOO_TO_POD_STATUS_ORDER = {
@@ -308,6 +333,7 @@ def list_reconcile_sources():
         RECONCILE_SOURCE_CONFIGS["emtc"],
         RECONCILE_SOURCE_CONFIGS["cmc"],
         RECONCILE_SOURCE_CONFIGS["westerman"],
+        RECONCILE_SOURCE_CONFIGS["burger"],
     ]
 
 
@@ -1000,8 +1026,114 @@ def _load_reconcile_dataset_cached(
     )
 
 
+def _burger_manifest_path(storage_root: str | Path) -> Path:
+    from clients.common.sync_integrity import sanitize_path_component
+
+    warehouse = "Burger"
+    try:
+        cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        section = cfg.get("burger_api") if isinstance(cfg, dict) else None
+        if isinstance(section, dict):
+            warehouse = str(section.get("warehouse") or "Burger").strip() or "Burger"
+    except (OSError, json.JSONDecodeError, AttributeError):
+        warehouse = "Burger"
+    warehouse = sanitize_path_component(warehouse, "Burger")
+    return Path(storage_root) / "_integrity" / warehouse / "burger_api.jsonl"
+
+
+def _load_burger_manifest_rows(storage_root: str | Path):
+    from clients.common.sync_integrity import load_manifest_entries
+
+    manifest_path = _burger_manifest_path(storage_root)
+    if not manifest_path.exists():
+        return []
+    latest = {}
+    for entry in load_manifest_entries(manifest_path):
+        identity = str(entry.get("source_file_id") or entry.get("local_path") or entry.get("_manifest_line"))
+        latest[identity] = entry
+    rows = []
+    for entry in latest.values():
+        local_path = str(entry.get("local_path") or "").strip()
+        if not local_path or not Path(local_path).is_file():
+            continue
+        picking_name = str(entry.get("shipment_reference") or "").strip()
+        rows.append(
+            {
+                "document_uid": entry.get("source_file_id") or local_path,
+                "file_name": entry.get("file_name"),
+                "source_path": entry.get("source_path"),
+                "file_url": entry.get("source_url"),
+                "local_path": local_path,
+                "source_modified_at": entry.get("downloaded_at"),
+                "picking_name": picking_name,
+                "business_datetime": entry.get("downloaded_at"),
+            }
+        )
+    rows.sort(key=lambda row: (row.get("business_datetime") or "", row.get("file_name") or ""))
+    return rows
+
+
+def _load_burger_reconcile_dataset(config, storage_root: str | Path):
+    received = _load_burger_manifest_rows(storage_root)
+    odoo_by_key = {}
+    pod_docs = []
+    latest_at = None
+    for row in received:
+        raw_key = row.get("picking_name") or None
+        normalized_key = _normalize_match_key(raw_key, config["match_key_type"])
+        received_at = row.get("business_datetime")
+        if received_at and (latest_at is None or str(received_at) > latest_at):
+            latest_at = str(received_at)
+        pod_docs.append(
+            {
+                "document_uid": row.get("document_uid"),
+                "file_name": row.get("file_name"),
+                "source_path": row.get("source_path"),
+                "file_url": row.get("file_url"),
+                "local_path": row.get("local_path"),
+                "source_modified_at": received_at,
+                "match_key": raw_key,
+                "normalized_match_key": normalized_key,
+                "reason_code": None,
+            }
+        )
+        if not normalized_key:
+            continue
+        current = odoo_by_key.get(normalized_key)
+        if current is not None and (current.get("business_datetime") or "") >= (received_at or ""):
+            continue
+        odoo_by_key[normalized_key] = {
+            "odoo_picking_id": None,
+            "picking_name": raw_key,
+            "state": "done",
+            "business_datetime": received_at,
+            "source_slug": config["slug"],
+            "carrier_delivery_type": config.get("carrier_delivery_type"),
+            "carrier_name": config["source_name"],
+            "match_key": raw_key,
+            "normalized_match_key": normalized_key,
+        }
+    return _build_dataset_base(
+        config,
+        list(odoo_by_key.values()),
+        pod_docs,
+        generated_at=latest_at,
+        run_name="burger_api",
+        phase1a_generated_at=latest_at,
+        storage_root=str(storage_root),
+    )
+
+
+def refresh_burger_reconcile_dataset(storage_root: str | Path | None = None):
+    config = _resolve_reconcile_source("burger")
+    root = storage_root if storage_root is not None else resolve_storage_dir()
+    return _load_burger_reconcile_dataset(config, root)
+
+
 def _load_reconcile_base_dataset(kind: str = DEFAULT_RECONCILE_KIND):
     source_config = _resolve_reconcile_source(kind)
+    if source_config["slug"] == "burger":
+        return _load_burger_reconcile_dataset(source_config, resolve_storage_dir())
     run = get_latest_phase1a_run()
     if not run:
         return None

@@ -9,11 +9,13 @@ SOURCE_LABELS = {
     "CMC": "CMC OneDrive",
     "EMTC": "EMTC Google Drive",
     "Westerman": "Westerman API",
+    "Burger": "Burger",
     "_integrity": "完整性日志",
 }
 
 DIRECT_ODOO_PUSH_SOURCES = {"CMC", "EMTC"}
 WESTERMAN_PUSH_BLOCK_REASON = "Westerman 文件必须走待拉取池流水线，不能单独推送"
+BURGER_PUSH_BLOCK_REASON = "Burger 文件随流水线识别后推送，不能单独推送"
 INTERNAL_PUSH_BLOCK_REASON = "内部日志文件不能推送到 Odoo"
 UNKNOWN_SOURCE_PUSH_BLOCK_REASON = "未知来源，无法单独推送到 Odoo"
 
@@ -29,6 +31,11 @@ def odoo_push_eligibility(source_key: str) -> dict:
         return {
             "odoo_push_allowed": False,
             "odoo_push_blocked_reason": WESTERMAN_PUSH_BLOCK_REASON,
+        }
+    if source_key == "Burger":
+        return {
+            "odoo_push_allowed": False,
+            "odoo_push_blocked_reason": BURGER_PUSH_BLOCK_REASON,
         }
     if source_key == "_integrity":
         return {

@@ -80,6 +80,13 @@ class SignedUrlTests(unittest.TestCase):
         self.assertNotIn(token, redacted)
         self.assertEqual(redacted.count("[REDACTED]"), 2)
 
+    def test_app_key_is_redacted(self):
+        redacted = redact_sensitive_data({"burger_api": {"app_key": "super-secret"}})
+        text = redact_sensitive_text('{"app_key": "super-secret"}')
+
+        self.assertEqual(redacted["burger_api"]["app_key"], "[REDACTED]")
+        self.assertNotIn("super-secret", text)
+
 
 if __name__ == "__main__":
     unittest.main()

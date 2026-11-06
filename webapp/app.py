@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from .burger_ingest import BurgerIngestError, ingest_burger_pod
 from .actions import (
     DEFAULT_PHASE1A_CONFIG_REL,
     DEFAULT_SYNC_CONFIG_REL,
@@ -527,6 +528,8 @@ def normalize_redirect_target(target: str | None, fallback: str):
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
+    if path == "/api/burger/pod":
+        return await call_next(request)
     if path == "/storage/files" or path.startswith("/storage/files/"):
         if not _storage_requires_signature():
             return await call_next(request)
@@ -1291,6 +1294,21 @@ async def phase1a_artifact(run_name: str, artifact_key: str):
             "Expires": "0",
         },
     )
+
+
+@app.post("/api/burger/pod")
+async def burger_pod_ingest(request: Request):
+    body = await request.body()
+    try:
+        payload = ingest_burger_pod(
+            body=body,
+            app_id=request.headers.get("x-app-id", ""),
+            timestamp=request.headers.get("x-timestamp", ""),
+            signature=request.headers.get("x-signature", ""),
+        )
+    except BurgerIngestError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return JSONResponse(payload)
 
 
 @app.get("/storage/files/{relative_path:path}")

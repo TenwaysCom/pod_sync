@@ -521,16 +521,24 @@ def load_runtime_config_snapshot(config_path: str | None = None):
         ("cmc_onedrive", "CMC OneDrive", "refresh_token"),
         ("emtc_gdrive", "EMTC Google Drive", "refresh_token"),
         ("westerman_api", "Westerman API", "api_key"),
+        ("burger_api", "Burger", "app_key"),
     ):
-        source_cfg = payload.get(key, {})
+        source_cfg = payload.get(key) or {}
+        if not isinstance(source_cfg, dict):
+            source_cfg = {}
+        if key == "burger_api":
+            enabled = source_cfg.get("enabled", True) is not False
+        else:
+            enabled = bool(source_cfg.get("enabled", False))
         sources.append(
             {
                 "key": key,
                 "label": label,
-                "enabled": bool(source_cfg.get("enabled", False)),
-                "warehouse": source_cfg.get("warehouse"),
+                "enabled": enabled,
+                "warehouse": source_cfg.get("warehouse") or ("Burger" if key == "burger_api" else None),
                 "has_access_token": bool(source_cfg.get("access_token")),
-                "has_secret": bool(source_cfg.get(secret_field)),
+                "has_app_id": bool(str(source_cfg.get("app_id") or "").strip()),
+                "has_secret": bool(str(source_cfg.get(secret_field) or "").strip()),
                 "has_shared_url": bool(source_cfg.get("shared_url")),
                 "has_folder_id": bool(source_cfg.get("folder_id")),
                 "has_root_item_id": bool(source_cfg.get("root_item_id")),

@@ -6,6 +6,10 @@ __pycache__/
 config.local.json
 config.local.json.*
 config.json
+*.pem
+
+phase1a/phase1a.local.json
+phase1a/scope/odoo_scope.json
 
 # Runtime/generated artifacts
 storage/pod/*

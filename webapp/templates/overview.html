@@ -59,13 +59,18 @@
           </div>
           <p class="muted">仓库：{{ source.warehouse or "无" }}</p>
           <ul class="compact-list">
-            <li>访问令牌：{{ "已配置" if source.has_access_token else "缺失" }}</li>
-            <li>刷新令牌 / 密钥：{{ "已配置" if source.has_secret else "缺失" }}</li>
-            {% if source.key == "cmc_onedrive" %}
-              <li>根项目 ID：{{ "已配置" if source.has_root_item_id else "缺失" }}</li>
-            {% endif %}
-            {% if source.key == "emtc_gdrive" %}
-              <li>文件夹 ID：{{ "已配置" if source.has_folder_id else "缺失" }}</li>
+            {% if source.key == "burger_api" %}
+              <li>App ID：{{ "已配置" if source.has_app_id else "缺失" }}</li>
+              <li>App Key：{{ "已配置" if source.has_secret else "缺失" }}</li>
+            {% else %}
+              <li>访问令牌：{{ "已配置" if source.has_access_token else "缺失" }}</li>
+              <li>刷新令牌 / 密钥：{{ "已配置" if source.has_secret else "缺失" }}</li>
+              {% if source.key == "cmc_onedrive" %}
+                <li>根项目 ID：{{ "已配置" if source.has_root_item_id else "缺失" }}</li>
+              {% endif %}
+              {% if source.key == "emtc_gdrive" %}
+                <li>文件夹 ID：{{ "已配置" if source.has_folder_id else "缺失" }}</li>
+              {% endif %}
             {% endif %}
           </ul>
         </article>

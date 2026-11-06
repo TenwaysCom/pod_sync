@@ -20,6 +20,7 @@ SENSITIVE_VALUE_KEYS = frozenset(
     {
         "access_token",
         "api_key",
+        "app_key",
         "authkey",
         "authorization",
         "client_secret",
@@ -39,7 +40,7 @@ _SENSITIVE_QUERY_VALUE_RE = re.compile(
     r"(?i)([?&](?:access_token|authkey|client_secret|id_token|refresh_token|sig|signature|tempauth|token)=)([^&#\s\"']*)"
 )
 _SENSITIVE_TEXT_FIELD_RE = re.compile(
-    r"(?i)((?:\"|')?(?:access_token|api_key|authkey|authorization|client_secret|cookie|file_url_secret|id_token|password|refresh_token|secret|sig|signature|tempauth|token)(?:\"|')?\s*[:=]\s*(?:\"|')?)([^,}\[\]\s\"']+)"
+    r"(?i)((?:\"|')?(?:access_token|api_key|app_key|authkey|authorization|client_secret|cookie|file_url_secret|id_token|password|refresh_token|secret|sig|signature|tempauth|token)(?:\"|')?\s*[:=]\s*(?:\"|')?)([^,}\[\]\s\"']+)"
 )
 
 

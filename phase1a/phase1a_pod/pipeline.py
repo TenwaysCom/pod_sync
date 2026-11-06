@@ -103,6 +103,7 @@ SYNC_SOURCE_DEFINITIONS = (
     {"source_type": "onedrive", "config_keys": ("cmc_onedrive", "onedrive"), "default_label": "CMC"},
     {"source_type": "gdrive", "config_keys": ("emtc_gdrive", "gdrive"), "default_label": "EMTC"},
     {"source_type": "westerman_api", "config_keys": ("westerman_api",), "default_label": "Westerman"},
+    {"source_type": "burger_api", "config_keys": ("burger_api",), "default_label": "Burger"},
 )
 
 RUN_NAME_PATTERN = re.compile(r"^(\d{8})(\d{4})$")
