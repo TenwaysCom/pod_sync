@@ -17,7 +17,12 @@ from webapp import emtc_reconcile
 
 class EmtcReconcileTests(unittest.TestCase):
     def setUp(self):
-        emtc_reconcile._load_reconcile_dataset_cached.cache_clear()
+        emtc_reconcile._load_reconcile_generation_cached.cache_clear()
+
+    def test_reconcile_generation_cache_keeps_a_single_entry(self):
+        info = emtc_reconcile._load_reconcile_generation_cached.cache_info()
+        self.assertEqual(info.maxsize, 1)
+        self.assertEqual(info.currsize, 0)
 
     def test_reconcile_sources_include_westerman_with_picking_name_matching(self):
         sources = {item["slug"]: item for item in emtc_reconcile.list_reconcile_sources()}

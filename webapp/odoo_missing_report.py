@@ -534,7 +534,7 @@ def _file_signature(path: Path | None):
     return (stat.st_mtime_ns, stat.st_size)
 
 
-@lru_cache(maxsize=2)
+@lru_cache(maxsize=1)
 def _load_odoo_missing_snapshot_cached(signature: tuple[int, int]):
     return json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
 

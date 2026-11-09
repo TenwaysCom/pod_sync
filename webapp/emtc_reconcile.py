@@ -423,6 +423,13 @@ def _extract_odoo_match_key(row, config):
     return raw_value, _normalize_match_key(raw_value, config["match_key_type"])
 
 
+def _odoo_row_match_key(row, config):
+    stored = row.get("_match_keys")
+    if stored:
+        return stored[config["match_key_type"]]
+    return row.get("match_key"), row.get("normalized_match_key")
+
+
 def _extract_pod_match_key(row, config):
     preferred_key = row.get("preferred_key")
     preferred_key_type = row.get("preferred_key_type")
@@ -658,8 +665,7 @@ def _build_dataset_view(
     odoo_to_pod_rows = []
     if include_rows:
         for row in odoo_rows:
-            raw_key = row.get("match_key")
-            normalized_key = row.get("normalized_match_key")
+            raw_key, normalized_key = _odoo_row_match_key(row, config)
             pod_matches = pod_docs_by_key.get(normalized_key, []) if normalized_key else []
             if not normalized_key:
                 compare_status = "no_match_key"
@@ -704,13 +710,13 @@ def _build_dataset_view(
 
     filtered_odoo_by_key = defaultdict(list)
     for row in odoo_rows:
-        normalized_key = row.get("normalized_match_key")
+        _, normalized_key = _odoo_row_match_key(row, config)
         if normalized_key:
             filtered_odoo_by_key[normalized_key].append(row)
 
     all_odoo_by_key = defaultdict(list)
     for row in all_odoo_rows or odoo_rows:
-        normalized_key = row.get("normalized_match_key")
+        _, normalized_key = _odoo_row_match_key(row, config)
         if normalized_key:
             all_odoo_by_key[normalized_key].append(row)
 
@@ -791,12 +797,15 @@ def _build_dataset_view(
             }
         )
 
-    odoo_with_key_count = sum(1 for row in odoo_rows if row.get("normalized_match_key"))
-    odoo_matched_pod_count = sum(
-        1
-        for row in odoo_rows
-        if row.get("normalized_match_key") and pod_docs_by_key.get(row.get("normalized_match_key"))
-    )
+    odoo_with_key_count = 0
+    odoo_matched_pod_count = 0
+    for row in odoo_rows:
+        _, normalized_key = _odoo_row_match_key(row, config)
+        if not normalized_key:
+            continue
+        odoo_with_key_count += 1
+        if pod_docs_by_key.get(normalized_key):
+            odoo_matched_pod_count += 1
     pod_parseable_count = sum(1 for row in pod_docs if row.get("normalized_match_key"))
     odoo_total = len(odoo_rows)
     pod_total = len(pod_docs)
@@ -955,9 +964,23 @@ def _build_dataset_base(
     }
 
 
-@lru_cache(maxsize=8)
-def _load_reconcile_dataset_cached(
-    source_slug: str,
+def _pod_document(row, config):
+    raw_key, normalized_key = _extract_pod_match_key(row, config)
+    return {
+        "document_uid": row.get("document_uid"),
+        "file_name": row.get("file_name"),
+        "source_path": row.get("source_path"),
+        "file_url": row.get("file_url"),
+        "local_path": row.get("local_path"),
+        "source_modified_at": row.get("source_modified_at"),
+        "match_key": raw_key,
+        "normalized_match_key": normalized_key,
+        "reason_code": row.get("reason_code"),
+    }
+
+
+@lru_cache(maxsize=1)
+def _load_reconcile_generation_cached(
     run_name: str,
     parsed_signature: tuple[int, int],
     odoo_signature: tuple[int, int],
@@ -965,7 +988,12 @@ def _load_reconcile_dataset_cached(
     storage_root: str,
     config_path: str,
 ):
-    config = _resolve_reconcile_source(source_slug)
+    """Load every reconcile source from one parse of the current files.
+
+    File signatures are part of the cache key so a new daily run replaces
+    this single entry. Sources share the Odoo rows and the pod index.
+    """
+    del parsed_signature, odoo_signature, pod_index_signature
     run = get_latest_phase1a_run()
     if not run or run["run_name"] != run_name:
         return None
@@ -979,51 +1007,51 @@ def _load_reconcile_dataset_cached(
         return None
 
     parsed_rows = list(_read_json(parsed_path) or [])
-    pod_index_by_key, pod_index_meta = _load_pod_index_by_key(
-        config,
-        config_path=config_path,
-    )
-    odoo_rows = []
-    all_odoo_rows = []
-    for row in odoo_snapshot.get("total_detail_rows") or []:
-        raw_key, normalized_key = _extract_odoo_match_key(row, config)
-        normalized_row = dict(row)
-        normalized_row["match_key"] = raw_key
-        normalized_row["normalized_match_key"] = normalized_key
-        all_odoo_rows.append(normalized_row)
-        if _odoo_row_matches_source(row, config):
-            odoo_rows.append(normalized_row)
-
-    pod_docs = []
+    pod_docs_by_slug = {slug: [] for slug in RECONCILE_SOURCE_CONFIGS}
     for row in parsed_rows:
-        if not _matches_source_name(row.get("source_name"), config["source_name"]):
-            continue
-        raw_key, normalized_key = _extract_pod_match_key(row, config)
-        item = {
-            "document_uid": row.get("document_uid"),
-            "file_name": row.get("file_name"),
-            "source_path": row.get("source_path"),
-            "file_url": row.get("file_url"),
-            "local_path": row.get("local_path"),
-            "source_modified_at": row.get("source_modified_at"),
-            "match_key": raw_key,
-            "normalized_match_key": normalized_key,
-            "reason_code": row.get("reason_code"),
-        }
-        pod_docs.append(item)
+        source_name = row.get("source_name")
+        for slug, config in RECONCILE_SOURCE_CONFIGS.items():
+            if _matches_source_name(source_name, config["source_name"]):
+                pod_docs_by_slug[slug].append(_pod_document(row, config))
+    del parsed_rows
 
-    return _build_dataset_base(
-        config,
-        odoo_rows,
-        pod_docs,
-        generated_at=odoo_snapshot.get("generated_at"),
-        run_name=run_name,
-        phase1a_generated_at=run.get("summary", {}).get("generated_at"),
-        all_odoo_rows=all_odoo_rows,
-        pod_index_by_key=pod_index_by_key,
-        pod_index_meta=pod_index_meta,
-        storage_root=storage_root,
-    )
+    tracking_config = RECONCILE_SOURCE_CONFIGS["emtc"]
+    picking_config = RECONCILE_SOURCE_CONFIGS["cmc"]
+    all_odoo_rows = []
+    odoo_rows_by_slug = {slug: [] for slug in RECONCILE_SOURCE_CONFIGS}
+    for row in odoo_snapshot.get("total_detail_rows") or []:
+        normalized_row = dict(row)
+        normalized_row["_match_keys"] = {
+            "tracking_number": _extract_odoo_match_key(row, tracking_config),
+            "picking_name": _extract_odoo_match_key(row, picking_config),
+        }
+        all_odoo_rows.append(normalized_row)
+        for slug, config in RECONCILE_SOURCE_CONFIGS.items():
+            if _odoo_row_matches_source(row, config):
+                odoo_rows_by_slug[slug].append(normalized_row)
+
+    indexes = {}
+    datasets = {}
+    phase1a_generated_at = run.get("summary", {}).get("generated_at")
+    generated_at = odoo_snapshot.get("generated_at")
+    for slug, config in RECONCILE_SOURCE_CONFIGS.items():
+        key_type = config["match_key_type"]
+        if key_type not in indexes:
+            indexes[key_type] = _load_pod_index_by_key(config, config_path=config_path)
+        pod_index_by_key, pod_index_meta = indexes[key_type]
+        datasets[slug] = _build_dataset_base(
+            config,
+            odoo_rows_by_slug[slug],
+            pod_docs_by_slug[slug],
+            generated_at=generated_at,
+            run_name=run_name,
+            phase1a_generated_at=phase1a_generated_at,
+            all_odoo_rows=all_odoo_rows,
+            pod_index_by_key=pod_index_by_key,
+            pod_index_meta=pod_index_meta,
+            storage_root=storage_root,
+        )
+    return datasets
 
 
 def _burger_manifest_path(storage_root: str | Path) -> Path:
@@ -1140,8 +1168,7 @@ def _load_reconcile_base_dataset(kind: str = DEFAULT_RECONCILE_KIND):
     parsed_path = resolve_artifact_path(run["run_name"], "parsed_documents_json")
     if not parsed_path:
         return None
-    return _load_reconcile_dataset_cached(
-        source_config["slug"],
+    datasets = _load_reconcile_generation_cached(
         run["run_name"],
         _file_signature(parsed_path),
         _file_signature(ODOO_SNAPSHOT_PATH),
@@ -1149,6 +1176,9 @@ def _load_reconcile_base_dataset(kind: str = DEFAULT_RECONCILE_KIND):
         str(resolve_storage_dir()),
         str(CONFIG_PATH),
     )
+    if not datasets:
+        return None
+    return datasets.get(source_config["slug"])
 
 
 def load_reconcile_dataset(kind: str = DEFAULT_RECONCILE_KIND):
