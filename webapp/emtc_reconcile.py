@@ -1006,11 +1006,18 @@ def _load_reconcile_generation_cached(
     if not odoo_snapshot:
         return None
 
+    # Burger keeps its own manifest dataset and must not retain another copy
+    # of the Phase 1A snapshot.
+    shared_configs = {
+        slug: config
+        for slug, config in RECONCILE_SOURCE_CONFIGS.items()
+        if slug != "burger"
+    }
     parsed_rows = list(_read_json(parsed_path) or [])
-    pod_docs_by_slug = {slug: [] for slug in RECONCILE_SOURCE_CONFIGS}
+    pod_docs_by_slug = {slug: [] for slug in shared_configs}
     for row in parsed_rows:
         source_name = row.get("source_name")
-        for slug, config in RECONCILE_SOURCE_CONFIGS.items():
+        for slug, config in shared_configs.items():
             if _matches_source_name(source_name, config["source_name"]):
                 pod_docs_by_slug[slug].append(_pod_document(row, config))
     del parsed_rows
@@ -1018,7 +1025,7 @@ def _load_reconcile_generation_cached(
     tracking_config = RECONCILE_SOURCE_CONFIGS["emtc"]
     picking_config = RECONCILE_SOURCE_CONFIGS["cmc"]
     all_odoo_rows = []
-    odoo_rows_by_slug = {slug: [] for slug in RECONCILE_SOURCE_CONFIGS}
+    odoo_rows_by_slug = {slug: [] for slug in shared_configs}
     for row in odoo_snapshot.get("total_detail_rows") or []:
         normalized_row = dict(row)
         normalized_row["_match_keys"] = {
@@ -1026,7 +1033,7 @@ def _load_reconcile_generation_cached(
             "picking_name": _extract_odoo_match_key(row, picking_config),
         }
         all_odoo_rows.append(normalized_row)
-        for slug, config in RECONCILE_SOURCE_CONFIGS.items():
+        for slug, config in shared_configs.items():
             if _odoo_row_matches_source(row, config):
                 odoo_rows_by_slug[slug].append(normalized_row)
 
@@ -1034,7 +1041,7 @@ def _load_reconcile_generation_cached(
     datasets = {}
     phase1a_generated_at = run.get("summary", {}).get("generated_at")
     generated_at = odoo_snapshot.get("generated_at")
-    for slug, config in RECONCILE_SOURCE_CONFIGS.items():
+    for slug, config in shared_configs.items():
         key_type = config["match_key_type"]
         if key_type not in indexes:
             indexes[key_type] = _load_pod_index_by_key(config, config_path=config_path)
