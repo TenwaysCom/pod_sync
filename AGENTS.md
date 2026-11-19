@@ -1,5 +1,15 @@
 # AGENTS.md
 
+## 需求改动流程
+
+- 开始新增需求、缺陷修复或行为调整前，按 [研发指南](CONTRIBUTING.md) 创建或复用 GitHub Issue。独立需求单独建单，同一需求的调整继续更新原 Issue。
+- 在 Issue 的“问题与目标”中维护当前需求。按“前置条件、操作、可观察结果”填写验收条件。需求变化时追加日期、原因及影响，保留需求演变记录。
+- 开发开始、范围变化、验证完成和交付时更新 Issue。记录已完成工作、下一步和阻塞原因。
+- 交付前补齐使用方法、验证结果和关联 commit。提交消息用 `Refs #<编号>` 引用 Issue，推送后将 commit 链接补到 Issue。
+- Issue、PR、提交消息和新增文档使用 technical-writing 风格。填写 Issue 前，读取 [研发指南的写作规则](CONTRIBUTING.md#按-technical-writing-风格填写记录)。
+- 分别记录本地验证、合并和部署状态。不能把测试通过写成已部署。满足验收条件后再关闭 Issue。
+- GitHub 不可用时，先在本地文件保留 Issue 草稿和进度，继续可执行的本地工作。恢复访问后补建或同步 Issue，并在交付说明中标出未同步内容。
+
 ## 项目概述
 
 `pod_sync` 是 POD（Proof of Delivery）同步系统。从云盘拉取签收单到本地，与 Odoo 出库单匹配，最终把 POD 链接推送回 Odoo。
