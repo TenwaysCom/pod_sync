@@ -329,6 +329,10 @@ def _display_picking_name_for_search(value: str | None) -> str | None:
         return f"WCB2C/OUT/{normalized[len('WCB2COUT'):]}"
     if normalized.startswith("WDB2BOUT"):
         return f"WDB2B/OUT/{normalized[len('WDB2BOUT'):]}"
+    if normalized.startswith("WBB2BOUT"):
+        return f"WBB2B/OUT/{normalized[len('WBB2BOUT'):]}"
+    if normalized.startswith("WBB2COUT"):
+        return f"WBB2C/OUT/{normalized[len('WBB2COUT'):]}"
     if normalized.startswith("WBB2BRET"):
         return f"WBB2B/RET/{normalized[len('WBB2BRET'):]}"
     if normalized.startswith("WCB2BRET"):
@@ -345,7 +349,13 @@ def _display_picking_name_for_search(value: str | None) -> str | None:
 def _westerman_payload_reference(item: dict) -> str | None:
     explicit = str(item.get("shipment_reference") or "").strip()
     if explicit:
-        return explicit
+        # Other carriers (e.g. Burger) also persist an authoritative
+        # shipment_reference. Only Westerman-shaped references may pull a row
+        # into the Westerman pool gate, otherwise Burger PODs would be
+        # silently dropped as "gate source_not_enabled".
+        normalized_explicit = re.sub(r"[^A-Z0-9]", "", explicit.upper())
+        if normalized_explicit.startswith("WDB2BOUT"):
+            return explicit
     picking_value = (
         item.get("picking_name")
         or item.get("primary_picking_name")
@@ -405,11 +415,33 @@ def _is_westerman_payload_item(item: dict) -> bool:
     )
 
 
+def _is_burger_payload_item(item: dict) -> bool:
+    """Recognize Burger PODs pushed in by Odoo.
+
+    Burger writes use an authoritative Odoo picking name and are allowed to
+    create stock.tracking records without a tracking number. Detection must
+    therefore rely on the persisted source metadata, never on filename guesses.
+    """
+
+    source_type = re.sub(
+        r"[^a-z0-9]", "", str(item.get("source_type") or "").casefold()
+    )
+    if source_type.startswith("burger"):
+        return True
+    source_name = re.sub(
+        r"[^a-z0-9]", "", str(item.get("source_name") or "").casefold()
+    )
+    return source_name.startswith("burger")
+
+
 def _payload_provider_identity(item: dict) -> str:
     """Return the carrier/provider identity used for safe target coalescing."""
 
     if _is_westerman_payload_item(item):
         return "westerman"
+
+    if _is_burger_payload_item(item):
+        return "burger"
 
     source_type = re.sub(
         r"[^a-z0-9]", "", str(item.get("source_type") or "").casefold()
@@ -1671,11 +1703,12 @@ def create_stock_tracking(models, odoo_cfg: dict, picking_id: int, tracking_numb
     password = odoo_cfg["api_key"]
     vals = {
         "picking_id": picking_id,
-        "tracking_number": tracking_number,
         "pod_link": file_url,
         "pod_state": "pod",
         "api_state": "completed",
     }
+    if tracking_number:
+        vals["tracking_number"] = tracking_number
     if pod_time:
         vals["pod_time"] = pod_time
     return models.execute_kw(db, uid, password, "stock.tracking", "create", [vals])
@@ -2113,7 +2146,12 @@ def _push_payload_unlocked(
         if not tracking_number_for_create and _is_westerman_payload_item(item):
             tracking_number_for_create = str(item.get("tracking_number") or "").strip()
 
-        if not tracking_number_for_create:
+        # Burger PODs pushed by Odoo carry an authoritative picking name, and
+        # many Burger pickings have no stock.tracking row at all. Create the
+        # row with an empty tracking_number instead of parking it in review.
+        burger_create_without_tracking = _is_burger_payload_item(item)
+
+        if not tracking_number_for_create and not burger_create_without_tracking:
             detail["status"] = "needs_review"
             detail["error"] = "picking matched but no stock.tracking exists; tracking_number is required before creating stock.tracking"
             detail["target_id"] = picking_id
@@ -2924,7 +2962,7 @@ def _preflight_payload_unredacted(
         )
         if not tracking_number_for_create and _is_westerman_payload_item(item):
             tracking_number_for_create = str(item.get("tracking_number") or "").strip()
-        if not tracking_number_for_create:
+        if not tracking_number_for_create and not _is_burger_payload_item(item):
             entry["status"] = "needs_review"
             entry["error"] = (
                 "picking matched but no stock.tracking exists; tracking_number "

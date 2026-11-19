@@ -65,6 +65,19 @@
     "timeout_seconds": 30,
     "download_timeout_seconds": 120
   },
+  "burger_ingest": {
+    "enabled": true,
+    "warehouse": "Burger",
+    "odoo_url": "",
+    "odoo_db": "",
+    "odoo_uid": "",
+    "odoo_api_key": "",
+    "phase1a_enabled": false,
+    "api_token": "PASTE_BURGER_API_TOKEN",
+    "max_upload_bytes": 52428800,
+    "allowed_extensions": [".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp"],
+    "push_immediately": true
+  },
   "burger_api": {
     "enabled": true,
     "app_id": "",

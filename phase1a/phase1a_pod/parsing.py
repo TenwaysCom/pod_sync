@@ -57,6 +57,8 @@ PICKING_PATTERNS = [
     re.compile(r"WCB2B[-_ /]?OUT[-_ /]?\d{4,}[A-Z]?(?![A-Z0-9])"),
     re.compile(r"WCB2C[-_ /]?OUT[-_ /]?\d{4,}[A-Z]?(?![A-Z0-9])"),
     re.compile(r"WDB2B[-_ /]?OUT[-_ /]?\d{4,}[A-Z]?(?![A-Z0-9])"),
+    re.compile(r"WBB2B[-_ /]?OUT[-_ /]?\d{4,}[A-Z]?(?![A-Z0-9])"),
+    re.compile(r"WBB2C[-_ /]?OUT[-_ /]?\d{4,}[A-Z]?(?![A-Z0-9])"),
     re.compile(r"WBB2B[-_ /]?RET[-_ /]?\d{4,}[A-Z]?(?![A-Z0-9])"),
     re.compile(r"WCB2B[-_ /]?RET[-_ /]?\d{4,}[A-Z]?(?![A-Z0-9])"),
     re.compile(r"WRB2B[-_ /]?RET[-_ /]?\d{4,}[A-Z]?(?![A-Z0-9])"),
@@ -312,7 +314,17 @@ def infer_document_fields(record, source_name=None, source_type=None):
             inferred_picking_names,
         )
     explicit_tracking_number = normalize_tracking(record.get("tracking_number"))
-    if str(source_type).strip().lower() == "westerman_api" and explicit_tracking_number:
+    normalized_source_type = str(source_type).strip().lower()
+    if normalized_source_type in {"burger_api", "burger"} and explicit_picking_name:
+        # Burger PODs arrive from Odoo with an authoritative picking name.
+        # File-name tokens must never add another candidate, otherwise the same
+        # document could be pushed twice or blocked as ambiguous on a later
+        # pipeline run.
+        inferred_picking_names = [explicit_picking_name]
+        inferred_tracking_numbers = (
+            [explicit_tracking_number] if explicit_tracking_number else []
+        )
+    elif normalized_source_type == "westerman_api" and explicit_tracking_number:
         # Westerman exposes Shipment.external_id as the authoritative tracking
         # number. Numeric tokens in its document names are internal references
         # and must not make an otherwise unambiguous manifest record ambiguous.

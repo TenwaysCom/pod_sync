@@ -3576,6 +3576,132 @@ class OdooPushTests(unittest.TestCase):
         refresh_cache.assert_called_once()
         connect.assert_not_called()
 
+    def test_burger_picking_prefixes_are_restored_for_odoo_search(self):
+        self.assertEqual(
+            odoo_push._display_picking_name_for_search("WBB2BOUT42899"),
+            "WBB2B/OUT/42899",
+        )
+        self.assertEqual(
+            odoo_push._display_picking_name_for_search("WBB2COUT22487"),
+            "WBB2C/OUT/22487",
+        )
+        self.assertEqual(
+            odoo_push._display_picking_name_for_search("WBB2B/OUT/42899"),
+            "WBB2B/OUT/42899",
+        )
+
+    def test_burger_payload_identity_skips_carrier_delivery_type_filter(self):
+        item = {
+            "source_name": "Burger",
+            "source_type": "burger_api",
+            "preferred_key_type": "picking_name",
+            "preferred_key": "WBB2BOUT42899",
+        }
+
+        self.assertTrue(odoo_push._is_burger_payload_item(item))
+        self.assertEqual(odoo_push._payload_provider_identity(item), "burger")
+        self.assertIsNone(
+            odoo_push._payload_expected_delivery_type({"odoo": {}}, item)
+        )
+        self.assertFalse(
+            odoo_push._is_burger_payload_item(
+                {
+                    "source_name": "CMC",
+                    "source_type": "onedrive",
+                    "local_path": "/tmp/Burger/WBB2BOUT42899.pdf",
+                }
+            )
+        )
+
+    def test_burger_picking_match_creates_tracking_without_tracking_number(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            payload_path = Path(tmpdir) / "payload.json"
+            payload_path.write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "identifier_status": "ready",
+                                "preferred_key_type": "picking_name",
+                                "preferred_key": "WBB2BOUT42899",
+                                "shipment_reference": "WBB2B/OUT/42899",
+                                "tracking_number": "",
+                                "file_url": "https://burger.test/pod/WBB2B-OUT-42899.pdf",
+                                "local_path": "/tmp/pod/Burger/WBB2BOUT42899/WBB2BOUT42899_ab12cd34.pdf",
+                                "source_name": "Burger",
+                                "source_type": "burger_api",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            models = object()
+            with mock.patch.object(odoo_push, "load_config", return_value=self._config()), \
+                mock.patch.object(
+                    odoo_push,
+                    "resolve_push_file_url",
+                    return_value=("https://files.test/burger.pdf", None, "local"),
+                ), \
+                mock.patch.object(odoo_push, "connect_odoo", return_value=(FakeCommon(), models)), \
+                mock.patch.object(
+                    odoo_push,
+                    "search_picking",
+                    return_value=[{"id": 42899, "name": "WBB2B/OUT/42899"}],
+                ) as search_mock, \
+                mock.patch.object(odoo_push, "search_stock_tracking_by_picking_id", return_value=[]), \
+                mock.patch.object(odoo_push, "create_stock_tracking", return_value=9100) as create_mock:
+                result = odoo_push.push_payload(
+                    config_path="config.local.json",
+                    payload_path=str(payload_path),
+                    skip_existing=False,
+                )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["tracking_pushed"], 1)
+        self.assertEqual(result["needs_review"], 0)
+        self.assertEqual(result["details"][0]["status"], "created_tracking")
+        self.assertEqual(result["details"][0]["target_id"], 9100)
+        search_mock.assert_called_once_with(
+            models,
+            self._config()["odoo"],
+            "picking_name",
+            "WBB2B/OUT/42899",
+            expected_delivery_type=None,
+        )
+        create_mock.assert_called_once_with(
+            models,
+            self._config()["odoo"],
+            42899,
+            "",
+            "https://files.test/burger.pdf",
+            mock.ANY,
+        )
+
+    def test_create_stock_tracking_omits_empty_tracking_number(self):
+        class RecordingModels:
+            def __init__(self):
+                self.vals = None
+
+            def execute_kw(self, db, uid, password, model, method, args, kwargs=None):
+                self.vals = args[0]
+                return 7001
+
+        models = RecordingModels()
+        new_id = odoo_push.create_stock_tracking(
+            models,
+            self._config()["odoo"],
+            42,
+            "",
+            "https://files.test/burger.pdf",
+            "2026-07-18 08:00:00",
+        )
+
+        self.assertEqual(new_id, 7001)
+        self.assertNotIn("tracking_number", models.vals)
+        self.assertEqual(models.vals["picking_id"], 42)
+        self.assertEqual(models.vals["pod_link"], "https://files.test/burger.pdf")
+
 
 if __name__ == "__main__":
     unittest.main()

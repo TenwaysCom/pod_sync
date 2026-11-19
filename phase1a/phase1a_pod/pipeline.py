@@ -103,7 +103,7 @@ SYNC_SOURCE_DEFINITIONS = (
     {"source_type": "onedrive", "config_keys": ("cmc_onedrive", "onedrive"), "default_label": "CMC"},
     {"source_type": "gdrive", "config_keys": ("emtc_gdrive", "gdrive"), "default_label": "EMTC"},
     {"source_type": "westerman_api", "config_keys": ("westerman_api",), "default_label": "Westerman"},
-    {"source_type": "burger_api", "config_keys": ("burger_api",), "default_label": "Burger"},
+    {"source_type": "burger_api", "config_keys": ("burger_ingest", "burger_api", "burger"), "default_label": "Burger"},
 )
 
 RUN_NAME_PATTERN = re.compile(r"^(\d{8})(\d{4})$")
@@ -158,6 +158,11 @@ def _build_sources_from_sync_config(sync_config_path):
             if source_cfg.get("enabled") is not True:
                 continue
         elif not source_cfg.get("enabled", True):
+            continue
+        # Burger PODs are pushed in by Odoo instead of being pulled. During a
+        # feature-branch pilot this flag keeps the daily Phase 1A payload from
+        # re-pushing Burger documents to the production Odoo database.
+        if source_type == "burger_api" and source_cfg.get("phase1a_enabled", True) is not True:
             continue
         source_name = source_cfg.get("warehouse") or definition["default_label"]
         source = {
@@ -451,6 +456,10 @@ def _picking_alias_suffix(value):
         return value[len("WCB2COUT"):]
     if value.startswith("WDB2BOUT"):
         return value[len("WDB2BOUT"):]
+    if value.startswith("WBB2BOUT"):
+        return value[len("WBB2BOUT"):]
+    if value.startswith("WBB2COUT"):
+        return value[len("WBB2COUT"):]
     if value.startswith("WBB2BRET"):
         return value[len("WBB2BRET"):]
     if value.startswith("OTHER"):
@@ -474,6 +483,8 @@ def _resolve_primary_picking_name(candidates):
                 candidate.startswith("WCB2BOUT")
                 or candidate.startswith("WCB2COUT")
                 or candidate.startswith("WDB2BOUT")
+                or candidate.startswith("WBB2BOUT")
+                or candidate.startswith("WBB2COUT")
             ):
                 return candidate
         return candidates[0]
@@ -489,6 +500,8 @@ def _canonical_direct_split_picking(candidate):
     # both restored WCB2B keys and shorthand aliases, so we collapse them into
     # a single canonical picking key here.
     if candidate.startswith("WBB2BRET") or candidate.startswith("OTHER"):
+        return candidate
+    if candidate.startswith("WBB2BOUT") or candidate.startswith("WBB2COUT"):
         return candidate
     if candidate.startswith("WCB2COUT"):
         return candidate
@@ -702,6 +715,32 @@ def build_direct_payload_item(
         "primary_document_uid": document["document_uid"],
         "documents": [payload_document],
     }
+
+
+def build_payload_item_for_record(record, *, source_name, source_type):
+    """Build one push payload item with the same rules as ``run_phase1a``.
+
+    Used by the Odoo -> pod_sync ingest interface so an immediately pushed
+    document is parsed, keyed, and shaped exactly like the daily Phase 1A
+    payload. Callers must only push when ``decision['status'] == 'ready'``.
+    """
+
+    document = infer_document_fields(
+        record,
+        source_name=source_name,
+        source_type=source_type,
+    )
+    decision = build_direct_push_decision(document)
+    normalized = {
+        **document,
+        "match_key_type": decision["preferred_key_type"],
+        "match_key": decision["preferred_key"],
+        "preferred_key_type": decision["preferred_key_type"],
+        "preferred_key": decision["preferred_key"],
+        "primary_picking_name": decision["primary_picking_name"],
+        "primary_tracking_number": decision["primary_tracking_number"],
+    }
+    return decision, build_direct_payload_item(normalized)
 
 
 def run_phase1a(config_path):

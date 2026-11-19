@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .burger_ingest import BurgerIngestError, ingest_burger_pod
+from . import burger_ingest
 from .actions import (
     DEFAULT_PHASE1A_CONFIG_REL,
     DEFAULT_SYNC_CONFIG_REL,
@@ -1297,18 +1297,41 @@ async def phase1a_artifact(run_name: str, artifact_key: str):
 
 
 @app.post("/api/burger/pod")
-async def burger_pod_ingest(request: Request):
-    body = await request.body()
+async def api_burger_pod(request: Request):
+    """Receive one Odoo-pushed Burger POD file (JSON + Base64)."""
+
     try:
-        payload = ingest_burger_pod(
-            body=body,
-            app_id=request.headers.get("x-app-id", ""),
-            timestamp=request.headers.get("x-timestamp", ""),
-            signature=request.headers.get("x-signature", ""),
+        payload = await request.json()
+    except Exception:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error_code": "INVALID_JSON",
+                "error": "请求体必须是 JSON。",
+            },
+            status_code=400,
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
         )
-    except BurgerIngestError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-    return JSONResponse(payload)
+    try:
+        result = burger_ingest.ingest_burger_pod(
+            payload=payload,
+            provided_token=request.headers.get("x-burger-token", ""),
+            config_path=DEFAULT_SYNC_CONFIG_REL,
+        )
+    except burger_ingest.BurgerIngestError as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error_code": exc.error_code,
+                "error": str(exc),
+            },
+            status_code=exc.status_code,
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+        )
+    return JSONResponse(
+        result,
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
 
 
 @app.get("/storage/files/{relative_path:path}")

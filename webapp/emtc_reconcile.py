@@ -1067,7 +1067,14 @@ def _burger_manifest_path(storage_root: str | Path) -> Path:
     warehouse = "Burger"
     try:
         cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        section = cfg.get("burger_api") if isinstance(cfg, dict) else None
+        section = None
+        if isinstance(cfg, dict):
+            ingest_section = cfg.get("burger_ingest")
+            api_section = cfg.get("burger_api")
+            if isinstance(ingest_section, dict) and ingest_section:
+                section = ingest_section
+            elif isinstance(api_section, dict):
+                section = api_section
         if isinstance(section, dict):
             warehouse = str(section.get("warehouse") or "Burger").strip() or "Burger"
     except (OSError, json.JSONDecodeError, AttributeError):

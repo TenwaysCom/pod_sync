@@ -5,252 +5,656 @@ import binascii
 import hashlib
 import hmac
 import json
+import mimetypes
+import os
+import re
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from clients.common.sync_integrity import (
-    DEFAULT_MAX_DOWNLOAD_BYTES,
     append_manifest_entry,
     build_manifest_entry,
-    exclusive_file_lock,
-    load_manifest_entries,
-    normalize_runtime_config,
-    sanitize_path_component,
-    save_bytes_to_file,
+    load_manifest_skip_index,
+    resolve_manifest_path,
+    utc_now,
 )
-from webapp.actions import resolve_project_path
-from webapp.odoo_push import get_local_file_url, load_config
+from phase1a.phase1a_pod.parsing import normalize_picking_name, normalize_tracking
+from phase1a.phase1a_pod.pipeline import build_payload_item_for_record
+from webapp.actions import (
+    DEFAULT_SYNC_CONFIG_REL,
+    resolve_project_path,
+    resolve_storage_dir,
+)
+from webapp.odoo_push import push_payload
 
 
-SOURCE_TYPE = "burger_api"
-DEFAULT_WAREHOUSE = "Burger"
-SIGNATURE_MAX_SKEW_SECONDS = 300
-_IMAGE_SIGNATURES = (
-    (b"\x89PNG\r\n\x1a\n", "image/png", ".png"),
-    (b"\xff\xd8\xff", "image/jpeg", ".jpg"),
-    (b"GIF87a", "image/gif", ".gif"),
-    (b"GIF89a", "image/gif", ".gif"),
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+BURGER_SOURCE_NAME = "Burger"
+BURGER_SOURCE_TYPE = "burger_api"
+BURGER_RUNTIME_DIR = PROJECT_ROOT / "runtime" / "burger_ingest"
+DEFAULT_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+DEFAULT_ALLOWED_EXTENSIONS = (
+    ".pdf",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".tif",
+    ".tiff",
+    ".webp",
+    ".bmp",
+    ".gif",
 )
+PICKING_PREFIXES = ("WBB2BOUT", "WBB2COUT")
+PUSH_SUCCESS_STATUSES = {
+    "created_tracking",
+    "pushed_tracking",
+    "skipped_same",
+    "pod_state_repaired",
+    "pod_link_replaced",
+}
 
 
 class BurgerIngestError(Exception):
-    def __init__(self, status_code: int, detail: str):
-        super().__init__(detail)
-        self.status_code = status_code
-        self.detail = detail
+    """Reject one Burger ingest request with an explicit HTTP status."""
+
+    def __init__(self, message: str, *, status_code: int = 400, error_code: str = "INVALID_REQUEST"):
+        super().__init__(message)
+        self.status_code = int(status_code)
+        self.error_code = str(error_code or "INVALID_REQUEST")
 
 
-def sign_burger_request(app_id: str, app_key: str, timestamp: str, body: bytes) -> str:
-    message = f"{app_id}\n{timestamp}\n".encode("utf-8") + body
-    return hmac.new(app_key.encode("utf-8"), message, hashlib.sha256).hexdigest()
+def _bounded_positive_int(value, *, default: int, maximum: int, label: str) -> int:
+    if value in (None, ""):
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise BurgerIngestError(f"{label} 必须是整数", status_code=503, error_code="INVALID_CONFIG") from exc
+    if parsed <= 0 or parsed > maximum:
+        raise BurgerIngestError(
+            f"{label} 必须在 1..{maximum} 之间",
+            status_code=503,
+            error_code="INVALID_CONFIG",
+        )
+    return parsed
+
+
+def _allowed_extensions(value) -> tuple[str, ...]:
+    if value is None:
+        return DEFAULT_ALLOWED_EXTENSIONS
+    if isinstance(value, str):
+        raw_items = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        raw_items = list(value)
+    else:
+        raise BurgerIngestError(
+            "burger_ingest.allowed_extensions 必须是字符串或数组",
+            status_code=503,
+            error_code="INVALID_CONFIG",
+        )
+    normalized = []
+    for item in raw_items:
+        text = str(item or "").strip().lower()
+        if not text:
+            continue
+        if not text.startswith("."):
+            text = f".{text}"
+        if text not in normalized:
+            normalized.append(text)
+    return tuple(normalized)
+
+
+def _settings(full_cfg: dict) -> dict:
+    section = full_cfg.get("burger_ingest")
+    if not isinstance(section, dict):
+        raise BurgerIngestError(
+            "config.local.json 未配置 burger_ingest，Burger POD 接口已关闭",
+            status_code=503,
+            error_code="SOURCE_NOT_CONFIGURED",
+        )
+    warehouse = str(section.get("warehouse") or BURGER_SOURCE_NAME).strip() or BURGER_SOURCE_NAME
+    odoo_url = str(
+        os.environ.get("POD_SYNC_BURGER_ODOO_URL") or section.get("odoo_url") or ""
+    ).strip().rstrip("/")
+    if odoo_url and not re.match(r"^https?://", odoo_url):
+        raise BurgerIngestError(
+            "burger_ingest.odoo_url 必须是 http(s) 地址",
+            status_code=503,
+            error_code="INVALID_CONFIG",
+        )
+    raw_uid = section.get("odoo_uid")
+    odoo_uid = None
+    if raw_uid not in (None, ""):
+        try:
+            odoo_uid = int(raw_uid)
+        except (TypeError, ValueError) as exc:
+            raise BurgerIngestError(
+                "burger_ingest.odoo_uid 必须是整数",
+                status_code=503,
+                error_code="INVALID_CONFIG",
+            ) from exc
+    return {
+        "enabled": section.get("enabled", True) is True,
+        "warehouse": warehouse,
+        "odoo_url": odoo_url,
+        "odoo_overrides": {
+            "url": odoo_url,
+            "db": str(section.get("odoo_db") or "").strip(),
+            "uid": odoo_uid,
+            "api_key": str(
+                os.environ.get("POD_SYNC_BURGER_ODOO_API_KEY")
+                or section.get("odoo_api_key")
+                or ""
+            ).strip(),
+        },
+        "api_token": str(section.get("api_token") or "").strip(),
+        "max_upload_bytes": _bounded_positive_int(
+            section.get("max_upload_bytes"),
+            default=DEFAULT_MAX_UPLOAD_BYTES,
+            maximum=1024 * 1024 * 1024,
+            label="burger_ingest.max_upload_bytes",
+        ),
+        "allowed_extensions": _allowed_extensions(section.get("allowed_extensions")),
+        "push_immediately": section.get("push_immediately", True) is True,
+    }
+
+
+def _require_token(settings: dict, provided_token: str) -> None:
+    expected = (os.environ.get("POD_SYNC_BURGER_TOKEN") or settings["api_token"]).strip()
+    if not expected:
+        raise BurgerIngestError(
+            "burger_ingest.api_token 未配置（或设置 POD_SYNC_BURGER_TOKEN 环境变量）",
+            status_code=503,
+            error_code="TOKEN_NOT_CONFIGURED",
+        )
+    provided = str(provided_token or "").strip()
+    if not provided or not hmac.compare_digest(provided, expected):
+        raise BurgerIngestError(
+            "Burger X-Burger-Token 校验失败",
+            status_code=401,
+            error_code="INVALID_TOKEN",
+        )
+
+
+def _parse_picking_name(value) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        raise BurgerIngestError(
+            "picking_name 必填",
+            status_code=400,
+            error_code="PICKING_NAME_REQUIRED",
+        )
+    canonical = normalize_picking_name(raw)
+    if not canonical or not canonical.startswith(PICKING_PREFIXES):
+        raise BurgerIngestError(
+            "picking_name 必须是 Burger 出库单号（WBB2B/OUT/... 或 WBB2C/OUT/...）",
+            status_code=400,
+            error_code="INVALID_PICKING_NAME",
+        )
+    return canonical
+
+
+def _display_picking_name(canonical: str) -> str:
+    if canonical.startswith("WBB2BOUT"):
+        return f"WBB2B/OUT/{canonical[len('WBB2BOUT'):]}"
+    return f"WBB2C/OUT/{canonical[len('WBB2COUT'):]}"
+
+
+def _safe_file_name(value, canonical: str, mime_type: str | None) -> str:
+    raw = str(value or "").replace("\\", "/").rsplit("/", 1)[-1]
+    raw = re.sub(r"[\x00-\x1f\x7f]", "", raw).strip().strip(".")
+    if not raw:
+        guess = mimetypes.guess_extension(str(mime_type or "").split(";", 1)[0].strip()) or ".pdf"
+        raw = f"POD_{canonical}{guess}"
+    if len(raw) > 160:
+        stem, suffix = os.path.splitext(raw)
+        raw = f"{stem[:120]}{suffix[:20]}"
+    return raw
+
+
+def _decode_base64(value, max_bytes: int) -> bytes:
+    if not isinstance(value, str) or not value.strip():
+        raise BurgerIngestError(
+            "content_base64 必填",
+            status_code=400,
+            error_code="CONTENT_REQUIRED",
+        )
+    text = re.sub(r"\s+", "", value)
+    if text.startswith("data:"):
+        _, _, text = text.partition(",")
+        text = re.sub(r"\s+", "", text)
+    if not text:
+        raise BurgerIngestError(
+            "content_base64 为空",
+            status_code=400,
+            error_code="CONTENT_REQUIRED",
+        )
+    estimated_size = (len(text) * 3) // 4
+    if estimated_size > max_bytes + 2:
+        raise BurgerIngestError(
+            f"文件超过上限 {max_bytes} 字节",
+            status_code=413,
+            error_code="FILE_TOO_LARGE",
+        )
+    try:
+        content = base64.b64decode(text, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise BurgerIngestError(
+            "content_base64 不是合法的 Base64",
+            status_code=400,
+            error_code="INVALID_BASE64",
+        ) from exc
+    if not content:
+        raise BurgerIngestError(
+            "文件内容为空",
+            status_code=400,
+            error_code="EMPTY_FILE",
+        )
+    if len(content) > max_bytes:
+        raise BurgerIngestError(
+            f"文件超过上限 {max_bytes} 字节",
+            status_code=413,
+            error_code="FILE_TOO_LARGE",
+        )
+    return content
+
+
+def _parse_pod_time(value, fallback: str) -> str:
+    if value in (None, ""):
+        return fallback
+    text = str(value).strip()
+    parsed = None
+    for candidate in (text, text.replace("Z", "+00:00")):
+        try:
+            parsed = datetime.fromisoformat(candidate)
+            break
+        except ValueError:
+            continue
+    if parsed is None:
+        try:
+            parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        except ValueError as exc:
+            raise BurgerIngestError(
+                "pod_time 必须是 ISO8601 或 YYYY-MM-DD HH:MM:SS",
+                status_code=400,
+                error_code="INVALID_POD_TIME",
+            ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (
+        parsed.astimezone(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _optional_tracking_number(value) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = normalize_tracking(text)
+    if not normalized:
+        raise BurgerIngestError(
+            "tracking_number 不合法",
+            status_code=400,
+            error_code="INVALID_TRACKING_NUMBER",
+        )
+    return normalized
+
+
+def _compute_sha256(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _write_bytes_atomic(destination: Path, content: bytes) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f"{destination.name}.part")
+    try:
+        temporary.write_bytes(content)
+        os.replace(temporary, destination)
+    finally:
+        if temporary.exists():
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+
+def _existing_file_matches(path: Path, content: bytes, sha256: str) -> bool:
+    try:
+        if not path.is_file() or path.stat().st_size != len(content):
+            return False
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 256), b""):
+                digest.update(chunk)
+        return digest.hexdigest() == sha256
+    except OSError:
+        return False
+
+
+def _summarize_push_result(result: dict, payload_path: Path | None) -> dict:
+    details = result.get("details") if isinstance(result, dict) else None
+    detail = details[0] if isinstance(details, list) and details else {}
+    status = detail.get("status")
+    if not status:
+        status = "failed" if (isinstance(result, dict) and result.get("ok") is False) else "unknown"
+    summary = {
+        "status": status,
+        "target_model": detail.get("target_model"),
+        "target_id": detail.get("target_id"),
+        "target_name": detail.get("target_name"),
+        "error": detail.get("error"),
+        "retryable": detail.get("retryable") is True,
+        "completed": int((result or {}).get("completed") or 0),
+        "business_pending": int((result or {}).get("business_pending") or 0),
+        "technical_failure_count": int((result or {}).get("technical_failure_count") or 0),
+    }
+    if not detail and isinstance(result, dict) and result.get("error"):
+        summary["error"] = str(result.get("error"))
+    if payload_path is not None:
+        summary["payload_path"] = str(payload_path)
+    return summary
+
+
+def _push_item(
+    *,
+    config_path: Path,
+    item: dict,
+    request_id: str,
+    received_at: str,
+    runtime_dir: Path,
+    full_cfg: dict | None = None,
+    odoo_overrides: dict | None = None,
+) -> dict:
+    payload_dir = runtime_dir / "payloads"
+    payload_dir.mkdir(parents=True, exist_ok=True)
+    stamp = re.sub(r"[^0-9TZ]", "", received_at)
+    payload_path = payload_dir / f"{stamp}-{request_id[:8]}.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "job_id": f"burger-ingest-{request_id}",
+                "generated_at": received_at,
+                "payload_origin": "burger_ingest",
+                "source": BURGER_SOURCE_NAME,
+                "items": [item],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    # A per-source Odoo endpoint keeps a feature-branch pilot isolated from the
+    # production database without changing CMC/EMTC/Westerman routing.
+    overrides = {
+        key: value
+        for key, value in (odoo_overrides or {}).items()
+        if value not in (None, "")
+    }
+    push_config_path = config_path
+    override_path = None
+    if overrides:
+        override_cfg = json.loads(json.dumps(full_cfg or {}, ensure_ascii=False))
+        odoo_section = override_cfg.get("odoo")
+        if not isinstance(odoo_section, dict):
+            odoo_section = {}
+        odoo_section.update(overrides)
+        override_cfg["odoo"] = odoo_section
+        override_dir = runtime_dir / "push_config"
+        override_dir.mkdir(parents=True, exist_ok=True)
+        override_path = override_dir / f"config-{request_id}.json"
+        override_path.write_text(
+            json.dumps(override_cfg, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.chmod(override_path, 0o600)
+        push_config_path = override_path
+
+    try:
+        result = push_payload(
+            config_path=str(push_config_path),
+            payload_path=str(payload_path),
+            incremental_pool=False,
+        )
+    except Exception as exc:  # push_payload normally returns structured failures
+        return {
+            "status": "failed",
+            "error": f"{type(exc).__name__}: {exc}",
+            "retryable": True,
+            "payload_path": str(payload_path),
+            "odoo_url": overrides.get("url"),
+        }
+    finally:
+        # The override copy carries the API key; never leave it behind.
+        if override_path is not None:
+            try:
+                override_path.unlink()
+            except OSError:
+                pass
+
+    summary = _summarize_push_result(result, payload_path)
+    summary["odoo_url"] = overrides.get("url")
+    return summary
+
+
+def _append_audit(runtime_dir: Path, record: dict) -> None:
+    try:
+        append_manifest_entry(runtime_dir / "ingest.jsonl", record)
+    except OSError:
+        # Auditing must never turn a successfully stored POD into an error.
+        pass
+
+
+def _business_status(push_summary: dict) -> str:
+    status = str(push_summary.get("status") or "")
+    if status in PUSH_SUCCESS_STATUSES:
+        return "complete"
+    if status == "skipped":
+        # Deliberately deferred (Odoo push disabled globally or per source).
+        # The POD is stored and the daily Phase 1A run will pick it up.
+        return "stored"
+    return "attention"
 
 
 def ingest_burger_pod(
     *,
-    body: bytes,
-    app_id: str,
-    timestamp: str,
-    signature: str,
-    config_path: str = "config.local.json",
-    now: datetime | None = None,
-    max_bytes: int | None = None,
+    payload: dict,
+    provided_token: str,
+    config_path: str = DEFAULT_SYNC_CONFIG_REL,
+    runtime_dir: Path | str | None = None,
 ) -> dict:
-    full_cfg = _load_full_config(config_path)
-    burger_cfg = _require_burger_config(full_cfg)
-    _verify_signature(
-        burger_cfg,
-        app_id=app_id,
-        timestamp=timestamp,
-        signature=signature,
-        body=body,
-        now=now or datetime.now(timezone.utc),
+    """Store one Odoo-pushed Burger POD and optionally push it to Odoo.
+
+    Storage, manifest, parsing, and the Odoo mutation all reuse the same
+    Phase 1A / ``odoo_push`` code paths as the three pull-based warehouses.
+    """
+
+    received_at = utc_now()
+    request_id = uuid.uuid4().hex
+    resolved_config = resolve_project_path(config_path, DEFAULT_SYNC_CONFIG_REL)
+    if not resolved_config.is_file():
+        raise BurgerIngestError(
+            f"配置文件不存在：{resolved_config}",
+            status_code=503,
+            error_code="CONFIG_NOT_FOUND",
+        )
+    try:
+        full_cfg = json.loads(resolved_config.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BurgerIngestError(
+            "配置文件不是有效的 JSON",
+            status_code=503,
+            error_code="INVALID_CONFIG",
+        ) from exc
+
+    settings = _settings(full_cfg)
+    if not settings["enabled"]:
+        raise BurgerIngestError(
+            "burger_ingest.enabled 为 false，Burger POD 接口已关闭",
+            status_code=503,
+            error_code="SOURCE_DISABLED",
+        )
+    _require_token(settings, provided_token)
+
+    if not isinstance(payload, dict):
+        raise BurgerIngestError(
+            "请求体必须是 JSON 对象",
+            status_code=400,
+            error_code="INVALID_BODY",
+        )
+
+    canonical_picking = _parse_picking_name(payload.get("picking_name"))
+    display_picking = _display_picking_name(canonical_picking)
+    content = _decode_base64(payload.get("content_base64"), settings["max_upload_bytes"])
+
+    file_name = _safe_file_name(
+        payload.get("file_name"),
+        canonical_picking,
+        payload.get("mime_type"),
     )
-    payload = _parse_payload(body)
-    picking_name = _clean_picking_name(payload.get("picking_name"))
-    content = _decode_image(payload.get("image_base64"))
-    mime_type, extension = _detect_image(content)
-    _check_size(content, max_bytes)
-    if not str((full_cfg.get("pod_sync") or {}).get("base_url") or "").strip():
-        raise BurgerIngestError(503, "missing pod_sync.base_url")
+    extension = Path(file_name).suffix.lower()
+    if extension not in settings["allowed_extensions"]:
+        raise BurgerIngestError(
+            f"不支持的文件类型：{extension or '(无扩展名)'}",
+            status_code=400,
+            error_code="UNSUPPORTED_FILE_TYPE",
+        )
 
-    warehouse = sanitize_path_component(burger_cfg.get("warehouse"), DEFAULT_WAREHOUSE)
-    safe_picking = _safe_picking_component(picking_name)
-    content_sha256 = hashlib.sha256(content).hexdigest()
-    filename = f"{safe_picking}_{content_sha256[:12]}{extension}"
-    base_dir = Path(full_cfg["download"]["base_dir"])
-    destination = base_dir / warehouse / safe_picking / filename
-    manifest_path = base_dir / "_integrity" / warehouse / f"{SOURCE_TYPE}.jsonl"
-    source_file_id = f"{picking_name}:{content_sha256}"
+    pod_time = _parse_pod_time(payload.get("pod_time"), received_at)
+    tracking_number = _optional_tracking_number(payload.get("tracking_number"))
+    sha256 = _compute_sha256(content)
 
-    lock_path = manifest_path.with_name(manifest_path.name + ".lock")
-    with exclusive_file_lock(lock_path):
-        existing = _find_existing_image(manifest_path, picking_name, content_sha256)
-        if existing is not None:
-            file_url = _require_file_url(full_cfg, existing["local_path"])
-            _refresh_burger_reconcile(base_dir)
-            return {
-                "picking_name": picking_name,
-                "file_url": file_url,
-                "duplicate": True,
-            }
+    storage_root = resolve_storage_dir(str(resolved_config))
+    stored_name = f"{canonical_picking}_{sha256[:8]}{extension}"
+    relative_path = Path(settings["warehouse"]) / canonical_picking / stored_name
+    destination = storage_root / relative_path
+    manifest_path = resolve_manifest_path(
+        BURGER_SOURCE_TYPE,
+        {"warehouse": settings["warehouse"]},
+        {"base_dir": str(storage_root)},
+    )
+    source_file_id = f"burger:{canonical_picking}:{file_name}"
 
-        write_result = save_bytes_to_file(content, destination, max_bytes=max_bytes)
-        file_url = _require_file_url(full_cfg, destination)
-        relative_path = destination.relative_to(base_dir).as_posix()
+    duplicate = False
+    entry = None
+    skip_index = load_manifest_skip_index(manifest_path)
+    previous = skip_index.get(source_file_id)
+    if isinstance(previous, dict) and previous.get("sha256") == sha256:
+        previous_path = Path(str(previous.get("local_path") or ""))
+        if _existing_file_matches(previous_path, content, sha256):
+            duplicate = True
+            entry = previous
+            destination = previous_path
+
+    if entry is None:
+        if not _existing_file_matches(destination, content, sha256):
+            _write_bytes_atomic(destination, content)
         entry = build_manifest_entry(
-            source_name=SOURCE_TYPE,
-            source_cfg={"warehouse": warehouse},
+            source_name=settings["warehouse"],
+            source_cfg={"warehouse": settings["warehouse"]},
             destination=destination,
-            write_result=write_result,
+            write_result={"local_size": len(content), "sha256": sha256},
             source_file_id=source_file_id,
-            source_path=relative_path,
-            file_name=filename,
-            mime_type=mime_type,
+            source_path=relative_path.as_posix(),
+            file_name=file_name,
+            mime_type=str(payload.get("mime_type") or "").strip()
+            or mimetypes.guess_type(file_name)[0],
             source_size=len(content),
-            source_url=file_url,
-            downloaded_via=SOURCE_TYPE,
-            extra={"shipment_reference": picking_name},
+            verify_remote_size=True,
+            source_modified_time=pod_time,
+            source_created_time=None,
+            source_url=None,
+            downloaded_via="burger_ingest",
+            extra={
+                "source_type": BURGER_SOURCE_TYPE,
+                "shipment_reference": display_picking,
+                "picking_name": display_picking,
+                "tracking_number": tracking_number,
+                "ingest_request_id": request_id,
+                "ingest_mode": "odoo_push",
+            },
         )
         append_manifest_entry(manifest_path, entry)
 
-    _refresh_burger_reconcile(base_dir)
-    return {
-        "picking_name": picking_name,
-        "file_url": file_url,
-        "duplicate": False,
+    decision, payload_item = build_payload_item_for_record(
+        entry,
+        source_name=settings["warehouse"],
+        source_type=BURGER_SOURCE_TYPE,
+    )
+
+    if decision.get("status") != "ready":
+        push_summary = {
+            "status": "needs_review",
+            "reason": decision.get("reason_code"),
+            "error": decision.get("reason_message"),
+            "retryable": False,
+        }
+    elif not settings["push_immediately"]:
+        push_summary = {
+            "status": "skipped",
+            "reason": "push_immediately_disabled",
+            "retryable": False,
+        }
+    elif (full_cfg.get("odoo") or {}).get("enabled") is not True:
+        push_summary = {
+            "status": "skipped",
+            "reason": "odoo_push_disabled",
+            "retryable": False,
+        }
+    else:
+        push_summary = _push_item(
+            config_path=resolved_config,
+            item=payload_item,
+            request_id=request_id,
+            received_at=received_at,
+            runtime_dir=Path(runtime_dir) if runtime_dir is not None else BURGER_RUNTIME_DIR,
+            full_cfg=full_cfg,
+            odoo_overrides=settings["odoo_overrides"],
+        )
+
+    result = {
+        "ok": True,
+        "accepted": True,
+        "request_id": request_id,
+        "received_at": received_at,
+        "source": settings["warehouse"],
+        "picking_name": display_picking,
+        "canonical_picking_name": canonical_picking,
+        "file_name": file_name,
+        "stored_file_name": destination.name,
+        "sha256": sha256,
+        "local_path": str(destination),
+        "manifest_path": str(manifest_path),
+        "duplicate": duplicate,
+        "stored": True,
+        "tracking_number": tracking_number,
+        "pod_time": pod_time,
+        "push": push_summary,
+        "business_status": _business_status(push_summary),
     }
-
-
-def _refresh_burger_reconcile(storage_root: Path) -> None:
-    from .emtc_reconcile import refresh_burger_reconcile_dataset
-
-    refresh_burger_reconcile_dataset(storage_root)
-
-
-def _load_full_config(config_path: str) -> dict:
-    try:
-        full_cfg = load_config(config_path)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise BurgerIngestError(503, "Burger API is not configured") from exc
-    resolved = resolve_project_path(config_path, "config.local.json")
-    return normalize_runtime_config(full_cfg, resolved)
-
-
-def _require_burger_config(full_cfg: dict) -> dict:
-    section = full_cfg.get("burger_api")
-    if not isinstance(section, dict) or section.get("enabled") is False:
-        raise BurgerIngestError(503, "Burger API is not configured")
-    app_id = str(section.get("app_id") or "").strip()
-    app_key = str(section.get("app_key") or "").strip()
-    if not app_id or not app_key:
-        raise BurgerIngestError(503, "Burger API is not configured")
-    return section
-
-
-def _verify_signature(
-    burger_cfg: dict,
-    *,
-    app_id: str,
-    timestamp: str,
-    signature: str,
-    body: bytes,
-    now: datetime,
-) -> None:
-    expected_app_id = str(burger_cfg.get("app_id") or "").strip()
-    app_key = str(burger_cfg.get("app_key") or "").strip()
-    provided_app_id = str(app_id or "").strip()
-    timestamp_text = str(timestamp or "").strip()
-    provided_signature = str(signature or "").strip().lower()
-    if not hmac.compare_digest(provided_app_id.encode("utf-8"), expected_app_id.encode("utf-8")):
-        raise BurgerIngestError(401, "invalid signature")
-    try:
-        stamp = int(timestamp_text)
-    except (TypeError, ValueError):
-        raise BurgerIngestError(401, "invalid signature") from None
-    if abs(int(now.timestamp()) - stamp) > SIGNATURE_MAX_SKEW_SECONDS:
-        raise BurgerIngestError(401, "invalid signature")
-    expected_signature = sign_burger_request(expected_app_id, app_key, timestamp_text, body)
-    if not hmac.compare_digest(provided_signature, expected_signature):
-        raise BurgerIngestError(401, "invalid signature")
-
-
-def _parse_payload(body: bytes) -> dict:
-    try:
-        payload = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise BurgerIngestError(400, "request body must be JSON") from exc
-    if not isinstance(payload, dict):
-        raise BurgerIngestError(400, "request body must be a JSON object")
-    return payload
-
-
-def _clean_picking_name(value) -> str:
-    if not isinstance(value, str):
-        raise BurgerIngestError(400, "picking_name is required")
-    picking_name = value.strip()
-    if not picking_name:
-        raise BurgerIngestError(400, "picking_name is required")
-    return picking_name
-
-
-def _safe_picking_component(picking_name: str) -> str:
-    cleaned = sanitize_path_component(picking_name, "").strip()
-    if not cleaned or cleaned in {".", ".."} or len(cleaned) > 180:
-        raise BurgerIngestError(400, "picking_name is invalid")
-    return cleaned
-
-
-def _decode_image(value) -> bytes:
-    if not isinstance(value, str):
-        raise BurgerIngestError(400, "image_base64 is required")
-    text = value.strip()
-    if text.lower().startswith("data:"):
-        header, separator, payload = text.partition(",")
-        if not separator or "base64" not in header.lower():
-            raise BurgerIngestError(400, "image_base64 data URL must be base64")
-        text = payload
-    compact = "".join(text.split())
-    if not compact:
-        raise BurgerIngestError(400, "image_base64 is required")
-    padded = compact + ("=" * ((-len(compact)) % 4))
-    try:
-        content = base64.b64decode(padded, validate=True)
-    except binascii.Error as exc:
-        raise BurgerIngestError(400, "image_base64 is not valid base64") from exc
-    if not content:
-        raise BurgerIngestError(400, "image_base64 is required")
-    return content
-
-
-def _detect_image(content: bytes) -> tuple[str, str]:
-    if len(content) >= 12 and content.startswith(b"RIFF") and content[8:12] == b"WEBP":
-        return "image/webp", ".webp"
-    for magic, mime_type, extension in _IMAGE_SIGNATURES:
-        if content.startswith(magic):
-            return mime_type, extension
-    raise BurgerIngestError(400, "image must be JPEG, PNG, WebP, or GIF")
-
-
-def _check_size(content: bytes, max_bytes: int | None) -> None:
-    limit = DEFAULT_MAX_DOWNLOAD_BYTES if max_bytes is None else max_bytes
-    if limit and limit > 0 and len(content) > limit:
-        raise BurgerIngestError(413, f"image exceeds limit of {limit} bytes")
-
-
-def _find_existing_image(manifest_path: Path, picking_name: str, content_sha256: str) -> dict | None:
-    if not manifest_path.exists():
-        return None
-    for entry in load_manifest_entries(manifest_path):
-        if entry.get("shipment_reference") != picking_name or entry.get("sha256") != content_sha256:
-            continue
-        local_path = Path(str(entry.get("local_path") or ""))
-        if local_path.is_file():
-            return entry
-    return None
-
-
-def _require_file_url(full_cfg: dict, local_path: Path | str) -> str:
-    file_url = get_local_file_url(full_cfg, str(local_path))
-    if not file_url:
-        raise BurgerIngestError(503, "unable to build local POD URL")
-    return file_url
+    _append_audit(
+        Path(runtime_dir) if runtime_dir is not None else BURGER_RUNTIME_DIR,
+        {
+            "received_at": received_at,
+            "request_id": request_id,
+            "picking_name": display_picking,
+            "canonical_picking_name": canonical_picking,
+            "file_name": file_name,
+            "stored_file_name": destination.name,
+            "sha256": sha256,
+            "local_path": str(destination),
+            "manifest_path": str(manifest_path),
+            "duplicate": duplicate,
+            "tracking_number": tracking_number,
+            "pod_time": pod_time,
+            "push_status": push_summary.get("status"),
+            "push_target_id": push_summary.get("target_id"),
+            "push_odoo_url": push_summary.get("odoo_url"),
+            "push_error": push_summary.get("error"),
+        },
+    )
+    return result

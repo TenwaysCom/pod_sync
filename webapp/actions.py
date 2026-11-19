@@ -523,7 +523,11 @@ def load_runtime_config_snapshot(config_path: str | None = None):
         ("westerman_api", "Westerman API", "api_key"),
         ("burger_api", "Burger", "app_key"),
     ):
-        source_cfg = payload.get(key) or {}
+        lookup_key = key
+        if key == "burger_api" and isinstance(payload.get("burger_ingest"), dict) and payload.get("burger_ingest"):
+            lookup_key = "burger_ingest"
+            secret_field = "api_token"
+        source_cfg = payload.get(lookup_key) or {}
         if not isinstance(source_cfg, dict):
             source_cfg = {}
         if key == "burger_api":
@@ -532,7 +536,7 @@ def load_runtime_config_snapshot(config_path: str | None = None):
             enabled = bool(source_cfg.get("enabled", False))
         sources.append(
             {
-                "key": key,
+                "key": lookup_key,
                 "label": label,
                 "enabled": enabled,
                 "warehouse": source_cfg.get("warehouse") or ("Burger" if key == "burger_api" else None),
