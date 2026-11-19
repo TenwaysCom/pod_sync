@@ -5,6 +5,7 @@
 ## 核心文档
 
 - [POD 同步系统项目交接文档](docs/HANDOVER.md)
+- [通过 Issue 跟踪需求改动](CONTRIBUTING.md)
 
 当前仓库只保留 4 类内容：
 
